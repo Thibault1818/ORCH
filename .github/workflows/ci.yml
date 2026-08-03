@@ -48,12 +48,12 @@ jobs:
           export HOME="$SANDBOX/home"
           export XDG_CONFIG_HOME="$SANDBOX/xdg-config"
           export XDG_CACHE_HOME="$SANDBOX/xdg-cache"
-          export NPM_CONFIG_PREFIX="$SANDBOX/prefix"
           export NPM_CONFIG_CACHE="$SANDBOX/npm-cache"
           export NPM_CONFIG_USERCONFIG="$SANDBOX/npmrc"
-          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$NPM_CONFIG_PREFIX" "$NPM_CONFIG_CACHE"
-          npm install -g "git+https://github.com/Thibault1818/ORCH.git#$GITHUB_SHA" --prefix "$NPM_CONFIG_PREFIX"
-          export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
+          TEMP_PREFIX="$SANDBOX/prefix"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$TEMP_PREFIX" "$NPM_CONFIG_CACHE"
+          npm install -g "git+https://github.com/Thibault1818/ORCH.git#$GITHUB_SHA" --prefix "$TEMP_PREFIX"
+          export PATH="$TEMP_PREFIX/bin:$PATH"
           orch --version
           orch --help
           orch init "$SANDBOX/project" --adapter codex

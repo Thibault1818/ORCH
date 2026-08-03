@@ -35,8 +35,7 @@
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
     "benchmark": "tsx scripts/benchmark.ts",
-    "load-test": "tsx scripts/load-test.ts",
-    "prepublishOnly": "node -e \"throw new Error('This private fork must not be published to npm')\""
+    "load-test": "tsx scripts/load-test.ts"
   },
   "keywords": [
     "ai-agent",
