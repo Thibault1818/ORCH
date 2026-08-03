@@ -4,6 +4,8 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import type { Command } from 'commander';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 export function registerSetupCommand(program: Command): void {
   program.command('setup [integration]')
@@ -11,7 +13,13 @@ export function registerSetupCommand(program: Command): void {
     .option('--yes', 'Confirm the requested configuration change')
     .action(async (integration: string | undefined, options: { yes?: boolean }) => {
       if (!integration) {
-        console.log('ORCH is installed. No user configuration was changed.');
+        const { detectWorkflowCapabilities } = await import('../../infrastructure/workflow/native-adapters.js');
+        const [capabilities, git] = await Promise.all([detectWorkflowCapabilities(), version('git')]);
+        console.log(`ORCH is installed on ${process.version}. No user configuration was changed.`);
+        console.log(`Git: ${git}`);
+        console.log(`Codex: ${capabilities.codex.available ? capabilities.codex.version : capabilities.codex.detail}`);
+        console.log(`Claude: ${capabilities.claude.available ? capabilities.claude.version : capabilities.claude.detail}`);
+        console.log('Next: initialize a project with orch init <directory>, then run orch workflow doctor.');
         console.log('Optional: orch setup claude-integration');
         return;
       }
@@ -29,6 +37,7 @@ export function registerSetupCommand(program: Command): void {
       console.log(`Installed Claude integration: ${destination}`);
     });
 }
+async function version(command: string): Promise<string> { try { return (await promisify(execFile)(command, ['--version'])).stdout.trim(); } catch { return 'unavailable'; } }
 
 async function confirm(question: string): Promise<boolean> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) return false;

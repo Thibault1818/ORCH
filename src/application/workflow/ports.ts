@@ -28,12 +28,12 @@ export interface OpusRolePort {
 
 export interface GitEvidence { branch: string; worktree: string; commit: string; diff: string; diff_hash: string; files_changed: string[]; insertions: number; deletions: number; risk_signals: string[]; }
 export interface WorkflowGitPort {
-  prepare(jobId: string): Promise<{ branch: string; worktree: string }>;
+  prepare(jobId: string): Promise<{ branch: string; worktree: string; target_branch: string; base_commit: string }>;
   inspect(branch: string, worktree: string): Promise<GitEvidence>;
   runChecks(worktree: string, commit: string, commands: string[]): Promise<CheckResults>;
   currentCommit(branch: string): Promise<string>;
-  isMerged(branch: string, commit: string): Promise<boolean>;
-  merge(branch: string): Promise<{ success: boolean; detail: string }>;
+  isMerged(branch: string, commit: string, targetBranch: string, baseCommit: string): Promise<boolean>;
+  merge(branch: string, targetBranch: string, baseCommit: string): Promise<{ success: boolean; detail: string }>;
 }
 
 export interface WorkflowRolePorts { codex: CodexRolePort; fable: FableRolePort; opus: OpusRolePort; git: WorkflowGitPort; }

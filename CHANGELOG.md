@@ -3,6 +3,20 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## 1.1.0-th.1 (2026-08-03)
+
+### Added
+
+- Recoverable Codex-Fable-Opus workflow with strict verdict schemas, compact versioned passports, immutable artifacts, invocation receipts, native continuation detection, and audited passport handoffs.
+- Safe `orch setup`, workflow doctor/status/log/artifact commands, explicit session rotation, hard Fable call caps, role-specific execution profiles, and per-role usage accounting.
+- Fake Claude/Codex executable tests, restart reconciliation tests, real Git worktree and stale-evidence tests, and exact-SHA installation CI on macOS/Linux with Node 20/24.
+
+### Security
+
+- Fable runs tool-free in an empty temporary workspace, Codex remains read-only, and Opus is confined to a dedicated worktree.
+- Automatic merge requires meaningful checks plus an unchanged target branch, commit, diff, and final Codex approval.
+- Consumer installation has no lifecycle integration and does not modify user configuration; optional Claude integration requires an explicit confirmed setup command.
+
 ## 1.0.27 (2026-07-04)
 
 ### New Features

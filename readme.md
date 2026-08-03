@@ -13,7 +13,7 @@
 <p align="center">
   <a href="https://github.com/Thibault1818/ORCH"><img src="https://img.shields.io/badge/source-secured%20fork-f59e0b?style=for-the-badge&labelColor=0a0a0a" alt="Secured fork" /></a>&nbsp;
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-f59e0b?style=for-the-badge&labelColor=0a0a0a" alt="MIT License" /></a>&nbsp;
-  <a href="#development"><img src="https://img.shields.io/badge/tests-1954%20passing-f59e0b?style=for-the-badge&labelColor=0a0a0a" alt="Tests" /></a>
+  <a href="#development"><img src="https://img.shields.io/badge/tests-Vitest-f59e0b?style=for-the-badge&labelColor=0a0a0a" alt="Tests" /></a>
 </p>
 
 <br/>
@@ -44,7 +44,7 @@ This repository is private/local package identity and is not published to npm. R
 
 ## Codex to Fable to Opus workflow
 
-The secured fork includes a recoverable, artifact-based implementation pipeline. Opus works on a dedicated worktree and cannot merge until deterministic checks pass and Codex returns `DONE` with explicit merge authorization for the unchanged commit and diff.
+The secured fork includes a recoverable, artifact-based implementation pipeline. Opus works on a dedicated worktree and cannot merge until deterministic checks pass and Codex returns `GO` with explicit merge authorization for the unchanged commit and diff.
 
 ```bash
 # First verify that the local Codex and Claude CLIs are available.
@@ -56,13 +56,13 @@ orch workflow start "Describe the change you want" --pipeline codex-fable-opus
 # Monitor or recover the printed job ID from another terminal.
 orch workflow status <job-id>
 orch workflow pause <job-id>
-orch workflow resume <job-id>
+orch workflow resume <job-id> --reason "continue after review"
 orch workflow logs <job-id>
 orch workflow artifacts <job-id>
 orch workflow cancel <job-id>
 ```
 
-Fable is limited to one turn per call in an empty temporary workspace, with a three-call absolute pre-Opus cap and no automatic retry. The normal path uses two pre-Opus calls. Canonical artifacts and session references live under `.orchestry/workflows/<job-id>/` with restrictive permissions and secret redaction.
+Fable is limited to one turn per call in an empty temporary workspace. Defaults are two pre-Opus calls, one mandatory review per implementation iteration, and five calls for the complete workflow. Reaching a cap pauses safely; ORCH never substitutes another model or silently exceeds it. Canonical artifacts and session references live under `.orchestry/workflows/<job-id>/` with restrictive permissions and secret redaction.
 
 <br/>
 
@@ -158,7 +158,7 @@ Install the fork from the pinned Git commit shown above. ORCH auto-initializes a
 
 ### Claude Code integration
 
-Installation never changes user configuration. To deliberately register the optional `/orch` skill, run `orch setup claude-integration` and confirm the change.
+Installation never changes user configuration. To deliberately register the optional `/orch` skill, run `orch setup claude-integration` and confirm the change. For an explicitly authorized persistent installation, use the same exact-SHA command with a dedicated prefix you control instead of the temporary prefix; do not install the unpinned upstream package.
 
 ### Recoverable low-token workflow
 
@@ -168,9 +168,9 @@ orch workflow start "Describe the implementation" --check "npm test"
 orch workflow status
 ```
 
-`GO` proceeds, `APPLY_AND_GO` lets Fable apply bounded changes without another Codex review, `REVISE` starts a bounded correction, and `STOP` requires explicit `orch workflow resume <job-id> --approve-stop`. Fable defaults to two pre-Opus calls, one post-Opus call per implementation iteration, and five calls for the whole workflow. `orch workflow status` shows the counters, estimated usage, context mode, and session rotations.
+`GO` proceeds, `APPLY_AND_GO` lets Fable apply bounded changes without another Codex plan review, `REVISE` starts a bounded correction, and `STOP` requires `orch workflow resume <job-id> --approve-stop --reason "approved exception"`. Every Opus iteration receives one Fable review before the final Codex decision. Fable defaults to two pre-Opus calls, one post-Opus call per implementation iteration, and five calls for the whole workflow. `orch workflow status` shows counters, character/token estimates, duration, failures, context mode, and session rotations.
 
-After a terminal restart, use `orch workflow status` and then `orch workflow resume <job-id>`. Use `orch workflow session-rotate <job-id> opus --reason "expired session"` when a stored identity is invalid. Native continuation is used only after verified capability detection; otherwise status reports `passport_handoff`.
+After a terminal restart, use `orch workflow status` and then `orch workflow resume <job-id> --reason "terminal restarted"`. If status reports an interrupted invocation without a durable receipt, retry only after review with `--retry-invocation --reason "approved retry"`. Use `orch workflow session-rotate <job-id> opus --reason "expired session"` when a stored identity is invalid. ORCH defaults to an honest compact `passport_handoff`, even when help output advertises resume. Set `ORCHESTRY_ENABLE_NATIVE_RESUME=1` only after empirically verifying continuation for the installed CLI versions; invalid identities then rotate once through a handoff, while ambiguous timeouts fail closed without a second call.
 
 To remove a sandbox installation, run `rm -rf "$TEMP_PREFIX"` and remove that prefix from the current shell's `PATH`. ORCH does not alter shell profiles.
 
@@ -653,7 +653,7 @@ src/
 ```bash
 npm run dev            # Run via tsx
 npm run build:dist     # Build ESM + DTS
-npm test               # 1954 tests via Vitest
+npm test               # Full Vitest suite
 npm run typecheck      # Strict TypeScript
 ```
 

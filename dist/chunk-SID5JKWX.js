@@ -1,4 +1,4 @@
-import { isTerminalWorkflowPhase, ARTIFACT_FILES, hashCanonical, artifactReference } from './chunk-D46P56MG.js';
+import { isTerminalWorkflowPhase, ARTIFACT_FILES, hashCanonical, artifactReference } from './chunk-HLWQUKYI.js';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -118,7 +118,6 @@ var DEFAULT_WORKFLOW_CONFIG = {
   max_output_bytes: 64e3,
   passport_max_bytes: 64e3,
   post_review: "always",
-  risk_triggers: ["authentication", "security", "secret", "migration", "deletion", "billing", "infrastructure", "deployment", "concurrency", "compliance"],
   profiles: {
     fable: { model: "fable", effort: "low", max_turns: 1, timeout_ms: 3e5, permission_mode: "read_only" },
     opus: { model: "opus", effort: "high", max_turns: 50, timeout_ms: 18e5, permission_mode: "worktree" },
@@ -136,38 +135,51 @@ var WorkflowEngine = class {
     if (!input.objective.trim()) throw new Error("Workflow objective must not be empty");
     const id2 = input.job_id ?? `wf_${nanoid(12)}`;
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    const config = { ...DEFAULT_WORKFLOW_CONFIG, ...input.config, profiles: { ...DEFAULT_WORKFLOW_CONFIG.profiles, ...input.config?.profiles } };
+    const config = { fable_pre_opus_cap: input.config?.fable_pre_opus_cap ?? DEFAULT_WORKFLOW_CONFIG.fable_pre_opus_cap, fable_post_opus_per_iteration_cap: input.config?.fable_post_opus_per_iteration_cap ?? DEFAULT_WORKFLOW_CONFIG.fable_post_opus_per_iteration_cap, fable_total_cap: input.config?.fable_total_cap ?? DEFAULT_WORKFLOW_CONFIG.fable_total_cap, max_input_bytes: input.config?.max_input_bytes ?? DEFAULT_WORKFLOW_CONFIG.max_input_bytes, max_output_bytes: input.config?.max_output_bytes ?? DEFAULT_WORKFLOW_CONFIG.max_output_bytes, passport_max_bytes: input.config?.passport_max_bytes ?? DEFAULT_WORKFLOW_CONFIG.passport_max_bytes, post_review: input.config?.post_review ?? DEFAULT_WORKFLOW_CONFIG.post_review, profiles: { fable: { ...DEFAULT_WORKFLOW_CONFIG.profiles.fable, ...input.config?.profiles?.fable }, opus: { ...DEFAULT_WORKFLOW_CONFIG.profiles.opus, ...input.config?.profiles?.opus }, codex: { ...DEFAULT_WORKFLOW_CONFIG.profiles.codex, ...input.config?.profiles?.codex } } };
     if (config.fable_pre_opus_cap < 1 || config.fable_pre_opus_cap > 3) throw new Error("Fable pre-Opus cap must be between 1 and 3");
     if (config.fable_post_opus_per_iteration_cap < 0 || config.fable_total_cap < config.fable_pre_opus_cap) throw new Error("Invalid Fable call caps");
-    const job = { schema_version: 1, job_id: id2, phase: "codex_brief", resume_phase: null, revision: 1, artifact_revision: 0, latest_artifact_hash: null, fable_pre_opus_calls: 0, fable_post_opus_calls: 0, fable_post_opus_iteration_calls: 0, fable_total_calls: 0, fix_cycles: 0, opus_iteration: 1, branch: null, worktree: null, current_commit: null, approved_plan_hash: null, last_verdict: null, blocker: null, next_action: "Codex creates the implementation brief", current_operation: null, created_at: now, updated_at: now };
+    if (config.post_review !== "always") throw new Error("Post-Opus Fable review is mandatory");
+    if (config.profiles.fable.effort !== "low" || config.profiles.fable.max_turns !== 1 || config.profiles.fable.permission_mode !== "read_only") throw new Error("Fable must use low effort, one turn, and read-only isolation");
+    if (config.profiles.codex.permission_mode !== "read_only") throw new Error("Codex review must remain read-only");
+    if (config.profiles.opus.permission_mode !== "worktree") throw new Error("Opus must use worktree permissions");
+    const availability = await Promise.all([this.ports.codex.available(), this.ports.fable.available(), this.ports.opus.available()]);
+    const unavailable = availability.filter((item) => !item.available).map((item) => item.detail);
+    if (unavailable.length) throw new Error(`Workflow capabilities blocked: ${unavailable.join("; ")}`);
+    const job = { schema_version: 1, job_id: id2, phase: "codex_brief", resume_phase: null, revision: 1, artifact_revision: 0, latest_artifact_hash: null, fable_pre_opus_calls: 0, fable_post_opus_calls: 0, fable_post_opus_iteration_calls: 0, fable_total_calls: 0, fix_cycles: 0, opus_iteration: 1, branch: null, worktree: null, target_branch: null, base_commit: null, current_commit: null, approved_plan_hash: null, reviewed_diff_hash: null, last_verdict: null, blocker: null, next_action: "Codex creates the implementation brief", current_operation: null, created_at: now, updated_at: now };
     const requiredChecks = (input.required_checks ?? []).map((command) => command.trim()).filter(Boolean);
-    const passport = { schema_version: 1, passport_revision: 1, job_id: id2, current_revision: 1, objective: input.objective, current_phase: "codex_brief", approved_plan_hash: null, acceptance_criteria: [], mandatory_amendments: [], decisions: [], allowed_file_scope: input.allowed_file_scope ?? [], required_checks: requiredChecks, current_blockers: [], next_action: job.next_action, artifacts: [], active_worktree: null, current_commit: null, session_references: { codex: null, fable: null, opus: null }, session_modes: { codex: "none", fable: "none", opus: "none" }, rotation_history: [], config };
-    const sessions = { schema_version: 1, job_id: id2, codex_thread_id: null, fable_session_id: null, opus_session_id: null, opus_plan_hash: null, modes: { codex: "none", fable: "none", opus: "none" }, rotation_history: [], usage: { codex: usage(), fable: usage(), opus: usage() }, updated_at: now };
+    const passport = { schema_version: 1, passport_revision: 1, job_id: id2, current_revision: 1, objective: input.objective, current_phase: "codex_brief", approved_plan_hash: null, latest_accepted_plan: null, hard_constraints: [], acceptance_criteria: [], mandatory_amendments: [], decisions: [], allowed_file_scope: input.allowed_file_scope ?? [], required_checks: requiredChecks, current_blockers: [], next_action: job.next_action, artifacts: [], active_worktree: null, target_branch: null, base_commit: null, current_commit: null, session_references: { codex: null, fable: null, opus: null }, session_modes: { codex: "none", fable: "none", opus: "none" }, rotation_history: [], config };
+    if (Buffer.byteLength(JSON.stringify(passport)) > config.passport_max_bytes) throw new Error("Initial workflow passport exceeded configured maximum");
+    const sessions = { schema_version: 1, job_id: id2, codex_thread_id: null, fable_session_id: null, opus_session_id: null, opus_plan_hash: null, modes: { codex: "none", fable: "none", opus: "none" }, rotation_history: [], recorded_invocations: [], usage: { codex: usage(), fable: usage(), opus: usage() }, updated_at: now };
     await this.store.createJob(job, passport, sessions);
     await this.event(id2, "workflow_started", { objective: input.objective });
     return id2;
   }
   async run(jobId) {
     while (true) {
-      const job = await this.requiredJob(jobId);
+      const job = await this.advance(jobId);
       if (isTerminalWorkflowPhase(job.phase) || job.phase === "paused" || job.phase === "blocked") return job;
-      try {
-        if (job.current_operation) {
-          if (job.phase === "merge_ready") {
-            await this.step(job);
-            continue;
-          }
-          await this.block(job, `Interrupted ${job.current_operation.phase} operation ${job.current_operation.invocation_id}; manual review is required before retry`);
-          continue;
+    }
+  }
+  async advance(jobId) {
+    const job = await this.requiredJob(jobId);
+    if (isTerminalWorkflowPhase(job.phase) || job.phase === "paused" || job.phase === "blocked") return job;
+    try {
+      if (job.current_operation) {
+        if (job.phase === "merge_ready" || await this.store.readInvocationReceipt(job.job_id, job.current_operation.invocation_id)) {
+          await this.step(job);
+          return this.requiredJob(jobId);
         }
-        const operation = { phase: job.phase, invocation_id: `inv_${nanoid(12)}`, started_at: (/* @__PURE__ */ new Date()).toISOString() };
-        if (!await this.store.reserveOperation(job.job_id, job.phase, operation)) return this.requiredJob(job.job_id);
-        await this.step({ ...job, current_operation: operation });
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        await this.event(jobId, "workflow_failed", { reason });
-        return this.store.transition(jobId, "failed", { blocker: reason, next_action: "Inspect workflow logs and artifacts" });
+        await this.block(job, `INTERRUPTED: ${job.current_operation.phase} operation ${job.current_operation.invocation_id} has no durable result; explicit retry approval is required`);
+        return this.requiredJob(jobId);
       }
+      const operation = { phase: job.phase, invocation_id: `inv_${nanoid(12)}`, started_at: (/* @__PURE__ */ new Date()).toISOString(), retry_count: 0 };
+      if (!await this.store.reserveOperation(job.job_id, job.phase, operation)) return this.requiredJob(job.job_id);
+      await this.step({ ...job, current_operation: operation });
+      return this.requiredJob(jobId);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      await this.event(jobId, "workflow_failed", { reason });
+      return this.store.transition(jobId, "failed", { blocker: reason, next_action: "Inspect workflow logs and artifacts" });
     }
   }
   async pause(jobId) {
@@ -175,13 +187,16 @@ var WorkflowEngine = class {
     if (isTerminalWorkflowPhase(job.phase) || job.phase === "paused") throw new Error(`Cannot pause workflow in ${job.phase}`);
     return this.transition(job, "paused", { resume_phase: job.phase, next_action: "Resume workflow" });
   }
-  async resume(jobId, approveStop = false) {
+  async resume(jobId, options = {}) {
     const job = await this.requiredJob(jobId);
     if (job.phase !== "paused" && job.phase !== "blocked") throw new Error(`Cannot resume workflow in ${job.phase}`);
     if (!job.resume_phase) throw new Error("Workflow has no recoverable phase");
-    if (job.blocker?.startsWith("STOP:") && !approveStop) throw new Error("STOP requires explicit --approve-stop confirmation");
+    const reason = options.reason?.trim();
+    if (job.blocker?.startsWith("STOP:") && (!options.approve_stop || !reason)) throw new Error("STOP requires --approve-stop and --reason");
+    if (job.blocker?.startsWith("INTERRUPTED:") && (!options.retry_invocation || !reason)) throw new Error("Interrupted invocation requires --retry-invocation and --reason");
+    const previous = job.current_operation;
     const resumed = await this.transition(job, job.resume_phase, { blocker: null, resume_phase: null, current_operation: null });
-    await this.event(jobId, "workflow_resumed", { phase: resumed.phase });
+    await this.event(jobId, "workflow_resumed", { phase: resumed.phase, reason, retried_invocation: previous?.invocation_id ?? null });
     return this.run(jobId);
   }
   async cancel(jobId) {
@@ -215,27 +230,28 @@ var WorkflowEngine = class {
   }
   async codexBrief(job) {
     const { passport, sessions } = await this.context(job.job_id);
-    const result = await this.ports.codex.brief(passport, sessions.codex_thread_id);
+    const result = await this.invoke(job, "codex", () => this.ports.codex.brief(passport, sessions.codex_thread_id));
     const brief = validateCodexBrief(result.value);
     this.assertJob(job, brief.job_id);
-    await this.recordRole(job.job_id, "codex", result);
+    await this.recordRole(job, "codex", result);
     const stored = await this.artifact(job, "codex_brief", "codex", brief, validateCodexBrief);
     await this.addArtifact(job.job_id, stored, ARTIFACT_FILES.codex_brief);
+    await this.updatePassport(job.job_id, { hard_constraints: brief.constraints });
     await this.transition(await this.requiredJob(job.job_id), "fable_plan", { next_action: "Fable creates plan revision 1" });
   }
   async fablePlan(job) {
     const passportBefore = await this.requiredPassport(job.job_id);
-    if (!await this.reserveFable(job, "pre")) return this.block(job, "Fable call cap reached before an approvable plan");
+    if (!await this.reserveFableInvocation(job, "pre")) return this.block(job, "Fable call cap reached before an approvable plan");
     const { passport } = await this.context(job.job_id);
     const brief = await this.payload(job, "codex_brief", 1);
     const previous = job.revision > 1 ? await this.optionalPayload(job, "fable_plan", job.revision - 1) : null;
     const options = await this.fableOptions(passport);
-    const result = await this.fableCall(job.job_id, options, () => this.ports.fable.plan(passport, brief, previous, passport.mandatory_amendments, options));
+    const result = await this.fableCall(job, options, () => this.ports.fable.plan(passport, brief, previous, passport.mandatory_amendments, options));
     this.assertFableOutput(passportBefore, result.value);
     const plan = validateFablePlan(result.value);
     this.assertJob(job, plan.job_id);
     if (plan.revision !== job.revision) throw new Error("Stale Fable plan revision");
-    await this.recordRole(job.job_id, "fable", result);
+    await this.recordRole(job, "fable", result);
     const fresh = await this.requiredJob(job.job_id);
     const stored = await this.artifact(fresh, "fable_plan", "fable", plan, validateFablePlan);
     await this.addArtifact(job.job_id, stored, ARTIFACT_FILES.fable_plan.replace("%REV%", String(job.revision).padStart(3, "0")));
@@ -245,14 +261,14 @@ var WorkflowEngine = class {
   async codexPlanReview(job) {
     const { passport, sessions } = await this.context(job.job_id);
     const plan = await this.payload(job, "fable_plan");
-    const result = await this.ports.codex.reviewPlan(passport, plan, sessions.codex_thread_id);
+    const result = await this.invoke(job, "codex", () => this.ports.codex.reviewPlan(passport, plan, sessions.codex_thread_id));
     const review = validateCodexPlanReview(result.value);
     this.assertJob(job, review.job_id);
     if (review.revision !== job.revision) throw new Error("Stale Codex plan review revision");
-    await this.recordRole(job.job_id, "codex", result);
+    await this.recordRole(job, "codex", result);
     const stored = await this.artifact(job, "codex_plan_review", "codex", review, validateCodexPlanReview);
     await this.addArtifact(job.job_id, stored, ARTIFACT_FILES.codex_plan_review.replace("%REV%", String(job.revision).padStart(3, "0")));
-    await this.decision(job.job_id, review.verdict, review.reason);
+    await this.decision(job, review.verdict, review.reason);
     const fresh = await this.requiredJob(job.job_id);
     if (review.verdict === "STOP") return this.block(fresh, `STOP: ${review.reason}`);
     if (review.verdict === "REVISE" || review.requires_re_review) {
@@ -261,53 +277,47 @@ var WorkflowEngine = class {
       return;
     }
     const approvedHash = hashCanonical(plan);
-    await this.updatePassport(job.job_id, { approved_plan_hash: approvedHash, acceptance_criteria: review.acceptance_criteria, mandatory_amendments: review.required_changes });
+    const latestPlan = [...(await this.requiredPassport(job.job_id)).artifacts].reverse().find((artifact) => artifact.role === "fable" && artifact.phase === "fable_plan") ?? null;
+    await this.updatePassport(job.job_id, { approved_plan_hash: approvedHash, latest_accepted_plan: latestPlan, acceptance_criteria: review.acceptance_criteria, mandatory_amendments: review.required_changes });
     await this.transition(fresh, "fable_final_prompt", { approved_plan_hash: approvedHash, last_verdict: review.verdict, next_action: "Compile final Opus prompt" });
   }
   async finalPrompt(job) {
-    const { passport, sessions } = await this.context(job.job_id);
+    const { passport } = await this.context(job.job_id);
     const plan = await this.payload(job, "fable_plan");
     let result;
-    let role;
     const fablePhase = job.fix_cycles > 0 ? "correction" : "pre";
-    if ((job.fix_cycles > 0 || job.fable_pre_opus_calls < passport.config.fable_pre_opus_cap) && await this.reserveFable(job, fablePhase)) {
-      const options = await this.fableOptions(passport);
-      result = await this.fableCall(job.job_id, options, () => this.ports.fable.finalPrompt(passport, plan, passport.mandatory_amendments, options));
-      this.assertFableOutput(passport, result.value);
-      role = "fable";
-    } else {
-      result = await this.ports.codex.compileFinalPrompt(passport, plan, sessions.codex_thread_id);
-      role = "codex";
-      await this.event(job.job_id, "fable_cap_fallback", { role: "codex" });
-    }
+    if (!((job.fix_cycles > 0 || job.fable_pre_opus_calls < passport.config.fable_pre_opus_cap || await this.hasInvocationReceipt(job)) && await this.reserveFableInvocation(job, fablePhase))) return this.block(job, "Fable call cap reached before final implementation instructions");
+    const options = await this.fableOptions(passport);
+    result = await this.fableCall(job, options, () => this.ports.fable.finalPrompt(passport, plan, passport.mandatory_amendments, options));
+    this.assertFableOutput(passport, result.value);
     if (typeof result.value !== "string" || !result.value.trim()) throw new Error("Final prompt must be non-empty");
-    await this.recordRole(job.job_id, role, result);
+    await this.recordRole(job, "fable", result);
     const fresh = await this.requiredJob(job.job_id);
-    const stored = await this.store.writeTextArtifact({ job_id: job.job_id, name: "fable_final_prompt", phase: "fable_final_prompt", revision: fresh.artifact_revision + 1, producing_role: role, parent_artifact_hash: fresh.latest_artifact_hash, payload: result.value });
+    const stored = await this.store.writeTextArtifact({ job_id: job.job_id, name: "fable_final_prompt", phase: "fable_final_prompt", revision: fresh.artifact_revision + 1, invocation_id: this.invocation(job), producing_role: "fable", parent_artifact_hash: fresh.latest_artifact_hash, payload: result.value });
     await this.addArtifact(job.job_id, stored, ARTIFACT_FILES.fable_final_prompt);
-    let prepared = { branch: fresh.branch, worktree: fresh.worktree };
-    if (!prepared.branch || !prepared.worktree) prepared = await this.ports.git.prepare(job.job_id);
-    await this.transition(await this.requiredJob(job.job_id), "opus_execution", { branch: prepared.branch, worktree: prepared.worktree, next_action: "Opus implements in dedicated worktree" });
-    await this.updatePassport(job.job_id, { active_worktree: prepared.worktree });
+    let prepared = { branch: fresh.branch, worktree: fresh.worktree, target_branch: fresh.target_branch, base_commit: fresh.base_commit };
+    if (!prepared.branch || !prepared.worktree || !prepared.target_branch || !prepared.base_commit) prepared = await this.ports.git.prepare(job.job_id);
+    await this.transition(await this.requiredJob(job.job_id), "opus_execution", { branch: prepared.branch, worktree: prepared.worktree, target_branch: prepared.target_branch, base_commit: prepared.base_commit, next_action: "Opus implements in dedicated worktree" });
+    await this.updatePassport(job.job_id, { active_worktree: prepared.worktree, target_branch: prepared.target_branch, base_commit: prepared.base_commit });
   }
   async opusExecution(job) {
     if (!job.worktree || !job.branch) throw new Error("Opus worktree is missing");
     const { passport, sessions } = await this.context(job.job_id);
     const prompt = await this.textPayload(job, "fable_final_prompt");
-    const mode = sessions.opus_session_id && sessions.opus_plan_hash === job.approved_plan_hash ? "passport_handoff" : "new";
-    const result = await this.ports.opus.execute(passport, prompt, job.worktree, mode === "passport_handoff" ? sessions.opus_session_id : null, mode);
+    const mode = sessions.opus_session_id && sessions.opus_plan_hash === job.approved_plan_hash ? "native_resume" : "new";
+    const result = await this.invoke(job, "opus", () => this.ports.opus.execute(passport, prompt, job.worktree, mode === "native_resume" ? sessions.opus_session_id : null, mode));
     const opus = validateOpusResult(result.value);
     this.assertJob(job, opus.job_id);
-    await this.recordRole(job.job_id, "opus", result);
+    await this.recordRole(job, "opus", result);
     const stored = await this.artifact(job, "opus_report", "opus", opus, validateOpusResult);
     await this.addArtifact(job.job_id, stored, ARTIFACT_FILES.opus_report);
     if (opus.status !== "completed" || opus.unresolved.length > 0) throw new Error(`Opus execution is not complete: ${opus.summary}`);
     const evidence = await this.ports.git.inspect(job.branch, job.worktree);
     this.assertAllowedScope(passport, evidence.files_changed);
     const fresh = await this.requiredJob(job.job_id);
-    const diffStored = await this.store.writeTextArtifact({ job_id: job.job_id, name: "opus_diff", phase: "opus_execution", revision: fresh.artifact_revision + 1, producing_role: "orchestrator", parent_artifact_hash: fresh.latest_artifact_hash, payload: evidence.diff || "(empty diff)" });
+    const diffStored = await this.store.writeTextArtifact({ job_id: job.job_id, name: "opus_diff", phase: "opus_execution", revision: fresh.artifact_revision + 1, invocation_id: this.invocation(job), producing_role: "orchestrator", parent_artifact_hash: fresh.latest_artifact_hash, payload: evidence.diff || "(empty diff)" });
     await this.addArtifact(job.job_id, diffStored, ARTIFACT_FILES.opus_diff);
-    await this.transition(await this.requiredJob(job.job_id), "codex_technical_review", { current_commit: evidence.commit, next_action: "Run checks and Codex technical review" });
+    await this.transition(await this.requiredJob(job.job_id), "codex_technical_review", { current_commit: evidence.commit, reviewed_diff_hash: evidence.diff_hash, next_action: "Run checks and Codex technical review" });
     await this.updatePassport(job.job_id, { current_commit: evidence.commit });
   }
   async technicalReview(job) {
@@ -320,33 +330,32 @@ var WorkflowEngine = class {
     let fresh = await this.requiredJob(job.job_id);
     const checkStored = await this.artifact(fresh, "test_results", "orchestrator", checks, validateCheckResults);
     await this.addArtifact(job.job_id, checkStored, ARTIFACT_FILES.test_results);
-    const review = { job_id: job.job_id, reviewed_commit: evidence.commit, checks_passed: checks.passed, evidence: [evidence.diff_hash, ...checks.checks.map((check) => check.command)], required_fixes: checks.passed ? [] : ["Resolve failed verification checks"], concise_reason: "Deterministic evidence package prepared for final Codex review" };
+    const review = { job_id: job.job_id, reviewed_commit: evidence.commit, checks_passed: checks.passed, evidence: [evidence.diff_hash, ...checks.checks.map((check) => check.command)], required_fixes: checks.passed ? [] : ["Resolve failed verification checks"], concise_reason: "Deterministic evidence package for Fable and final Codex review" };
     fresh = await this.requiredJob(job.job_id);
     const stored = await this.artifact(fresh, "codex_technical_review", "orchestrator", review, validateCodexTechnicalReview);
     await this.addArtifact(job.job_id, stored, ARTIFACT_FILES.codex_technical_review);
-    const needsFable = passport.config.post_review === "always" || passport.config.post_review === "risk_based" && this.isRisky(passport, evidence);
-    await this.transition(await this.requiredJob(job.job_id), needsFable ? "fable_compliance_review" : "codex_synthesis", { current_commit: evidence.commit, next_action: needsFable ? "Fable checks plan compliance" : "Codex synthesizes evidence" });
+    await this.transition(await this.requiredJob(job.job_id), "fable_compliance_review", { current_commit: evidence.commit, next_action: "Fable checks plan compliance" });
   }
   async complianceReview(job) {
     const { passport } = await this.context(job.job_id);
     if (!job.branch || !job.worktree) throw new Error("Worktree evidence is missing");
-    if (!await this.reserveFable(job, "post")) return this.block(job, "Fable post-Opus or whole-workflow call cap reached");
+    if (!await this.reserveFableInvocation(job, "post")) return this.block(job, "Fable post-Opus or whole-workflow call cap reached");
     const plan = await this.payload(job, "fable_plan");
     const opus = await this.payload(job, "opus_report");
     const checks = await this.payload(job, "test_results");
     const evidence = await this.ports.git.inspect(job.branch, job.worktree);
     if (evidence.commit !== checks.commit) throw new Error("Compliance evidence is stale");
     const options = await this.fableOptions(passport);
-    const result = await this.fableCall(job.job_id, options, () => this.ports.fable.compliance(passport, plan, opus, evidence, checks, options));
+    const result = await this.fableCall(job, options, () => this.ports.fable.compliance(passport, plan, opus, evidence, checks, options));
     this.assertFableOutput(passport, result.value);
     const review = validateFableComplianceReview(result.value);
     this.assertJob(job, review.job_id);
     if (review.approved_plan_hash !== job.approved_plan_hash) throw new Error("Fable compliance review used stale plan");
-    await this.recordRole(job.job_id, "fable", result);
+    await this.recordRole(job, "fable", result);
     const fresh = await this.requiredJob(job.job_id);
     const stored = await this.artifact(fresh, "fable_compliance_review", "fable", review, validateFableComplianceReview);
     await this.addArtifact(job.job_id, stored, ARTIFACT_FILES.fable_compliance_review);
-    await this.transition(await this.requiredJob(job.job_id), "codex_synthesis", { next_action: "Codex synthesizes both reviews" });
+    await this.transition(await this.requiredJob(job.job_id), "codex_synthesis", { next_action: "Codex performs final evidence review" });
   }
   async synthesis(job) {
     const { passport, sessions } = await this.context(job.job_id);
@@ -355,15 +364,15 @@ var WorkflowEngine = class {
     const technical = await this.payload(job, "codex_technical_review");
     const checks = await this.payload(job, "test_results");
     const compliance = await this.optionalPayload(job, "fable_compliance_review");
-    const result = await this.ports.codex.synthesize(passport, evidence, technical, compliance, checks, sessions.codex_thread_id);
+    const result = await this.invoke(job, "codex", () => this.ports.codex.synthesize(passport, evidence, technical, compliance, checks, sessions.codex_thread_id));
     const synthesis = validateCodexSynthesis(result.value);
     this.assertJob(job, synthesis.job_id);
     if (synthesis.reviewed_commit !== technical.reviewed_commit || synthesis.reviewed_commit !== checks.commit || synthesis.reviewed_commit !== evidence.commit) throw new Error("Synthesis reviewed_commit is stale");
-    await this.recordRole(job.job_id, "codex", result);
+    await this.recordRole(job, "codex", result);
     const fresh = await this.requiredJob(job.job_id);
     const stored = await this.artifact(fresh, "codex_synthesis", "codex", synthesis, validateCodexSynthesis);
     await this.addArtifact(job.job_id, stored, ARTIFACT_FILES.codex_synthesis);
-    await this.decision(job.job_id, synthesis.verdict, synthesis.reason);
+    await this.decision(job, synthesis.verdict, synthesis.reason);
     const current = await this.requiredJob(job.job_id);
     if (synthesis.verdict === "STOP") return this.block(current, `STOP: ${synthesis.reason}`);
     if (synthesis.verdict === "REVISE") {
@@ -373,32 +382,31 @@ var WorkflowEngine = class {
       return;
     }
     if (synthesis.requires_re_review) return this.block(current, "Codex GO requires another review and cannot merge");
-    if (!synthesis.merge_allowed || !checks.passed || checks.checks.length === 0 || !technical.checks_passed || passport.required_checks.length === 0) return this.block(current, "Meaningful project verification is required before merge");
+    if (!synthesis.merge_allowed || !checks.passed || checks.checks.length === 0 || !technical.checks_passed || !hasMeaningfulChecks(checks.checks.map((check) => check.command)) || !hasMeaningfulChecks(passport.required_checks)) return this.block(current, "Meaningful project verification is required before merge");
     await this.transition(current, "merge_ready", { last_verdict: "GO", current_commit: synthesis.reviewed_commit, next_action: "Verify immutable approval and merge" });
   }
   async merge(job) {
-    if (!job.branch || !job.worktree || !job.current_commit) throw new Error("Merge metadata is missing");
+    if (!job.branch || !job.worktree || !job.target_branch || !job.base_commit || !job.current_commit || !job.reviewed_diff_hash) throw new Error("Merge metadata is missing");
     const synthesis = await this.payload(job, "codex_synthesis");
     const checks = await this.payload(job, "test_results");
-    const reviewedDiff = await this.textPayload(job, "opus_diff");
     const actual = await this.ports.git.currentCommit(job.branch);
     const approvalValid = synthesis.verdict === "GO" && synthesis.merge_allowed && !synthesis.requires_re_review && checks.passed && checks.checks.length > 0 && synthesis.reviewed_commit === checks.commit && actual === synthesis.reviewed_commit;
-    if (approvalValid && await this.ports.git.isMerged(job.branch, actual)) {
+    if (approvalValid && await this.ports.git.isMerged(job.branch, actual, job.target_branch, job.base_commit)) {
       await this.transition(job, "done", { next_action: "Workflow complete" });
-      await this.event(job.job_id, "merge_reconciled", { commit: actual });
+      await this.event(job.job_id, "merge_reconciled", { commit: actual, target_branch: job.target_branch });
       return;
     }
     const evidence = await this.ports.git.inspect(job.branch, job.worktree);
     const rechecked = validateCheckResults(await this.ports.git.runChecks(job.worktree, evidence.commit, (await this.requiredPassport(job.job_id)).required_checks));
-    if (synthesis.verdict !== "GO" || !synthesis.merge_allowed || !checks.passed || !rechecked.passed || rechecked.checks.length === 0 || synthesis.reviewed_commit !== checks.commit || rechecked.commit !== checks.commit || actual !== synthesis.reviewed_commit || evidence.commit !== synthesis.reviewed_commit || evidence.diff_hash !== hashCanonical(reviewedDiff)) throw new Error("Merge approval is stale or incomplete");
-    const merged = await this.ports.git.merge(job.branch);
+    if (synthesis.verdict !== "GO" || !synthesis.merge_allowed || !checks.passed || !rechecked.passed || !hasMeaningfulChecks(rechecked.checks.map((check) => check.command)) || synthesis.reviewed_commit !== checks.commit || rechecked.commit !== checks.commit || actual !== synthesis.reviewed_commit || evidence.commit !== synthesis.reviewed_commit || evidence.diff_hash !== job.reviewed_diff_hash) throw new Error("Merge approval is stale or incomplete");
+    const merged = await this.ports.git.merge(job.branch, job.target_branch, job.base_commit);
     if (!merged.success) throw new Error(`Merge failed closed: ${merged.detail}`);
     await this.transition(job, "done", { next_action: "Workflow complete" });
     await this.event(job.job_id, "workflow_done", { commit: actual, diff_hash: evidence.diff_hash });
   }
   async artifact(job, name, role, value, validate) {
     const fresh = await this.requiredJob(job.job_id);
-    return this.store.writeArtifact({ job_id: job.job_id, name, phase: fresh.phase, revision: fresh.artifact_revision + 1, producing_role: role, parent_artifact_hash: fresh.latest_artifact_hash, payload: value, validate });
+    return this.store.writeArtifact({ job_id: job.job_id, name, phase: fresh.phase, revision: fresh.artifact_revision + 1, invocation_id: this.invocation(job), producing_role: role, parent_artifact_hash: fresh.latest_artifact_hash, payload: value, validate });
   }
   async payload(job, name, revision2 = job.revision) {
     const result = await this.store.readArtifact(job.job_id, name, revision2);
@@ -414,10 +422,7 @@ var WorkflowEngine = class {
     return result.payload;
   }
   async transition(job, phase, patch = {}) {
-    const updated = await this.store.transition(job.job_id, phase, { ...patch, current_operation: null });
-    await this.updatePassport(job.job_id, { current_phase: phase, current_revision: updated.revision, next_action: updated.next_action, current_blockers: updated.blocker ? [updated.blocker] : [] });
-    await this.event(job.job_id, "phase_changed", { from: job.phase, to: phase });
-    return updated;
+    return this.store.commitTransition(job.job_id, phase, { ...patch, current_operation: null }, {});
   }
   async block(job, reason) {
     await this.transition(job, "blocked", { blocker: reason, resume_phase: job.phase, next_action: "Provide human input, then resume" });
@@ -425,11 +430,15 @@ var WorkflowEngine = class {
   }
   async addArtifact(jobId, stored, filename) {
     const passport = await this.requiredPassport(jobId);
-    await this.updatePassport(jobId, { artifacts: [...passport.artifacts, artifactReference(filename, stored)] });
+    const reference = artifactReference(filename, stored);
+    if (passport.artifacts.some((item) => item.filename === reference.filename && item.hash === reference.hash)) return;
+    await this.updatePassport(jobId, { artifacts: [...passport.artifacts, reference] });
   }
-  async decision(jobId, verdict, reason) {
-    const passport = await this.requiredPassport(jobId);
-    await this.updatePassport(jobId, { decisions: [...passport.decisions, { verdict, reason, timestamp: (/* @__PURE__ */ new Date()).toISOString() }] });
+  async decision(job, verdict, reason) {
+    const passport = await this.requiredPassport(job.job_id);
+    const invocationId = this.invocation(job);
+    if (passport.decisions.some((item) => item.invocation_id === invocationId)) return;
+    await this.updatePassport(job.job_id, { decisions: [...passport.decisions, { invocation_id: invocationId, verdict, reason, timestamp: (/* @__PURE__ */ new Date()).toISOString() }] });
   }
   async updatePassport(jobId, patch) {
     const passport = await this.requiredPassport(jobId);
@@ -447,34 +456,70 @@ var WorkflowEngine = class {
     await this.updatePassport(jobId, { session_references: { codex: updated.codex_thread_id, fable: updated.fable_session_id, opus: updated.opus_session_id }, session_modes: updated.modes, rotation_history: updated.rotation_history });
     await this.event(jobId, "session_rotated", rotation);
   }
-  async recordRole(jobId, role, result) {
+  async recordRole(job, role, result) {
+    const jobId = job.job_id;
+    const invocationId = this.invocation(job);
     const sessions = await this.requiredSessions(jobId);
+    if (sessions.recorded_invocations.includes(invocationId)) return;
     const u = sessions.usage[role];
     const inputChars = result.usage?.input_chars ?? 0;
     const outputChars = result.usage?.output_chars ?? Buffer.byteLength(typeof result.value === "string" ? result.value : JSON.stringify(result.value));
     const nextUsage = { calls: u.calls + 1, input_chars: u.input_chars + inputChars, output_chars: u.output_chars + outputChars, input_tokens: u.input_tokens + (result.usage?.input_tokens ?? 0), output_tokens: u.output_tokens + (result.usage?.output_tokens ?? 0), estimated_tokens: u.estimated_tokens + Math.ceil((inputChars + outputChars) / 4), cache_read: u.cache_read + (result.usage?.cache_read ?? 0), cache_write: u.cache_write + (result.usage?.cache_write ?? 0), duration_ms: u.duration_ms + (result.usage?.duration_ms ?? 0), failed_calls: u.failed_calls, resumes: u.resumes + (result.resumed ? 1 : 0), compactions: u.compactions + (result.usage?.compactions ?? 0) };
-    const job = await this.requiredJob(jobId);
+    const current = await this.requiredJob(jobId);
     const mode = result.session_mode ?? (result.resumed ? "native_resume" : result.resume_failed ? "passport_handoff" : result.session_id ? "new" : "none");
-    const updated = { ...sessions, codex_thread_id: role === "codex" ? result.session_id ?? sessions.codex_thread_id : sessions.codex_thread_id, fable_session_id: role === "fable" ? result.session_id ?? sessions.fable_session_id : sessions.fable_session_id, opus_session_id: role === "opus" ? result.session_id ?? sessions.opus_session_id : sessions.opus_session_id, opus_plan_hash: role === "opus" ? job.approved_plan_hash : sessions.opus_plan_hash, modes: { ...sessions.modes, [role]: mode }, usage: { ...sessions.usage, [role]: nextUsage }, updated_at: (/* @__PURE__ */ new Date()).toISOString() };
+    const previous = role === "codex" ? sessions.codex_thread_id : role === "fable" ? sessions.fable_session_id : sessions.opus_session_id;
+    const next = result.session_id ?? previous;
+    const rotation = result.resume_failed ? { role, previous_id: previous, next_id: next, reason: "native continuation unavailable or invalid; passport handoff used", timestamp: (/* @__PURE__ */ new Date()).toISOString() } : null;
+    const updated = { ...sessions, codex_thread_id: role === "codex" ? next : sessions.codex_thread_id, fable_session_id: role === "fable" ? next : sessions.fable_session_id, opus_session_id: role === "opus" ? next : sessions.opus_session_id, opus_plan_hash: role === "opus" ? current.approved_plan_hash : sessions.opus_plan_hash, modes: { ...sessions.modes, [role]: mode }, rotation_history: rotation ? [...sessions.rotation_history, rotation] : sessions.rotation_history, recorded_invocations: [...sessions.recorded_invocations, invocationId], usage: { ...sessions.usage, [role]: nextUsage }, updated_at: (/* @__PURE__ */ new Date()).toISOString() };
     await this.store.writeSessions(updated);
-    await this.updatePassport(jobId, { session_references: { codex: updated.codex_thread_id, fable: updated.fable_session_id, opus: updated.opus_session_id }, session_modes: updated.modes });
-    if (result.resume_failed) await this.event(jobId, "session_resume_fallback", { role });
+    await this.updatePassport(jobId, { session_references: { codex: updated.codex_thread_id, fable: updated.fable_session_id, opus: updated.opus_session_id }, session_modes: updated.modes, rotation_history: updated.rotation_history });
+    await this.event(jobId, "role_call_completed", { invocation_id: invocationId, role, phase: job.phase, usage: result.usage ?? {} });
+    if (rotation) await this.event(jobId, "session_rotated", rotation);
   }
   async fableOptions(passport) {
     const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "orch-fable-empty-"));
     return { workspace, model: passport.config.profiles.fable.model, max_turns: 1, effort: "low", timeout_ms: passport.config.profiles.fable.timeout_ms, max_input_bytes: passport.config.max_input_bytes, max_output_bytes: passport.config.max_output_bytes };
   }
-  async fableCall(jobId, options, call) {
+  async fableCall(job, options, call) {
     try {
-      return await call();
-    } catch (error) {
-      const sessions = await this.requiredSessions(jobId);
-      const u = sessions.usage.fable;
-      await this.store.writeSessions({ ...sessions, usage: { ...sessions.usage, fable: { ...u, calls: u.calls + 1, failed_calls: u.failed_calls + 1 } }, updated_at: (/* @__PURE__ */ new Date()).toISOString() });
-      throw error;
+      return await this.invoke(job, "fable", call);
     } finally {
       await fs.rm(options.workspace, { recursive: true, force: true });
     }
+  }
+  async invoke(job, role, call) {
+    const invocationId = this.invocation(job);
+    const prior = await this.store.readInvocationReceipt(job.job_id, invocationId);
+    if (prior) {
+      if (prior.role !== role || prior.phase !== job.phase) throw new Error("Invocation receipt does not match workflow operation");
+      const result = prior.result;
+      await this.recordRole(job, role, result);
+      return result;
+    }
+    const started = Date.now();
+    try {
+      const result = await call();
+      result.usage = { ...result.usage, duration_ms: result.usage?.duration_ms ?? Date.now() - started };
+      const receipt = { schema_version: 1, job_id: job.job_id, invocation_id: invocationId, phase: job.phase, role, timestamp: (/* @__PURE__ */ new Date()).toISOString(), result };
+      await this.store.writeInvocationReceipt(receipt);
+      await this.recordRole(job, role, result);
+      return result;
+    } catch (error) {
+      await this.recordFailedRoleCall(job, role, Date.now() - started, error);
+      throw error;
+    }
+  }
+  async recordFailedRoleCall(job, role, durationMs, error) {
+    const sessions = await this.requiredSessions(job.job_id);
+    const invocationId = this.invocation(job);
+    if (sessions.recorded_invocations.includes(invocationId)) return;
+    const current = sessions.usage[role];
+    await this.store.writeSessions({ ...sessions, recorded_invocations: [...sessions.recorded_invocations, invocationId], usage: { ...sessions.usage, [role]: { ...current, calls: current.calls + 1, duration_ms: current.duration_ms + durationMs, failed_calls: current.failed_calls + 1 } }, updated_at: (/* @__PURE__ */ new Date()).toISOString() });
+    await this.event(job.job_id, "role_call_failed", { invocation_id: invocationId, role, phase: job.phase, input_chars: 0, output_chars: 0, estimated_tokens: 0, duration_ms: durationMs, reason: error instanceof Error ? error.message : String(error) });
+  }
+  invocation(job) {
+    if (!job.current_operation || job.current_operation.phase !== job.phase) throw new Error(`Workflow phase ${job.phase} has no reserved invocation`);
+    return job.current_operation.invocation_id;
   }
   async reserveFable(job, phase) {
     const passport = await this.requiredPassport(job.job_id);
@@ -485,6 +530,12 @@ var WorkflowEngine = class {
     await this.store.patchJob(job.job_id, { fable_total_calls: current.fable_total_calls + 1, fable_pre_opus_calls: current.fable_pre_opus_calls + (phase === "pre" ? 1 : 0), fable_post_opus_calls: current.fable_post_opus_calls + (phase === "post" ? 1 : 0), fable_post_opus_iteration_calls: current.fable_post_opus_iteration_calls + (phase === "post" ? 1 : 0) });
     return true;
   }
+  async reserveFableInvocation(job, phase) {
+    return await this.hasInvocationReceipt(job) || this.reserveFable(job, phase);
+  }
+  async hasInvocationReceipt(job) {
+    return await this.store.readInvocationReceipt(job.job_id, this.invocation(job)) !== null;
+  }
   assertFableOutput(passport, value) {
     if (Buffer.byteLength(typeof value === "string" ? value : JSON.stringify(value)) > passport.config.max_output_bytes) throw new Error("Fable output exceeded configured maximum");
   }
@@ -492,10 +543,6 @@ var WorkflowEngine = class {
     if (passport.allowed_file_scope.length === 0) return;
     const outside = files.filter((file) => !passport.allowed_file_scope.some((allowed) => file === allowed || file.startsWith(`${allowed.replace(/\/$/, "")}/`)));
     if (outside.length) throw new Error(`Opus changed files outside approved scope: ${outside.join(", ")}`);
-  }
-  isRisky(passport, evidence) {
-    const text2 = `${passport.objective} ${evidence.risk_signals.join(" ")}`.toLowerCase();
-    return passport.config.risk_triggers.some((trigger) => text2.includes(trigger.toLowerCase())) || evidence.files_changed.length >= 20;
   }
   assertJob(job, received) {
     if (received !== job.job_id) throw new Error(`Artifact job_id mismatch: ${received}`);
@@ -525,7 +572,10 @@ var WorkflowEngine = class {
 function usage() {
   return { calls: 0, input_chars: 0, output_chars: 0, input_tokens: 0, output_tokens: 0, estimated_tokens: 0, cache_read: 0, cache_write: 0, duration_ms: 0, failed_calls: 0, resumes: 0, compactions: 0 };
 }
+function hasMeaningfulChecks(commands) {
+  return commands.some((command) => /^(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|typecheck|lint|check|build)|exec\s+(?:vitest|jest|eslint|tsc))\b|^(?:npx\s+)?(?:vitest|jest|eslint|tsc)\b|^(?:pytest|python(?:3)?\s+-m\s+(?:pytest|unittest|compileall)|go\s+test|cargo\s+(?:test|check|clippy)|dotnet\s+(?:test|build)|mvn\s+test|gradle\s+test|make\s+(?:test|check|lint|build))\b/i.test(command.trim().replace(/\s+/g, " ")));
+}
 
 export { DEFAULT_WORKFLOW_CONFIG, WORKFLOW_SCHEMA_VERSION, WorkflowEngine, validateCheckResults, validateCodexBrief, validateCodexPlanReview, validateCodexSynthesis, validateCodexTechnicalReview, validateFableComplianceReview, validateFablePlan, validateOpusResult };
-//# sourceMappingURL=chunk-OQVYDZTZ.js.map
-//# sourceMappingURL=chunk-OQVYDZTZ.js.map
+//# sourceMappingURL=chunk-SID5JKWX.js.map
+//# sourceMappingURL=chunk-SID5JKWX.js.map

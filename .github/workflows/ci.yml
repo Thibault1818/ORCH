@@ -23,10 +23,19 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build:dist
+      - name: Verify reproducible distribution
+        run: |
+          shasum -a 256 $(git ls-files dist) > /tmp/dist-before.sha256
+          npm run build:dist
+          shasum -a 256 $(git ls-files dist) > /tmp/dist-after.sha256
+          diff /tmp/dist-before.sha256 /tmp/dist-after.sha256
       - name: Verify Git-installable package includes workflow distribution
-        run: npm pack --dry-run --ignore-scripts 2>&1 | grep -q 'dist/workflow-'
+        run: |
+          npm pack --dry-run --json --ignore-scripts > package-manifest.json
+          node -e "const p=require('./package-manifest.json')[0].files.map(f=>f.path); for (const f of ['dist/cli.js','dist/index.js','dist/index.d.ts','npm-shrinkwrap.json','skills/orch/SKILL.md']) if (!p.includes(f)) throw new Error('missing '+f)"
+          rm package-manifest.json
       - run: npm audit --omit=dev
-      - run: git diff --exit-code
+      - run: test -z "$(git status --porcelain)"
 
   git-install:
     strategy:
@@ -45,6 +54,14 @@ jobs:
         run: |
           set -euo pipefail
           SANDBOX="$(mktemp -d)"
+          REAL_HOME="$HOME"
+          REAL_PREFIX="$(npm prefix -g)"
+          BEFORE_PROFILES="$(for f in .zshrc .bashrc .bash_profile .profile; do test -e "$REAL_HOME/$f" && shasum -a 256 "$REAL_HOME/$f" || true; done)"
+          snapshot_tree() { node --input-type=module -e 'import fs from "node:fs"; import path from "node:path"; import crypto from "node:crypto"; const root=process.argv[1]; const rows=[]; function walk(p){for(const name of fs.readdirSync(p).sort()){const f=path.join(p,name); const s=fs.lstatSync(f); const rel=path.relative(root,f); if(s.isDirectory()){rows.push(`d ${rel} ${s.mode}`); walk(f);} else if(s.isSymbolicLink()) rows.push(`l ${rel} ${fs.readlinkSync(f)}`); else rows.push(`f ${rel} ${s.mode} ${s.size} ${crypto.createHash("sha256").update(fs.readFileSync(f)).digest("hex")}`);}} walk(root); process.stdout.write(rows.join("\n"));' "$1"; }
+          snapshot_optional() { test -e "$1" && snapshot_tree "$1" || true; }
+          BEFORE_PREFIX="$(snapshot_tree "$REAL_PREFIX")"
+          BEFORE_CLAUDE="$(snapshot_optional "$REAL_HOME/.claude")"
+          BEFORE_CODEX="$(snapshot_optional "$REAL_HOME/.codex")"
           export HOME="$SANDBOX/home"
           export XDG_CONFIG_HOME="$SANDBOX/xdg-config"
           export XDG_CACHE_HOME="$SANDBOX/xdg-cache"
@@ -59,6 +76,11 @@ jobs:
           orch init "$SANDBOX/project" --adapter codex
           (cd "$SANDBOX/project" && orch workflow --help)
           (cd "$SANDBOX/project" && orch workflow doctor)
+          orch setup
           test ! -e "$HOME/.claude"
           test ! -e "$HOME/.codex"
+          test "$BEFORE_PROFILES" = "$(for f in .zshrc .bashrc .bash_profile .profile; do test -e "$REAL_HOME/$f" && shasum -a 256 "$REAL_HOME/$f" || true; done)"
+          test "$BEFORE_PREFIX" = "$(snapshot_tree "$REAL_PREFIX")"
+          test "$BEFORE_CLAUDE" = "$(snapshot_optional "$REAL_HOME/.claude")"
+          test "$BEFORE_CODEX" = "$(snapshot_optional "$REAL_HOME/.codex")"
           rm -rf "$SANDBOX"
