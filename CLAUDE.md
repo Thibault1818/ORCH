@@ -13,7 +13,7 @@ ORCH is an **AI agent runtime** — not just a CLI tool. The core engine (domain
 ## Commands
 
 ```bash
-npm run build          # Build ESM + DTS bundles (tsup)
+npm run build:dist     # Build ESM + DTS bundles (tsup)
 npm run dev            # Run via tsx (no build needed)
 npm test               # Run all tests (vitest)
 npm test -- test/unit/application/orchestrator-resilience.test.ts  # Single file

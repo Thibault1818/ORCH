@@ -22,7 +22,7 @@ jobs:
       - run: npm test -- test/security/security-regression.test.ts
       - run: npm run typecheck
       - run: npm test
-      - run: npm run build
+      - run: npm run build:dist
       - name: Verify Git-installable package includes workflow distribution
         run: npm pack --dry-run --ignore-scripts 2>&1 | grep -q 'dist/workflow-'
       - run: npm audit --omit=dev

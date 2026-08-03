@@ -27,7 +27,7 @@
   },
   "scripts": {
     "dev": "tsx src/bin/cli.ts",
-    "build": "tsup",
+    "build:dist": "tsup",
     "build:watch": "tsup --watch",
     "test": "vitest run",
     "test:watch": "vitest",

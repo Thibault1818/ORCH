@@ -39,7 +39,7 @@ npm run typecheck
 | Command | What it does |
 |---------|-------------|
 | `npm run dev` | Run via tsx (no build step) |
-| `npm run build` | Production build (ESM + DTS via tsup) |
+| `npm run build:dist` | Production build (ESM + DTS via tsup) |
 | `npm test` | Run all tests (Vitest) |
 | `npm run typecheck` | `tsc --noEmit` — strict mode |
 | `npm run coverage` | Tests with coverage report |
@@ -282,7 +282,7 @@ Before opening a PR, verify:
 
 - [ ] **Tests pass:** `npm test` — all green
 - [ ] **Types check:** `npm run typecheck` — zero errors
-- [ ] **Build works:** `npm run build` — no warnings
+- [ ] **Build works:** `npm run build:dist` - no warnings
 - [ ] **No `any`** or `@ts-ignore` in your code
 - [ ] **No `console.log`** — use `eventBus.emit()` for logging
 - [ ] **ESM imports** use `.js` extension

@@ -652,7 +652,7 @@ src/
 
 ```bash
 npm run dev            # Run via tsx
-npm run build          # Build ESM + DTS
+npm run build:dist     # Build ESM + DTS
 npm test               # 1954 tests via Vitest
 npm run typecheck      # Strict TypeScript
 ```

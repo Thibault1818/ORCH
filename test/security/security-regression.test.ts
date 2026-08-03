@@ -15,6 +15,8 @@ describe('secured fork static invariants', () => {
     expect(String(pkg.homepage)).toContain('Thibault1818/ORCH');
     expect(String((pkg.bugs as { url: string }).url)).toContain('Thibault1818/ORCH/issues');
     for (const lifecycle of ['preinstall', 'install', 'postinstall', 'prepare', 'prepack', 'prepublish', 'prepublishOnly', 'publish', 'postpublish']) expect(pkg.scripts as Record<string, string>).not.toHaveProperty(lifecycle);
+    expect(pkg.scripts as Record<string, string>).not.toHaveProperty('build');
+    expect((pkg.scripts as Record<string, string>)['build:dist']).toBe('tsup');
     for (const path of ['readme.md', 'SECURITY.md']) {
       expect(source(path)).not.toMatch(/npm (?:install|i)(?: -g)? @oxgeneral\/orch/);
       expect(source(path)).toContain('github.com/Thibault1818/ORCH.git#$AUDITED_COMMIT_SHA');
