@@ -5,7 +5,8 @@
 Only the secured fork at [Thibault1818/ORCH](https://github.com/Thibault1818/ORCH) is covered by this policy. It is a private/local package and is not published to npm. Install from the fork at an audited commit or tag; do not substitute the upstream npm package.
 
 ```bash
-npm install -g "git+https://github.com/Thibault1818/ORCH.git#6f8272cf8c4a6a3942d618be34dd5377da4d646c"
+AUDITED_COMMIT_SHA="replace-with-the-reviewed-commit-sha"
+npm install -g "git+https://github.com/Thibault1818/ORCH.git#$AUDITED_COMMIT_SHA" --prefix "$TEMP_PREFIX"
 ```
 
 ## Security Defaults
@@ -15,7 +16,8 @@ npm install -g "git+https://github.com/Thibault1818/ORCH.git#6f8272cf8c4a6a3942d
 - Prompts are sent over stdin where supported, excluded from child environments, and not persisted by default.
 - Child environments are allowlisted; persisted data and terminal output are redacted.
 - Worktree isolation, path containment, identifier validation, and symlink checks protect local state.
-- Postinstall exits without side effects unless `ORCH_POSTINSTALL_OPT_IN=1`.
+- Installation has no consumer lifecycle script and never modifies user configuration.
+- Optional Claude integration requires `orch setup claude-integration` and explicit confirmation.
 - ORCH does not install npm packages automatically or in the background. `orch update` only displays the secured fork's explicit update procedure.
 
 These invariants are enforced by `test/security/security-regression.test.ts` and CI.

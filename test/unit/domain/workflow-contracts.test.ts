@@ -12,8 +12,9 @@ describe('workflow contracts', () => {
     expect(() => validateOpusResult({ job_id: 'wf_1', status: 'done' })).toThrow();
   });
 
-  it('rejects a material GO_WITH_PATCH and unsafe synthesis', () => {
-    expect(() => validateCodexPlanReview({ job_id: 'wf_1', revision: 1, verdict: 'GO_WITH_PATCH', material_change: true, mandatory_changes: ['change API'], acceptance_criteria: [], concise_reason: 'material', next_phase: 'x' })).toThrow('use REPLAN');
-    expect(() => validateCodexSynthesis({ job_id: 'wf_1', reviewed_commit: 'abcdef1', verdict: 'FIX', merge_allowed: true, evidence: [], required_fixes: [], concise_reason: 'x' })).toThrow('requires DONE');
+  it('validates APPLY_AND_GO and rejects unsafe synthesis', () => {
+    expect(validateCodexPlanReview({ job_id: 'wf_1', revision: 1, verdict: 'APPLY_AND_GO', summary: 'bounded', required_changes: ['rename'], requires_re_review: false, risk_level: 'low', reason: 'safe', acceptance_criteria: [] }).verdict).toBe('APPLY_AND_GO');
+    expect(() => validateCodexPlanReview({ job_id: 'wf_1', revision: 1, verdict: 'APPLY_AND_GO', summary: 'empty', required_changes: [], requires_re_review: false, risk_level: 'low', reason: 'unsafe', acceptance_criteria: [] })).toThrow('requires required_changes');
+    expect(() => validateCodexSynthesis({ job_id: 'wf_1', reviewed_commit: 'abcdef1', verdict: 'REVISE', merge_allowed: true, evidence: [], summary: 'x', required_changes: ['fix'], requires_re_review: true, risk_level: 'high', reason: 'x' })).toThrow('requires GO');
   });
 });

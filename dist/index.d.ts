@@ -1564,12 +1564,13 @@ interface FablePlan {
 interface CodexPlanReview {
     job_id: string;
     revision: number;
-    verdict: 'GO' | 'GO_WITH_PATCH' | 'REPLAN' | 'BLOCKED';
-    material_change: boolean;
-    mandatory_changes: string[];
+    verdict: 'GO' | 'APPLY_AND_GO' | 'REVISE' | 'STOP';
+    summary: string;
+    required_changes: string[];
+    requires_re_review: boolean;
+    risk_level: 'low' | 'medium' | 'high';
+    reason: string;
     acceptance_criteria: string[];
-    concise_reason: string;
-    next_phase: string;
 }
 interface OpusResult {
     job_id: string;
@@ -1600,11 +1601,14 @@ interface CodexTechnicalReview {
 interface CodexSynthesis {
     job_id: string;
     reviewed_commit: string;
-    verdict: 'DONE' | 'FIX' | 'REPLAN' | 'BLOCKED';
+    verdict: 'GO' | 'REVISE' | 'STOP';
     merge_allowed: boolean;
     evidence: string[];
-    required_fixes: string[];
-    concise_reason: string;
+    summary: string;
+    required_changes: string[];
+    requires_re_review: boolean;
+    risk_level: 'low' | 'medium' | 'high';
+    reason: string;
 }
 interface CheckResults {
     job_id: string;
@@ -1633,13 +1637,27 @@ declare function transitionWorkflow(from: WorkflowPhase, to: WorkflowPhase): Wor
 declare function isTerminalWorkflowPhase(phase: WorkflowPhase): boolean;
 
 type PostReviewMode = 'risk_based' | 'always' | 'never';
+interface RoleProfile {
+    model: string;
+    effort: 'low' | 'medium' | 'high';
+    max_turns: number;
+    timeout_ms: number;
+    permission_mode: 'read_only' | 'worktree';
+}
 interface WorkflowConfig {
     fable_pre_opus_cap: number;
-    fable_target: number;
+    fable_post_opus_per_iteration_cap: number;
+    fable_total_cap: number;
     max_input_bytes: number;
     max_output_bytes: number;
+    passport_max_bytes: number;
     post_review: PostReviewMode;
     risk_triggers: string[];
+    profiles: {
+        fable: RoleProfile;
+        opus: RoleProfile;
+        codex: RoleProfile;
+    };
 }
 interface ArtifactReference {
     filename: string;
@@ -1662,7 +1680,10 @@ interface WorkflowJobV1 {
     latest_artifact_hash: string | null;
     fable_pre_opus_calls: number;
     fable_post_opus_calls: number;
+    fable_post_opus_iteration_calls: number;
+    fable_total_calls: number;
     fix_cycles: number;
+    opus_iteration: number;
     branch: string | null;
     worktree: string | null;
     current_commit: string | null;
@@ -1670,11 +1691,17 @@ interface WorkflowJobV1 {
     last_verdict: string | null;
     blocker: string | null;
     next_action: string;
+    current_operation: {
+        phase: WorkflowPhase;
+        invocation_id: string;
+        started_at: string;
+    } | null;
     created_at: string;
     updated_at: string;
 }
 interface WorkflowPassportV1 {
     schema_version: 1;
+    passport_revision: number;
     job_id: string;
     current_revision: number;
     objective: string;
@@ -1688,16 +1715,36 @@ interface WorkflowPassportV1 {
     current_blockers: string[];
     next_action: string;
     artifacts: ArtifactReference[];
+    active_worktree: string | null;
+    current_commit: string | null;
     session_references: {
         codex: string | null;
+        fable: string | null;
         opus: string | null;
     };
+    session_modes: {
+        codex: SessionMode;
+        fable: SessionMode;
+        opus: SessionMode;
+    };
+    rotation_history: SessionRotation[];
     config: WorkflowConfig;
+}
+type SessionMode = 'new' | 'native_resume' | 'passport_handoff' | 'none';
+interface SessionRotation {
+    role: 'codex' | 'fable' | 'opus';
+    previous_id: string | null;
+    next_id: string | null;
+    reason: string;
+    timestamp: string;
 }
 interface AgentUsage {
     calls: number;
+    input_chars: number;
+    output_chars: number;
     input_tokens: number;
     output_tokens: number;
+    estimated_tokens: number;
     cache_read: number;
     cache_write: number;
     duration_ms: number;
@@ -1709,15 +1756,21 @@ interface WorkflowSessionsV1 {
     schema_version: 1;
     job_id: string;
     codex_thread_id: string | null;
+    fable_session_id: string | null;
     opus_session_id: string | null;
     opus_plan_hash: string | null;
+    modes: Record<'codex' | 'fable' | 'opus', SessionMode>;
+    rotation_history: SessionRotation[];
     usage: Record<'codex' | 'fable' | 'opus', AgentUsage>;
     updated_at: string;
 }
 interface WorkflowArtifactMetadataV1 {
     schema_version: 1;
     job_id: string;
+    artifact_name: string;
+    filename: string;
     phase: WorkflowPhase;
+    workflow_revision: number;
     revision: number;
     producing_role: ProducingRole;
     parent_artifact_hash: string | null;
@@ -1733,16 +1786,16 @@ interface WorkflowEventV1 {
 }
 
 declare const ARTIFACT_FILES: {
-    readonly codex_brief: "codex-brief.json";
-    readonly fable_plan: "fable-plan-r%REV%.json";
-    readonly codex_plan_review: "codex-plan-review-r%REV%.json";
-    readonly fable_final_prompt: "fable-final-prompt.md";
-    readonly opus_report: "opus-report.json";
-    readonly opus_diff: "opus.diff";
-    readonly test_results: "test-results.json";
-    readonly codex_technical_review: "codex-technical-review.json";
-    readonly fable_compliance_review: "fable-compliance-review.json";
-    readonly codex_synthesis: "codex-synthesis.json";
+    readonly codex_brief: "codex-brief-r%REV%-a%SEQ%.json";
+    readonly fable_plan: "fable-plan-r%REV%-a%SEQ%.json";
+    readonly codex_plan_review: "codex-plan-review-r%REV%-a%SEQ%.json";
+    readonly fable_final_prompt: "fable-final-prompt-r%REV%-a%SEQ%.md";
+    readonly opus_report: "opus-report-r%REV%-a%SEQ%.json";
+    readonly opus_diff: "opus-r%REV%-a%SEQ%.diff";
+    readonly test_results: "test-results-r%REV%-a%SEQ%.json";
+    readonly codex_technical_review: "codex-technical-review-r%REV%-a%SEQ%.json";
+    readonly fable_compliance_review: "fable-compliance-review-r%REV%-a%SEQ%.json";
+    readonly codex_synthesis: "codex-synthesis-r%REV%-a%SEQ%.json";
 };
 type ArtifactName = keyof typeof ARTIFACT_FILES;
 interface StoredArtifact<T = unknown> {
@@ -1770,6 +1823,7 @@ declare class WorkflowArtifactStore {
     readTextArtifact(jobId: string, name: ArtifactName, workflowRevision?: number): Promise<StoredArtifact<string> | null>;
     transition(jobId: string, next: WorkflowPhase, patch?: Partial<WorkflowJobV1>): Promise<WorkflowJobV1>;
     patchJob(jobId: string, patch: Partial<WorkflowJobV1>): Promise<WorkflowJobV1>;
+    reserveOperation(jobId: string, phase: WorkflowPhase, operation: NonNullable<WorkflowJobV1['current_operation']>): Promise<boolean>;
     readJob(jobId: string): Promise<WorkflowJobV1 | null>;
     readPassport(jobId: string): Promise<WorkflowPassportV1 | null>;
     writePassport(value: WorkflowPassportV1): Promise<void>;
@@ -1777,10 +1831,11 @@ declare class WorkflowArtifactStore {
     writeSessions(value: WorkflowSessionsV1): Promise<void>;
     appendEvent(event: WorkflowEventV1): Promise<void>;
     readEvents(jobId: string): Promise<WorkflowEventV1[]>;
+    listJobs(): Promise<WorkflowJobV1[]>;
     artifactPath(jobId: string, name: ArtifactName, revision: number): string;
     private requiredJob;
     private file;
-    private artifactFile;
+    private latestArtifact;
     private write;
     private secureDir;
     private lock;
@@ -1788,6 +1843,8 @@ declare class WorkflowArtifactStore {
 declare function hashCanonical(value: unknown): string;
 
 interface RoleUsage {
+    input_chars?: number;
+    output_chars?: number;
     input_tokens?: number;
     output_tokens?: number;
     cache_read?: number;
@@ -1798,14 +1855,17 @@ interface RoleUsage {
 interface RoleResult<T> {
     value: T;
     session_id?: string;
+    session_mode?: 'new' | 'native_resume' | 'passport_handoff' | 'none';
     resumed?: boolean;
     resume_failed?: boolean;
     usage?: RoleUsage;
 }
 interface FableCallOptions {
     workspace: string;
+    model: string;
     max_turns: 1;
     effort: 'low';
+    timeout_ms: number;
     max_input_bytes: number;
     max_output_bytes: number;
 }
@@ -1814,7 +1874,7 @@ interface CodexRolePort {
     reviewPlan(passport: WorkflowPassportV1, plan: FablePlan, threadId: string | null): Promise<RoleResult<CodexPlanReview>>;
     compileFinalPrompt(passport: WorkflowPassportV1, plan: FablePlan, threadId: string | null): Promise<RoleResult<string>>;
     technicalReview(passport: WorkflowPassportV1, evidence: GitEvidence, checks: CheckResults, threadId: string | null): Promise<RoleResult<CodexTechnicalReview>>;
-    synthesize(passport: WorkflowPassportV1, technical: CodexTechnicalReview, compliance: FableComplianceReview | null, checks: CheckResults, threadId: string | null): Promise<RoleResult<CodexSynthesis>>;
+    synthesize(passport: WorkflowPassportV1, evidence: GitEvidence, technical: CodexTechnicalReview, compliance: FableComplianceReview | null, checks: CheckResults, threadId: string | null): Promise<RoleResult<CodexSynthesis>>;
     available(): Promise<{
         available: boolean;
         detail: string;
@@ -1830,7 +1890,7 @@ interface FableRolePort {
     }>;
 }
 interface OpusRolePort {
-    execute(passport: WorkflowPassportV1, prompt: string, workspace: string, sessionId: string | null, mode: 'new' | 'resume'): Promise<RoleResult<OpusResult>>;
+    execute(passport: WorkflowPassportV1, prompt: string, workspace: string, sessionId: string | null, mode: 'new' | 'native_resume' | 'passport_handoff'): Promise<RoleResult<OpusResult>>;
     available(): Promise<{
         available: boolean;
         detail: string;
@@ -1855,6 +1915,7 @@ interface WorkflowGitPort {
     inspect(branch: string, worktree: string): Promise<GitEvidence>;
     runChecks(worktree: string, commit: string, commands: string[]): Promise<CheckResults>;
     currentCommit(branch: string): Promise<string>;
+    isMerged(branch: string, commit: string): Promise<boolean>;
     merge(branch: string): Promise<{
         success: boolean;
         detail: string;
@@ -1882,7 +1943,7 @@ declare class WorkflowEngine {
     start(input: StartWorkflowInput): Promise<string>;
     run(jobId: string): Promise<WorkflowJobV1>;
     pause(jobId: string): Promise<WorkflowJobV1>;
-    resume(jobId: string): Promise<WorkflowJobV1>;
+    resume(jobId: string, approveStop?: boolean): Promise<WorkflowJobV1>;
     cancel(jobId: string): Promise<WorkflowJobV1>;
     private step;
     private codexBrief;
@@ -1903,9 +1964,11 @@ declare class WorkflowEngine {
     private addArtifact;
     private decision;
     private updatePassport;
+    rotateSession(jobId: string, role: 'codex' | 'fable' | 'opus', reason: string): Promise<void>;
     private recordRole;
     private fableOptions;
     private fableCall;
+    private reserveFable;
     private assertFableOutput;
     private assertAllowedScope;
     private isRisky;
@@ -2158,4 +2221,4 @@ declare function buildFullContainer(context: CliContext): Promise<Container>;
  */
 declare function buildContainer(context: CliContext): Promise<Container>;
 
-export { AGENT_SHOP_TEMPLATES, ARTIFACT_FILES, type AdapterErrorHint, AdapterErrorKind, type AdapterKind, AdapterRegistry, type AdapterTestResult, type Agent, type AgentConfig, type AgentEvent, type AgentLastError, AgentNotFoundError, AgentService, type AgentShopTemplate, type AgentStats, type AgentStatus, type AgentUsage, type ApprovalPolicy, type ArtifactReference, type CheckResults, type ClipboardContentType, type ClipboardImage, type CodexBrief, type CodexPlanReview, type CodexRolePort, type CodexSynthesis, type CodexTechnicalReview, type Container, type CreateAgentInput, type CreateGoalInput, type CreateTaskInput, DEFAULT_WORKFLOW_CONFIG, ERROR_HINTS, EventBus, type EventPayload, type ExecuteParams, type FableComplianceReview, type FablePlan, type FableRolePort, type FailurePhase, type Goal, GoalHasPendingTasksError, type GoalOrchestrationPhase, type GoalOrchestrationState, type GoalStatus, type GoalTaskRole, type IAgentAdapter, type ISkillLoader, type LightContainer, MODEL_TIER_MAP, type ModelTier, NotInitializedError, type OpusResult, type OpusRolePort, Orchestrator, type OrchestratorConfig, type OrchestratorEvent, type OrchestratorEventType, type OrchestratorState, OrchestryError, type PersistedFailure, type PostReviewMode, type ProducingRole, type ProjectConfig, type ReasoningEffort, type RetryEntry, type Run, type RunEvent, type RunEventType, RunService, type RunStatus, type RunningEntry, SUPPORTED_ADAPTERS, type SchedulingConfig, SkillLoader, type StartWorkflowInput, type Task, TaskNotFoundError, type TaskProof, TaskService, type TaskStatus, type TokenUsage, WORKFLOW_PHASE_TRANSITIONS, WORKFLOW_SCHEMA_VERSION, type WorkflowArtifactMetadataV1, WorkflowArtifactStore, type WorkflowConfig, type WorkflowContract, type WorkflowDecision, WorkflowEngine, type WorkflowEventV1, type WorkflowGitPort, type WorkflowJobV1, type WorkflowPassportV1, type WorkflowPhase, type WorkflowRolePorts, type WorkflowSessionsV1, WorkspaceError, type WorkspaceMode, buildContainer, buildFullContainer, buildLightContainer, canTransition, canTransitionWorkflow, classifyAdapterError, createTokenUsage, defaultModelForAdapter, detectClipboardType, getClipboardImage, getShopTemplateByKey, hashCanonical, isAdapterKind, isBlocked, isClipboardToolAvailable, isDispatchable, isMcpSkill, isModelTier, isTerminal, isTerminalWorkflowPhase, resolveFailureStatus, resolveModel, templateToAgentInput, transitionWorkflow, validateCheckResults, validateCodexBrief, validateCodexPlanReview, validateCodexSynthesis, validateCodexTechnicalReview, validateFableComplianceReview, validateFablePlan, validateOpusResult };
+export { AGENT_SHOP_TEMPLATES, ARTIFACT_FILES, type AdapterErrorHint, AdapterErrorKind, type AdapterKind, AdapterRegistry, type AdapterTestResult, type Agent, type AgentConfig, type AgentEvent, type AgentLastError, AgentNotFoundError, AgentService, type AgentShopTemplate, type AgentStats, type AgentStatus, type AgentUsage, type ApprovalPolicy, type ArtifactReference, type CheckResults, type ClipboardContentType, type ClipboardImage, type CodexBrief, type CodexPlanReview, type CodexRolePort, type CodexSynthesis, type CodexTechnicalReview, type Container, type CreateAgentInput, type CreateGoalInput, type CreateTaskInput, DEFAULT_WORKFLOW_CONFIG, ERROR_HINTS, EventBus, type EventPayload, type ExecuteParams, type FableComplianceReview, type FablePlan, type FableRolePort, type FailurePhase, type Goal, GoalHasPendingTasksError, type GoalOrchestrationPhase, type GoalOrchestrationState, type GoalStatus, type GoalTaskRole, type IAgentAdapter, type ISkillLoader, type LightContainer, MODEL_TIER_MAP, type ModelTier, NotInitializedError, type OpusResult, type OpusRolePort, Orchestrator, type OrchestratorConfig, type OrchestratorEvent, type OrchestratorEventType, type OrchestratorState, OrchestryError, type PersistedFailure, type PostReviewMode, type ProducingRole, type ProjectConfig, type ReasoningEffort, type RetryEntry, type RoleProfile, type Run, type RunEvent, type RunEventType, RunService, type RunStatus, type RunningEntry, SUPPORTED_ADAPTERS, type SchedulingConfig, type SessionMode, type SessionRotation, SkillLoader, type StartWorkflowInput, type Task, TaskNotFoundError, type TaskProof, TaskService, type TaskStatus, type TokenUsage, WORKFLOW_PHASE_TRANSITIONS, WORKFLOW_SCHEMA_VERSION, type WorkflowArtifactMetadataV1, WorkflowArtifactStore, type WorkflowConfig, type WorkflowContract, type WorkflowDecision, WorkflowEngine, type WorkflowEventV1, type WorkflowGitPort, type WorkflowJobV1, type WorkflowPassportV1, type WorkflowPhase, type WorkflowRolePorts, type WorkflowSessionsV1, WorkspaceError, type WorkspaceMode, buildContainer, buildFullContainer, buildLightContainer, canTransition, canTransitionWorkflow, classifyAdapterError, createTokenUsage, defaultModelForAdapter, detectClipboardType, getClipboardImage, getShopTemplateByKey, hashCanonical, isAdapterKind, isBlocked, isClipboardToolAvailable, isDispatchable, isMcpSkill, isModelTier, isTerminal, isTerminalWorkflowPhase, resolveFailureStatus, resolveModel, templateToAgentInput, transitionWorkflow, validateCheckResults, validateCodexBrief, validateCodexPlanReview, validateCodexSynthesis, validateCodexTechnicalReview, validateFableComplianceReview, validateFablePlan, validateOpusResult };

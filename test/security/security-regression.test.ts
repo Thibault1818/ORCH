@@ -17,7 +17,7 @@ describe('secured fork static invariants', () => {
     expect(String((pkg.scripts as Record<string, string>).prepublishOnly)).toContain('must not be published');
     for (const path of ['readme.md', 'SECURITY.md']) {
       expect(source(path)).not.toMatch(/npm (?:install|i)(?: -g)? @oxgeneral\/orch/);
-      expect(source(path)).toContain('github.com/Thibault1818/ORCH.git#6f8272cf8c4a6a3942d618be34dd5377da4d646c');
+      expect(source(path)).toContain('github.com/Thibault1818/ORCH.git#$AUDITED_COMMIT_SHA');
     }
   });
 
@@ -85,12 +85,12 @@ describe('secured fork static invariants', () => {
     expect(processes).toMatch(/Number\.isSafeInteger\(pid\)\s*&&\s*pid\s*>\s*1/);
   });
 
-  it('keeps postinstall opt-in and prohibits automatic npm installation', () => {
-    const postinstall = source('scripts/postinstall.cjs');
+  it('has no consumer-install lifecycle and prohibits automatic npm installation', () => {
+    const pkg = JSON.parse(source('package.json')) as { scripts: Record<string, string> };
     const updateCheck = source('src/cli/update-check.ts');
     const updateCommand = source('src/cli/commands/update.ts');
-    expect(postinstall).toMatch(/ORCH_POSTINSTALL_OPT_IN\s*!==\s*'1'\) process\.exit\(0\)/);
-    expect(postinstall).toContain('github.com/Thibault1818/ORCH');
+    for (const lifecycle of ['preinstall', 'install', 'postinstall', 'prepare']) expect(pkg.scripts).not.toHaveProperty(lifecycle);
+    expect(source('src/cli/commands/setup.ts')).toContain(".command('setup [integration]')");
     expect(updateCheck).not.toMatch(/execFile\(\s*['"]npm['"]\s*,\s*\[\s*['"](?:install|i)['"]/s);
     expect(updateCheck).not.toMatch(/spawn\(\s*['"]npm['"]\s*,\s*\[\s*['"](?:install|i)['"]/s);
     expect(updateCheck).not.toMatch(/Run: npm install/);
@@ -106,7 +106,7 @@ describe('secured fork static invariants', () => {
     const native = source('src/infrastructure/workflow/native-adapters.ts');
     expect(orchestrator).toContain("startsWith('orchestry/workflow/')");
     expect(orchestrator).not.toMatch(/task\.status\s*=\s*(?:newStatus|'done'|'review')/);
-    expect(engine).toContain("['git diff --check']");
+    expect(engine).not.toContain("['git diff --check']");
     expect(engine).toMatch(/checks\.checks\.length\s*===\s*0/);
     expect(native).toContain("'--sandbox', 'read-only'");
     expect(native).toContain('thread, evidence.worktree');

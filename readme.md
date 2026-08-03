@@ -33,7 +33,10 @@
 
 ```bash
 # Pin the secured fork; do not install the upstream npm package.
-npm install -g "git+https://github.com/Thibault1818/ORCH.git#6f8272cf8c4a6a3942d618be34dd5377da4d646c"
+TEMP_PREFIX="$(mktemp -d)"
+AUDITED_COMMIT_SHA="replace-with-the-reviewed-commit-sha"
+npm install -g "git+https://github.com/Thibault1818/ORCH.git#$AUDITED_COMMIT_SHA" --prefix "$TEMP_PREFIX"
+export PATH="$TEMP_PREFIX/bin:$PATH"
 cd ~/your-project && orch
 ```
 
@@ -155,7 +158,21 @@ Install the fork from the pinned Git commit shown above. ORCH auto-initializes a
 
 ### Claude Code integration
 
-Install-time side effects are disabled by default. To deliberately register the `/orch` skill and apply the optional Ink cache patch, install with `ORCH_POSTINSTALL_OPT_IN=1`; ORCH never performs this setup or any package installation in the background.
+Installation never changes user configuration. To deliberately register the optional `/orch` skill, run `orch setup claude-integration` and confirm the change.
+
+### Recoverable low-token workflow
+
+```bash
+orch setup
+orch workflow start "Describe the implementation" --check "npm test"
+orch workflow status
+```
+
+`GO` proceeds, `APPLY_AND_GO` lets Fable apply bounded changes without another Codex review, `REVISE` starts a bounded correction, and `STOP` requires explicit `orch workflow resume <job-id> --approve-stop`. Fable defaults to two pre-Opus calls, one post-Opus call per implementation iteration, and five calls for the whole workflow. `orch workflow status` shows the counters, estimated usage, context mode, and session rotations.
+
+After a terminal restart, use `orch workflow status` and then `orch workflow resume <job-id>`. Use `orch workflow session-rotate <job-id> opus --reason "expired session"` when a stored identity is invalid. Native continuation is used only after verified capability detection; otherwise status reports `passport_handoff`.
+
+To remove a sandbox installation, run `rm -rf "$TEMP_PREFIX"` and remove that prefix from the current shell's `PATH`. ORCH does not alter shell profiles.
 
 ```
 /orch deploy a team to refactor the auth module and add tests

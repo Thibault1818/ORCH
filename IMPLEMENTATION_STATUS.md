@@ -2,15 +2,15 @@
 
 ## Architecture
 
-ORCH uses layered domain, application, infrastructure, and CLI/TUI modules. The dedicated workflow domain persists contracts, a compact passport, sessions, usage, canonical artifacts, and events under `.orchestry/workflows/`. `WorkflowEngine` coordinates injected Codex, Fable, Opus, and Git ports independently from the generic goal state machine.
+ORCH uses layered domain, application, infrastructure, and CLI/TUI modules. The dedicated workflow domain persists strict contracts, bounded versioned passports, session modes, usage, immutable artifacts, and events under `.orchestry/workflows/`. `WorkflowEngine` coordinates injected Codex, Fable, Opus, and Git ports independently from the generic goal state machine.
 
 ## Security Baseline
 
-Dangerous permission bypass and shell execution are disabled by default and require config plus `ORCHESTRY_ALLOW_DANGEROUS_EXECUTION=1`. Prompt transport, restricted child environments, redaction, no-persistence defaults, path/symlink checks, opt-in postinstall behavior, private package metadata, and absence of background npm installs are protected by `test/security/security-regression.test.ts`.
+Dangerous permission bypass and shell execution are disabled by default and require config plus `ORCHESTRY_ALLOW_DANGEROUS_EXECUTION=1`. Prompt transport, restricted child environments, redaction, no-persistence defaults, path/symlink checks, lifecycle-free installation, private package metadata, and absence of background npm installs are protected by `test/security/security-regression.test.ts`.
 
 ## Verification
 
-The deterministic fake-adapter workflow covers planning, bounded replans, patch validation, session recovery, FIX and REPLAN behavior, review joining, stale commit and diff approvals, deterministic checks, and fail-closed merging. The final local run passed 2,075 tests across 128 files with 2 skips, typecheck, build, `git diff --check`, package dry-run, and `npm audit` with zero advisories.
+The deterministic fake-adapter workflow covers GO, APPLY_AND_GO, REVISE, STOP, Fable caps, passport handoff, correction cycles, review ordering, stale commit and diff approvals, deterministic checks, and fail-closed merging. Native-boundary tests verify role-specific Claude argv and stdin-only prompt transport. CI runs the exact-commit Git install in isolated prefixes on macOS and Linux with Node 20 and 24.
 
 ## Upstream Reconciliation
 
@@ -18,4 +18,4 @@ The fork and upstream were fetched and compared before implementation. Changes r
 
 ## Limitation
 
-Neither `claude` nor `codex` is installed on the development host, so their local help output and native resume behavior could not be verified. `orch workflow doctor` reports this plainly. The controller uses the durable passport/worktree fallback instead of inventing unverified resume syntax. `start` runs autonomously in the foreground after printing the recoverable job ID.
+Native resume remains disabled until an installed CLI passes a documented end-to-end continuation probe. `orch workflow doctor` reports detected versions/options and identifies `passport_handoff` honestly. A reserved but interrupted operation pauses for manual review rather than risking a duplicate paid call. `start` runs autonomously in the foreground after printing the recoverable job ID.

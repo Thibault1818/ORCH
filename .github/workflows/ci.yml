@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, hardening/**]
   pull_request:
     branches: [main]
 
@@ -25,3 +25,40 @@ jobs:
       - run: npm run build
       - name: Verify Git-installable package includes workflow distribution
         run: npm pack --dry-run --ignore-scripts 2>&1 | grep -q 'dist/workflow-'
+      - run: npm audit --omit=dev
+      - run: git diff --exit-code
+
+  git-install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [20, 24]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install exact commit in isolated prefix
+        shell: bash
+        run: |
+          set -euo pipefail
+          SANDBOX="$(mktemp -d)"
+          export HOME="$SANDBOX/home"
+          export XDG_CONFIG_HOME="$SANDBOX/xdg-config"
+          export XDG_CACHE_HOME="$SANDBOX/xdg-cache"
+          export NPM_CONFIG_PREFIX="$SANDBOX/prefix"
+          export NPM_CONFIG_CACHE="$SANDBOX/npm-cache"
+          export NPM_CONFIG_USERCONFIG="$SANDBOX/npmrc"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$NPM_CONFIG_PREFIX" "$NPM_CONFIG_CACHE"
+          npm install -g "git+https://github.com/Thibault1818/ORCH.git#$GITHUB_SHA" --prefix "$NPM_CONFIG_PREFIX"
+          export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
+          orch --version
+          orch --help
+          orch init "$SANDBOX/project" --adapter codex
+          (cd "$SANDBOX/project" && orch workflow --help)
+          (cd "$SANDBOX/project" && orch workflow doctor)
+          test ! -e "$HOME/.claude"
+          test ! -e "$HOME/.codex"
+          rm -rf "$SANDBOX"

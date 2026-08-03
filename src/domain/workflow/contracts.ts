@@ -23,12 +23,13 @@ export interface FablePlan {
 export interface CodexPlanReview {
   job_id: string;
   revision: number;
-  verdict: 'GO' | 'GO_WITH_PATCH' | 'REPLAN' | 'BLOCKED';
-  material_change: boolean;
-  mandatory_changes: string[];
+  verdict: 'GO' | 'APPLY_AND_GO' | 'REVISE' | 'STOP';
+  summary: string;
+  required_changes: string[];
+  requires_re_review: boolean;
+  risk_level: 'low' | 'medium' | 'high';
+  reason: string;
   acceptance_criteria: string[];
-  concise_reason: string;
-  next_phase: string;
 }
 
 export interface OpusResult {
@@ -63,11 +64,14 @@ export interface CodexTechnicalReview {
 export interface CodexSynthesis {
   job_id: string;
   reviewed_commit: string;
-  verdict: 'DONE' | 'FIX' | 'REPLAN' | 'BLOCKED';
+  verdict: 'GO' | 'REVISE' | 'STOP';
   merge_allowed: boolean;
   evidence: string[];
-  required_fixes: string[];
-  concise_reason: string;
+  summary: string;
+  required_changes: string[];
+  requires_re_review: boolean;
+  risk_level: 'low' | 'medium' | 'high';
+  reason: string;
 }
 
 export interface CheckResults {
@@ -93,14 +97,14 @@ export function validateFablePlan(value: unknown): FablePlan {
 }
 
 export function validateCodexPlanReview(value: unknown): CodexPlanReview {
-  const o = exact(value, ['job_id', 'revision', 'verdict', 'material_change', 'mandatory_changes', 'acceptance_criteria', 'concise_reason', 'next_phase'], 'Codex plan review');
-  const verdict = enumeration(o.verdict, ['GO', 'GO_WITH_PATCH', 'REPLAN', 'BLOCKED'] as const, 'verdict');
-  const materialChange = bool(o.material_change, 'material_change');
-  const mandatoryChanges = strings(o.mandatory_changes, 'mandatory_changes');
-  if (verdict === 'GO_WITH_PATCH' && materialChange) throw new Error('GO_WITH_PATCH is forbidden for a material change; use REPLAN');
-  if (verdict === 'GO_WITH_PATCH' && mandatoryChanges.length === 0) throw new Error('GO_WITH_PATCH requires mandatory_changes');
-  if (verdict === 'GO' && mandatoryChanges.length > 0) throw new Error('GO cannot include mandatory_changes');
-  return { job_id: id(o.job_id), revision: revision(o.revision), verdict, material_change: materialChange, mandatory_changes: mandatoryChanges, acceptance_criteria: strings(o.acceptance_criteria, 'acceptance_criteria'), concise_reason: nonEmpty(o.concise_reason, 'concise_reason'), next_phase: nonEmpty(o.next_phase, 'next_phase') };
+  const o = exact(value, ['job_id', 'revision', 'verdict', 'summary', 'required_changes', 'requires_re_review', 'risk_level', 'reason', 'acceptance_criteria'], 'Codex plan review');
+  const verdict = enumeration(o.verdict, ['GO', 'APPLY_AND_GO', 'REVISE', 'STOP'] as const, 'verdict');
+  const requiredChanges = strings(o.required_changes, 'required_changes');
+  const requiresReReview = bool(o.requires_re_review, 'requires_re_review');
+  if (verdict === 'APPLY_AND_GO' && requiredChanges.length === 0) throw new Error('APPLY_AND_GO requires required_changes');
+  if (verdict === 'GO' && requiredChanges.length > 0) throw new Error('GO cannot include required_changes');
+  if (verdict === 'GO' && requiresReReview) throw new Error('GO cannot require re-review');
+  return { job_id: id(o.job_id), revision: revision(o.revision), verdict, summary: nonEmpty(o.summary, 'summary'), required_changes: requiredChanges, requires_re_review: requiresReReview, risk_level: enumeration(o.risk_level, ['low', 'medium', 'high'] as const, 'risk_level'), reason: nonEmpty(o.reason, 'reason'), acceptance_criteria: strings(o.acceptance_criteria, 'acceptance_criteria') };
 }
 
 export function validateOpusResult(value: unknown): OpusResult {
@@ -119,11 +123,15 @@ export function validateCodexTechnicalReview(value: unknown): CodexTechnicalRevi
 }
 
 export function validateCodexSynthesis(value: unknown): CodexSynthesis {
-  const o = exact(value, ['job_id', 'reviewed_commit', 'verdict', 'merge_allowed', 'evidence', 'required_fixes', 'concise_reason'], 'Codex synthesis');
-  const verdict = enumeration(o.verdict, ['DONE', 'FIX', 'REPLAN', 'BLOCKED'] as const, 'verdict');
+  const o = exact(value, ['job_id', 'reviewed_commit', 'verdict', 'merge_allowed', 'evidence', 'summary', 'required_changes', 'requires_re_review', 'risk_level', 'reason'], 'Codex synthesis');
+  const verdict = enumeration(o.verdict, ['GO', 'REVISE', 'STOP'] as const, 'verdict');
   const mergeAllowed = bool(o.merge_allowed, 'merge_allowed');
-  if (mergeAllowed && verdict !== 'DONE') throw new Error('merge_allowed requires DONE');
-  return { job_id: id(o.job_id), reviewed_commit: commit(o.reviewed_commit), verdict, merge_allowed: mergeAllowed, evidence: strings(o.evidence, 'evidence'), required_fixes: strings(o.required_fixes, 'required_fixes'), concise_reason: nonEmpty(o.concise_reason, 'concise_reason') };
+  const requiredChanges = strings(o.required_changes, 'required_changes');
+  if (mergeAllowed && verdict !== 'GO') throw new Error('merge_allowed requires GO');
+  if (verdict === 'GO' && requiredChanges.length > 0) throw new Error('GO cannot include required_changes');
+  const requiresReReview = bool(o.requires_re_review, 'requires_re_review');
+  if (mergeAllowed && requiresReReview) throw new Error('merge_allowed cannot require re-review');
+  return { job_id: id(o.job_id), reviewed_commit: commit(o.reviewed_commit), verdict, merge_allowed: mergeAllowed, evidence: strings(o.evidence, 'evidence'), summary: nonEmpty(o.summary, 'summary'), required_changes: requiredChanges, requires_re_review: requiresReReview, risk_level: enumeration(o.risk_level, ['low', 'medium', 'high'] as const, 'risk_level'), reason: nonEmpty(o.reason, 'reason') };
 }
 
 export function validateCheckResults(value: unknown): CheckResults {
@@ -132,7 +140,9 @@ export function validateCheckResults(value: unknown): CheckResults {
     const c = exact(item, ['command', 'passed', 'output'], `checks[${index}]`);
     return { command: nonEmpty(c.command, 'command'), passed: bool(c.passed, 'passed'), output: text(c.output, 'output') };
   });
-  return { job_id: id(o.job_id), commit: commit(o.commit), passed: bool(o.passed, 'passed'), checks };
+  const passed = bool(o.passed, 'passed');
+  if (passed !== checks.every((check) => check.passed)) throw new Error('Check aggregate does not match individual results');
+  return { job_id: id(o.job_id), commit: commit(o.commit), passed, checks };
 }
 
 function exact(value: unknown, keys: string[], label: string): ObjectValue {

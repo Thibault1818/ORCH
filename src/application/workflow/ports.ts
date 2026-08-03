@@ -1,16 +1,16 @@
 import type { CheckResults, CodexBrief, CodexPlanReview, CodexSynthesis, CodexTechnicalReview, FableComplianceReview, FablePlan, OpusResult } from '../../domain/workflow/contracts.js';
 import type { WorkflowPassportV1 } from '../../domain/workflow/state.js';
 
-export interface RoleUsage { input_tokens?: number; output_tokens?: number; cache_read?: number; cache_write?: number; duration_ms?: number; compactions?: number; }
-export interface RoleResult<T> { value: T; session_id?: string; resumed?: boolean; resume_failed?: boolean; usage?: RoleUsage; }
-export interface FableCallOptions { workspace: string; max_turns: 1; effort: 'low'; max_input_bytes: number; max_output_bytes: number; }
+export interface RoleUsage { input_chars?: number; output_chars?: number; input_tokens?: number; output_tokens?: number; cache_read?: number; cache_write?: number; duration_ms?: number; compactions?: number; }
+export interface RoleResult<T> { value: T; session_id?: string; session_mode?: 'new' | 'native_resume' | 'passport_handoff' | 'none'; resumed?: boolean; resume_failed?: boolean; usage?: RoleUsage; }
+export interface FableCallOptions { workspace: string; model: string; max_turns: 1; effort: 'low'; timeout_ms: number; max_input_bytes: number; max_output_bytes: number; }
 
 export interface CodexRolePort {
   brief(passport: WorkflowPassportV1, threadId: string | null): Promise<RoleResult<CodexBrief>>;
   reviewPlan(passport: WorkflowPassportV1, plan: FablePlan, threadId: string | null): Promise<RoleResult<CodexPlanReview>>;
   compileFinalPrompt(passport: WorkflowPassportV1, plan: FablePlan, threadId: string | null): Promise<RoleResult<string>>;
   technicalReview(passport: WorkflowPassportV1, evidence: GitEvidence, checks: CheckResults, threadId: string | null): Promise<RoleResult<CodexTechnicalReview>>;
-  synthesize(passport: WorkflowPassportV1, technical: CodexTechnicalReview, compliance: FableComplianceReview | null, checks: CheckResults, threadId: string | null): Promise<RoleResult<CodexSynthesis>>;
+  synthesize(passport: WorkflowPassportV1, evidence: GitEvidence, technical: CodexTechnicalReview, compliance: FableComplianceReview | null, checks: CheckResults, threadId: string | null): Promise<RoleResult<CodexSynthesis>>;
   available(): Promise<{ available: boolean; detail: string }>;
 }
 
@@ -22,7 +22,7 @@ export interface FableRolePort {
 }
 
 export interface OpusRolePort {
-  execute(passport: WorkflowPassportV1, prompt: string, workspace: string, sessionId: string | null, mode: 'new' | 'resume'): Promise<RoleResult<OpusResult>>;
+  execute(passport: WorkflowPassportV1, prompt: string, workspace: string, sessionId: string | null, mode: 'new' | 'native_resume' | 'passport_handoff'): Promise<RoleResult<OpusResult>>;
   available(): Promise<{ available: boolean; detail: string }>;
 }
 
@@ -32,6 +32,7 @@ export interface WorkflowGitPort {
   inspect(branch: string, worktree: string): Promise<GitEvidence>;
   runChecks(worktree: string, commit: string, commands: string[]): Promise<CheckResults>;
   currentCommit(branch: string): Promise<string>;
+  isMerged(branch: string, commit: string): Promise<boolean>;
   merge(branch: string): Promise<{ success: boolean; detail: string }>;
 }
 

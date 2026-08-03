@@ -1,7 +1,7 @@
 import { buildChildEnv } from './chunk-RFV7B6JD.js';
 import './chunk-UG72A2JI.js';
 import './chunk-Z7JNYNWE.js';
-import { hashCanonical } from './chunk-CK2SLSS4.js';
+import { hashCanonical } from './chunk-D46P56MG.js';
 import './chunk-54K3JU53.js';
 import './chunk-RQZGDMFG.js';
 import './chunk-UGPJGAIN.js';
@@ -20,7 +20,7 @@ var NativeCodexWorkflowAdapter = class {
     return this.call("Create a concise implementation brief as strict JSON with job_id, objective, constraints, allowed_file_scope, required_checks.", passport, thread);
   }
   reviewPlan(passport, plan, thread) {
-    return this.call("Review this plan. Return only strict JSON with job_id, revision, verdict GO|GO_WITH_PATCH|REPLAN|BLOCKED, material_change, mandatory_changes, acceptance_criteria, concise_reason, next_phase. GO_WITH_PATCH must be non-material.", { passport, plan }, thread);
+    return this.call("Review this plan. Return only strict JSON with job_id, revision, verdict GO|APPLY_AND_GO|REVISE|STOP, summary, required_changes, requires_re_review, risk_level low|medium|high, reason, acceptance_criteria. APPLY_AND_GO is only for bounded changes.", { passport: project(passport), plan }, thread);
   }
   compileFinalPrompt(passport, plan, thread) {
     return this.callText("Compile a concise executable Opus prompt from the approved passport and plan. Output prompt text only.", { passport, plan }, thread);
@@ -28,8 +28,8 @@ var NativeCodexWorkflowAdapter = class {
   technicalReview(passport, evidence, checks, thread) {
     return this.call("Inspect the files in the current worktree plus the actual diff and checks as primary evidence. Return only strict JSON with job_id, reviewed_commit, checks_passed, evidence, required_fixes, concise_reason.", { passport, evidence, checks }, thread, evidence.worktree);
   }
-  synthesize(passport, technical, compliance, checks, thread) {
-    return this.call("Synthesize reviews. Return only strict JSON with job_id, reviewed_commit, verdict DONE|FIX|REPLAN|BLOCKED, merge_allowed, evidence, required_fixes, concise_reason. DONE requires passing checks.", { passport, technical, compliance, checks }, thread);
+  synthesize(passport, evidence, technical, compliance, checks, thread) {
+    return this.call("Return only strict JSON with job_id, reviewed_commit, verdict GO|REVISE|STOP, merge_allowed, evidence, summary, required_changes, requires_re_review, risk_level low|medium|high, reason. GO requires passing meaningful checks and no required changes.", { passport: project(passport), evidence, technical, compliance, checks }, thread, evidence.worktree);
   }
   async available() {
     return availability("codex");
@@ -46,7 +46,7 @@ var NativeCodexWorkflowAdapter = class {
     const prompt = bounded(`${instruction}
 
 ${JSON.stringify(projection)}`, 256e3);
-    const output = await spawnCapture(this.pm, "codex", ["exec", "--json", "--sandbox", "read-only", "-"], cwd, prompt, 1e6);
+    const output = await spawnCapture(this.pm, "codex", ["exec", "--json", "--sandbox", "read-only", "-"], cwd, prompt, 1e6, 6e5);
     const lines = output.split("\n").filter(Boolean).map(parseObject);
     let text = "";
     let sessionId;
@@ -58,7 +58,7 @@ ${JSON.stringify(projection)}`, 256e3);
       if (line.type === "turn.completed") usage = usageObject(line.usage);
     }
     if (!text) throw new Error("Codex returned no agent message");
-    return { text, sessionId, usage: { input_tokens: usage.input_tokens, output_tokens: usage.output_tokens } };
+    return { text, sessionId, usage: { input_chars: prompt.length, output_chars: text.length, input_tokens: usage.input_tokens, output_tokens: usage.output_tokens } };
   }
 };
 var NativeFableWorkflowAdapter = class {
@@ -73,7 +73,7 @@ var NativeFableWorkflowAdapter = class {
     return this.call("Apply bounded amendments and output only the final implementation prompt.", { passport, plan, amendments }, options, false);
   }
   compliance(passport, plan, opus, evidence, checks, options) {
-    return this.call("Evaluate plan compliance from this compact evidence. Output only strict JSON: job_id, approved_plan_hash, verdict ALIGNED|GAPS_FOUND|UNCERTAIN, plan_deviations, missing_requirements, recommended_repairs.", { passport, plan, opus, evidence: compactEvidence(evidence), checks }, options, true);
+    return this.call("Evaluate plan compliance from the actual diff and checks. Output only strict JSON: job_id, approved_plan_hash, verdict ALIGNED|GAPS_FOUND|UNCERTAIN, plan_deviations, missing_requirements, recommended_repairs.", { passport: project(passport), plan, opus, evidence, checks }, options, true);
   }
   async available() {
     return availability("claude");
@@ -82,8 +82,8 @@ var NativeFableWorkflowAdapter = class {
     const prompt = bounded(`${instruction}
 
 ${JSON.stringify(projection)}`, options.max_input_bytes);
-    const result = await claudeCall(this.pm, prompt, options.workspace, "fable", 1, options.max_output_bytes, true);
-    return { value: json ? parseJson(result.text) : result.text, session_id: result.sessionId, usage: result.usage };
+    const result = await claudeCall(this.pm, prompt, options.workspace, options.model, 1, "low", options.timeout_ms, options.max_output_bytes, true);
+    return { value: json ? parseJson(result.text) : result.text, session_id: result.sessionId, session_mode: "none", usage: result.usage };
   }
 };
 var NativeOpusWorkflowAdapter = class {
@@ -101,8 +101,8 @@ var NativeOpusWorkflowAdapter = class {
       allowed_file_scope: passport.allowed_file_scope,
       required_checks: passport.required_checks
     });
-    const recovery = mode === "resume" ? `A native resume flag is not verified. Continue from this persisted passport and current worktree state.
-${JSON.stringify(passport)}
+    const recovery = mode === "passport_handoff" ? `This is a new process using a compact passport handoff, not a resumed native session.
+${JSON.stringify(project(passport))}
 
 ` : "";
     const instruction = `Task passport projection:
@@ -113,8 +113,9 @@ Do not modify files outside allowed_file_scope when it is non-empty.
 ${recovery}${prompt}
 
 Implement, test, and commit on the current worktree branch. End with strict JSON: job_id, status completed|partial|failed, files_changed, commands_run, tests_reported, deviations, unresolved, summary.`;
-    const result = await claudeCall(this.pm, bounded(instruction, passport.config.max_input_bytes), workspace, "opus", 50, passport.config.max_output_bytes);
-    return { value: parseJson(result.text), session_id: result.sessionId ?? sessionId ?? void 0, resumed: false, resume_failed: mode === "resume", usage: result.usage };
+    const profile = passport.config.profiles.opus;
+    const result = await claudeCall(this.pm, bounded(instruction, passport.config.max_input_bytes), workspace, profile.model, profile.max_turns, profile.effort, profile.timeout_ms, passport.config.max_output_bytes);
+    return { value: parseJson(result.text), session_id: result.sessionId ?? sessionId ?? void 0, session_mode: mode === "passport_handoff" ? "passport_handoff" : "new", resumed: false, resume_failed: mode === "passport_handoff", usage: result.usage };
   }
   async available() {
     return availability("claude");
@@ -172,6 +173,14 @@ var NativeWorkflowGitGateway = class {
   async currentCommit(branch) {
     return (await git(this.projectRoot, ["rev-parse", branch])).trim();
   }
+  async isMerged(_branch, commit) {
+    try {
+      await git(this.projectRoot, ["merge-base", "--is-ancestor", commit, "HEAD"]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
   async merge(branch) {
     try {
       if (!branch.startsWith("orchestry/workflow/")) return { success: false, detail: "Refusing to merge a non-workflow branch" };
@@ -185,10 +194,10 @@ var NativeWorkflowGitGateway = class {
     }
   }
 };
-async function claudeCall(pm, prompt, cwd, model, maxTurns, maxOutput, toolFree = false) {
-  const args = ["--print", "--output-format", "stream-json", "--max-turns", String(maxTurns), "--verbose", "--model", model, "--effort", "low"];
+async function claudeCall(pm, prompt, cwd, model, maxTurns, effort, timeout, maxOutput, toolFree = false) {
+  const args = ["--print", "--output-format", "stream-json", "--max-turns", String(maxTurns), "--verbose", "--model", model, "--effort", effort];
   if (toolFree) args.push("--bare", "--tools", "", "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--no-session-persistence");
-  const output = await spawnCapture(pm, "claude", args, cwd, prompt, maxOutput);
+  const output = await spawnCapture(pm, "claude", args, cwd, prompt, maxOutput, timeout);
   let text = "";
   let sessionId;
   let usage = {};
@@ -200,13 +209,18 @@ async function claudeCall(pm, prompt, cwd, model, maxTurns, maxOutput, toolFree 
     }
   }
   if (!text) throw new Error("Claude returned no result");
-  return { text, sessionId, usage: { input_tokens: usage.input_tokens, output_tokens: usage.output_tokens, cache_read: usage.cache_read_input_tokens, cache_write: usage.cache_creation_input_tokens } };
+  return { text, sessionId, usage: { input_chars: prompt.length, output_chars: text.length, input_tokens: usage.input_tokens, output_tokens: usage.output_tokens, cache_read: usage.cache_read_input_tokens, cache_write: usage.cache_creation_input_tokens } };
 }
-async function spawnCapture(pm, command, args, cwd, input, maxBytes) {
+async function spawnCapture(pm, command, args, cwd, input, maxBytes, timeoutMs) {
   const { process: child } = pm.spawn(command, args, { cwd, env: buildChildEnv(), stdio: ["pipe", "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
   let exceeded = false;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill("SIGTERM");
+  }, timeoutMs);
   child.stdout?.on("data", (chunk) => {
     stdout += chunk.toString();
     if (Buffer.byteLength(stdout) > maxBytes) {
@@ -221,7 +235,8 @@ async function spawnCapture(pm, command, args, cwd, input, maxBytes) {
   const code = await new Promise((resolve, reject) => {
     child.on("close", (value) => resolve(value ?? 1));
     child.on("error", reject);
-  });
+  }).finally(() => clearTimeout(timer));
+  if (timedOut) throw new Error(`${command} timed out after ${timeoutMs}ms`);
   if (exceeded) throw new Error(`${command} output exceeded configured maximum`);
   if (code !== 0) throw new Error(`${command} exited ${code}: ${stderr}`);
   return stdout;
@@ -232,6 +247,19 @@ async function availability(command) {
     return { available: true, detail: stdout.trim() };
   } catch {
     return { available: false, detail: `${command} CLI unavailable` };
+  }
+}
+async function detectWorkflowCapabilities() {
+  return { codex: await capability("codex"), claude: await capability("claude") };
+}
+async function capability(command) {
+  try {
+    const [{ stdout: version }, { stdout: help }] = await Promise.all([execFileAsync(command, ["--version"], { env: buildChildEnv(), timeout: 5e3 }), execFileAsync(command, ["--help"], { env: buildChildEnv(), timeout: 5e3, maxBuffer: 1024 * 1024 })]);
+    const required = command === "claude" ? ["--print", "--output-format", "--max-turns", "--model", "--effort"] : ["exec", "--json", "--sandbox"];
+    const unsupported = required.filter((flag) => !help.includes(flag));
+    return { available: true, version: version.trim(), native_resume: false, supported_options: required.filter((flag) => help.includes(flag)), unsupported_options: unsupported, detail: unsupported.length ? `Unsupported required options: ${unsupported.join(", ")}` : "Required workflow options detected; native resume remains disabled until an end-to-end probe is verified." };
+  } catch {
+    return { available: false, version: null, native_resume: false, supported_options: [], unsupported_options: [], detail: `${command} CLI unavailable` };
   }
 }
 async function git(cwd, args, maxBuffer = 4 * 1024 * 1024) {
@@ -265,10 +293,10 @@ function bounded(value, max) {
   if (Buffer.byteLength(value) > max) throw new Error("Role input exceeded configured maximum");
   return value;
 }
-function compactEvidence(value) {
-  return { commit: value.commit, diff_hash: value.diff_hash, files_changed: value.files_changed, insertions: value.insertions, deletions: value.deletions, risk_signals: value.risk_signals };
+function project(passport) {
+  return { schema_version: passport.schema_version, job_id: passport.job_id, objective: passport.objective, acceptance_criteria: passport.acceptance_criteria, mandatory_amendments: passport.mandatory_amendments, current_phase: passport.current_phase, current_revision: passport.current_revision, approved_plan_hash: passport.approved_plan_hash, allowed_file_scope: passport.allowed_file_scope, required_checks: passport.required_checks, current_blockers: passport.current_blockers, next_action: passport.next_action, current_commit: passport.current_commit };
 }
 
-export { NativeCodexWorkflowAdapter, NativeFableWorkflowAdapter, NativeOpusWorkflowAdapter, NativeWorkflowGitGateway };
-//# sourceMappingURL=native-adapters-225JVJOP.js.map
-//# sourceMappingURL=native-adapters-225JVJOP.js.map
+export { NativeCodexWorkflowAdapter, NativeFableWorkflowAdapter, NativeOpusWorkflowAdapter, NativeWorkflowGitGateway, detectWorkflowCapabilities };
+//# sourceMappingURL=native-adapters-G3A4TGDH.js.map
+//# sourceMappingURL=native-adapters-G3A4TGDH.js.map
