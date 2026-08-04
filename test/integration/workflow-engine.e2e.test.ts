@@ -3,132 +3,51 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { WorkflowEngine } from '../../src/application/workflow/engine.js';
-import type { CodexRolePort, FableCallOptions, FableRolePort, GitEvidence, OpusRolePort, WorkflowGitPort } from '../../src/application/workflow/ports.js';
-import type { CheckResults, CodexBrief, CodexPlanReview, CodexSynthesis, CodexTechnicalReview, FableComplianceReview, FablePlan, OpusResult } from '../../src/domain/workflow/contracts.js';
-import type { WorkflowPassportV1 } from '../../src/domain/workflow/state.js';
+import type { CodexDecisionEvidence, CodexRolePort, FableCallOptions, FableRolePort, GitEvidence, OpusRolePort, WorkflowGitPort } from '../../src/application/workflow/ports.js';
+import type { CheckResults, CodexDecisionStage, CodexDecisionV2, FableAdviceV1, OpusResult } from '../../src/domain/workflow/contracts.js';
+import type { WorkflowPassportV2 } from '../../src/domain/workflow/state.js';
 import { WorkflowArtifactStore, hashCanonical } from '../../src/infrastructure/workflow/artifact-store.js';
 import { clearEnsuredDirs, closeAllAppendHandles } from '../../src/infrastructure/storage/fs-utils.js';
 
-let root: string; let store: WorkflowArtifactStore; let fakes: Fakes; let engine: WorkflowEngine;
-const CHECKS = ['npm test'];
-beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'workflow-e2e-')); store = new WorkflowArtifactStore(root); fakes = new Fakes(root); engine = makeEngine(store, fakes); });
+let root: string; let store: WorkflowArtifactStore; let fakes: Fakes; let engine: WorkflowEngine; const CHECKS = ['npm test'];
+beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'workflow-v2-e2e-')); store = new WorkflowArtifactStore(root); fakes = new Fakes(root); engine = new WorkflowEngine(store, { codex: fakes, fable: fakes, opus: fakes, git: fakes }); });
 afterEach(async () => { closeAllAppendHandles(); clearEnsuredDirs(); await fs.rm(root, { recursive: true, force: true }); });
 
-describe('Codex-Fable-Opus workflow E2E', () => {
-  it('runs the complete happy path through both reviews and strict merge', async () => {
-    const id = await engine.start({ objective: 'security workflow', required_checks: CHECKS }); const result = await engine.run(id);
-    expect(result.phase, result.blocker ?? undefined).toBe('done'); expect(fakes.merges).toBe(1); expect(fakes.mergeBeforeDoneApproval).toBe(false); expect(result.fable_pre_opus_calls).toBe(2); expect(result.fable_post_opus_calls).toBe(1);
-    const passport = await store.readPassport(id); expect(passport?.artifacts).toHaveLength(10); expect(passport?.artifacts.every((a) => /-r\d{3}-i\d{3}-a\d{6}/.test(a.filename))).toBe(true);
-    expect(fakes.fableOptions.every((o) => o.max_turns === 1 && o.effort === 'low' && !o.workspace.startsWith(root))).toBe(true);
-  });
-
-  it('applies APPLY_AND_GO without another Codex plan review', async () => {
-    fakes.planVerdicts = ['APPLY_AND_GO']; const id = await engine.start({ objective: 'small docs', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('done'); expect(fakes.codexPlanReviews).toBe(1); expect(fakes.finalAmendments).toEqual(['bounded patch']);
-  });
-
-  it('forces re-review when APPLY_AND_GO changes are material', async () => {
-    fakes.materialPatch = true; fakes.planVerdicts = ['APPLY_AND_GO', 'GO']; const id = await engine.start({ objective: 'x', required_checks: CHECKS, config: { fable_pre_opus_cap: 3 } }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(fakes.codexPlanReviews).toBe(2); expect(fakes.merges).toBe(1);
-  });
-
-  it('pauses instead of silently exceeding the pre-Opus Fable cap', async () => {
-    fakes.planVerdicts = ['REVISE', 'GO']; const id = await engine.start({ objective: 'x', required_checks: CHECKS }); const result = await engine.run(id); expect(result.phase).toBe('blocked'); expect(result.fable_pre_opus_calls).toBe(2); expect(fakes.codexPromptFallbacks).toBe(0);
-  });
-
-  it('does not retry a failed Fable call', async () => {
-    fakes.failFable = true; const id = await engine.start({ objective: 'x', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('failed'); expect(fakes.fablePlanCalls).toBe(1);
-    expect((await store.readJob(id))?.fable_total_calls).toBe(1); expect((await store.readSessions(id))?.usage.fable).toMatchObject({ calls: 1, failed_calls: 1 });
-  });
-
-  it('records failed Codex calls without retrying them', async () => {
-    fakes.failCodex = true; const id = await engine.start({ objective: 'x', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('failed'); expect(fakes.codexBriefCalls).toBe(1);
-    expect((await store.readSessions(id))?.usage.codex).toMatchObject({ calls: 1, failed_calls: 1 });
-  });
-
-  it('pauses an interrupted reserved operation without another model call', async () => {
-    const id = await engine.start({ objective: 'x', required_checks: CHECKS }); await store.patchJob(id, { current_operation: { phase: 'codex_brief', invocation_id: 'inv_interrupted', started_at: new Date().toISOString(), retry_count: 0 } });
-    const result = await engine.run(id); expect(result.phase).toBe('blocked'); expect(result.blocker).toContain('inv_interrupted'); expect((await store.readSessions(id))?.usage.codex.calls).toBe(0);
-  });
-
-  it('reconciles a durable invocation receipt without a duplicate model call', async () => {
-    const id = await engine.start({ objective: 'x', required_checks: CHECKS }); const operation = { phase: 'codex_brief' as const, invocation_id: 'inv_completed', started_at: new Date().toISOString(), retry_count: 0 }; await store.patchJob(id, { current_operation: operation }); await store.writeInvocationReceipt({ schema_version: 1, job_id: id, invocation_id: operation.invocation_id, phase: operation.phase, role: 'codex', timestamp: new Date().toISOString(), result: { value: { job_id: id, objective: 'x', constraints: [], allowed_file_scope: [], required_checks: CHECKS }, session_id: 'receipt-session' } }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect((await store.readSessions(id))?.usage.codex.calls).toBeGreaterThan(0); expect(fakes.sequence.filter((item) => item === 'brief')).toHaveLength(0);
-  });
-
-  it('does not reserve Fable budget twice when replaying a durable receipt', async () => {
-    const id = await engine.start({ objective: 'x', required_checks: CHECKS }); await engine.advance(id); const operation = { phase: 'fable_plan' as const, invocation_id: 'inv_fable_completed', started_at: new Date().toISOString(), retry_count: 0 }; await store.patchJob(id, { current_operation: operation, fable_pre_opus_calls: 1, fable_total_calls: 1 }); const passport = await store.readPassport(id); await store.writeInvocationReceipt({ schema_version: 1, job_id: id, invocation_id: operation.invocation_id, phase: operation.phase, role: 'fable', timestamp: new Date().toISOString(), result: { value: plan(passport!) } }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(result.fable_total_calls).toBe(3); expect(fakes.fablePlanCalls).toBe(0);
-  });
-
-  it('stops at the whole-workflow Fable cap', async () => {
-    fakes.planVerdicts = ['REVISE']; const id = await engine.start({ objective: 'x', required_checks: CHECKS, config: { fable_pre_opus_cap: 1, fable_total_cap: 1 } }); const result = await engine.run(id); expect(result.phase).toBe('blocked'); expect(result.fable_total_calls).toBe(1); expect(fakes.fablePlanCalls).toBe(1);
-  });
-
-  it('always performs one Fable post-Opus review', async () => { fakes.risky = false; const id = await engine.start({ objective: 'plain change', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('done'); expect(fakes.complianceCalls).toBe(1); });
-
-  it('deep-merges independent role profile overrides', async () => { const id = await engine.start({ objective: 'profile', required_checks: CHECKS, config: { profiles: { opus: { effort: 'medium', max_turns: 9 } } } }); const passport = await store.readPassport(id); expect(passport?.config.profiles.opus).toMatchObject({ model: 'opus', effort: 'medium', max_turns: 9, timeout_ms: 1_800_000, permission_mode: 'worktree' }); });
-
-  it('requests native Opus continuation for a correction', async () => {
-    fakes.synthesisVerdicts = ['REVISE', 'GO']; const id = await engine.start({ objective: 'x', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('done'); expect(fakes.opusModes).toEqual(['new', 'native_resume']); expect(fakes.opusSessionInputs).toEqual([null, 'opus-session-1']);
-  });
-
-  it('allows one Fable review per Opus iteration during correction', async () => {
-    fakes.synthesisVerdicts = ['REVISE', 'GO']; const id = await engine.start({ objective: 'security correction', required_checks: CHECKS, config: { post_review: 'always' } }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(result.fable_post_opus_iteration_calls).toBe(1); expect(fakes.complianceCalls).toBe(2); expect(result.fable_total_calls).toBe(5);
-  });
-
-  it('pauses safely on STOP', async () => {
-    fakes.synthesisVerdicts = ['STOP']; const id = await engine.start({ objective: 'x', required_checks: CHECKS }); const result = await engine.run(id); expect(result.phase).toBe('blocked'); expect(result.blocker).toContain('STOP:');
-  });
-
-  it('recovers persisted phase and sessions in a new engine', async () => {
-    const id = await engine.start({ objective: 'x', required_checks: CHECKS }); await engine.pause(id); const restarted = makeEngine(new WorkflowArtifactStore(root), fakes); expect((await restarted.resume(id, { reason: 'continue' })).phase).toBe('done'); expect((await store.readSessions(id))?.codex_thread_id).toBe('codex-thread');
-  });
-  it('restarts the engine after every phase without duplicate side effects', async () => { const id = await engine.start({ objective: 'security', required_checks: CHECKS, config: { post_review: 'always' } }); let result = await store.readJob(id); for (let steps = 0; steps < 20 && result && result.phase !== 'done'; steps++) { const restarted = makeEngine(new WorkflowArtifactStore(root), fakes); result = await restarted.advance(id); } expect(result?.phase).toBe('done'); expect(fakes.merges).toBe(1); expect((await store.readSessions(id))?.recorded_invocations.length).toBe((await store.readSessions(id))?.usage.codex.calls! + (await store.readSessions(id))?.usage.fable.calls! + (await store.readSessions(id))?.usage.opus.calls!); });
-
-  it('waits at the join barrier until the selected compliance review exists', async () => {
-    const id = await engine.start({ objective: 'security', required_checks: CHECKS, config: { post_review: 'always' } }); expect((await engine.run(id)).phase).toBe('done'); expect(fakes.synthesisSawCompliance).toBe(true); expect(fakes.sequence.indexOf('compliance')).toBeLessThan(fakes.sequence.indexOf('synthesis'));
-  });
-
-  it('never merges before DONE or when checks fail', async () => {
-    fakes.checksPass = false; const id = await engine.start({ objective: 'x', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('blocked'); expect(fakes.merges).toBe(0);
-  });
-
-  it('rejects obvious no-op commands as meaningful merge checks', async () => {
-    const id = await engine.start({ objective: 'x', required_checks: ['true', 'git diff --check'] }); const result = await engine.run(id); expect(result.phase).toBe('blocked'); expect(result.blocker).toContain('Meaningful project verification'); expect(fakes.merges).toBe(0);
-  });
-
-  it('invalidates approval if the branch commit changes', async () => {
-    fakes.staleAtMerge = true; const id = await engine.start({ objective: 'x', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('failed'); expect(fakes.merges).toBe(0);
-  });
-
-  it('invalidates approval if the reviewed diff changes', async () => {
-    fakes.staleDiffAtMerge = true; const id = await engine.start({ objective: 'x', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('failed'); expect(fakes.merges).toBe(0);
-  });
-
-  it('fails closed on merge failure', async () => {
-    fakes.mergeFails = true; const id = await engine.start({ objective: 'x', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('failed'); expect(fakes.merges).toBe(1);
-  });
+describe('direct Codex-Opus workflow v2', () => {
+  it('completes adaptive default with zero Fable calls and two Codex decisions', async () => { const id = await engine.start({ objective: 'direct change', required_checks: CHECKS }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(result.fable_calls).toBe(0); expect(fakes).toMatchObject({ codexCalls: 2, fableCalls: 0, opusCalls: 1, merges: 1 }); expect(fakes.sequence).toEqual(['codex:pre_opus', 'opus', 'codex:post_opus']); });
+  it('direct mode mechanically skips a requested consultation and executes fallback', async () => { fakes.decisions = [consult('DISPATCH_OPUS'), accept()]; const id = await engine.start({ objective: 'direct', mode: 'direct', required_checks: CHECKS }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(fakes.fableCalls).toBe(0); expect(result.consultation_status).toBe('fallback_executed'); expect(fakes.opusPrompts[0]).toContain('safe fallback'); });
+  it('adaptive mode honors a configured zero Fable cap', async () => { fakes.decisions = [consult('DISPATCH_OPUS'), accept()]; const id = await engine.start({ objective: 'zero cap', config: { fable_total_cap: 0 }, required_checks: CHECKS }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(fakes.fableCalls).toBe(0); expect(result.consultation_status).toBe('fallback_executed'); });
+  it('runs one bounded adaptive consultation and returns advice to Codex before Opus', async () => { fakes.decisions = [consult('DISPATCH_OPUS'), dispatch('verified advice'), accept()]; const id = await engine.start({ objective: 'optional advice', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('done'); expect(fakes.fableCalls).toBe(1); expect(fakes.sequence).toEqual(['codex:pre_opus', 'fable', 'codex:after_fable_pre', 'opus', 'codex:post_opus']); expect(fakes.codexEvidence[1]?.fable_advice?.answer).toBe('option A'); });
+  it('uses fallback when optional Fable fails without blocking direct progress', async () => { fakes.decisions = [consult('DISPATCH_OPUS'), accept()]; fakes.failFable = true; const id = await engine.start({ objective: 'fallback', required_checks: CHECKS }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(fakes.fableCalls).toBe(1); expect(result.consultation_status).toBe('fallback_executed'); expect(fakes.opusPrompts[0]).toContain('safe fallback'); });
+  it('resumes a persisted consultation fallback without a second Fable attempt', async () => { fakes.decisions = [consult('DISPATCH_OPUS'), accept()]; const id = await engine.start({ objective: 'fallback restart', required_checks: CHECKS }); expect((await engine.advance(id)).phase).toBe('fable_consultation'); const operation = { phase: 'fable_consultation' as const, invocation_id: 'inv_interrupted_fallback', started_at: new Date().toISOString(), retry_count: 0 }; expect(await store.reserveOperation(id, 'fable_consultation', operation)).toBe(true); await store.patchJob(id, { consultation_status: 'fallback_executed' }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(fakes.fableCalls).toBe(0); expect(fakes.opusPrompts[0]).toContain('safe fallback'); });
+  it('skips duplicate consultation after the workflow budget is consumed', async () => { fakes.decisions = [consult('DISPATCH_OPUS'), dispatch('after advice'), consult('CORRECT_OPUS'), accept()]; const id = await engine.start({ objective: 'one only', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('done'); expect(fakes.fableCalls).toBe(1); expect(fakes.opusCalls).toBe(2); expect(fakes.opusPrompts[1]).toContain('safe fallback'); });
+  it('sends Codex corrections directly to Opus', async () => { fakes.decisions = [dispatch(), correct('fix directly'), accept()]; const id = await engine.start({ objective: 'correct', required_checks: CHECKS }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(fakes.fableCalls).toBe(0); expect(fakes.opusPrompts).toEqual(['implement directly', 'fix directly']); expect(result.opus_iteration).toBe(2); });
+  it('rejects ACCEPT before review evidence', async () => { fakes.decisions = [{ ...accept(), reviewed_commit: null }]; const id = await engine.start({ objective: 'bad accept', required_checks: CHECKS }); const result = await engine.run(id); expect(result.phase).toBe('failed'); expect(result.blocker).toContain('invalid during pre_opus'); expect(fakes.opusCalls).toBe(0); });
+  it('pauses rather than merging without meaningful checks', async () => { const id = await engine.start({ objective: 'no checks', required_checks: ['true'] }); const result = await engine.run(id); expect(result.phase).toBe('blocked'); expect(fakes.merges).toBe(0); });
+  it('restarts after every phase without duplicate calls or merge', async () => { const id = await engine.start({ objective: 'restart', required_checks: CHECKS }); let result = await store.readJob(id); for (let i = 0; i < 20 && result?.phase !== 'done'; i++) result = await new WorkflowEngine(new WorkflowArtifactStore(root), { codex: fakes, fable: fakes, opus: fakes, git: fakes }).advance(id); expect(result?.phase).toBe('done'); expect(fakes).toMatchObject({ codexCalls: 2, opusCalls: 1, merges: 1 }); });
+  it('blocks on a stale reviewed diff', async () => { fakes.staleDiff = true; const id = await engine.start({ objective: 'stale diff', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('blocked'); expect(fakes.merges).toBe(0); });
+  it('fails closed on stale branch commit', async () => { fakes.staleCommit = true; const id = await engine.start({ objective: 'stale commit', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('failed'); expect(fakes.merges).toBe(0); });
+  it('fails closed when checks move the reviewed branch', async () => { fakes.moveCommitDuringFinalChecks = true; const id = await engine.start({ objective: 'moving commit', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('failed'); expect(fakes.merges).toBe(0); });
+  it('does not reconcile an externally merged unreviewed branch tip', async () => { fakes.staleCommit = true; fakes.merged = true; const id = await engine.start({ objective: 'unreviewed merge', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('failed'); expect(fakes.merges).toBe(0); });
+  it('fails closed on merge failure', async () => { fakes.mergeFails = true; const id = await engine.start({ objective: 'merge fail', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('failed'); expect(fakes.merges).toBe(1); });
 });
 
 class Fakes implements CodexRolePort, FableRolePort, OpusRolePort, WorkflowGitPort {
-  planVerdicts: CodexPlanReview['verdict'][] = ['GO']; synthesisVerdicts: CodexSynthesis['verdict'][] = ['GO']; materialPatch = false; failFable = false; failCodex = false; risky = true; checksPass = true; staleAtMerge = false; staleDiffAtMerge = false; mergeFails = false;
-  revision = 1; commitIndex = 1; current = 'abcdef1'; codexBriefCalls = 0; codexPlanReviews = 0; codexPromptFallbacks = 0; fablePlanCalls = 0; complianceCalls = 0; opusCalls = 0; merges = 0; mergeBeforeDoneApproval = false; synthesisSawCompliance = false;
-  fableOptions: FableCallOptions[] = []; finalAmendments: string[] = []; opusModes: string[] = []; opusSessionInputs: Array<string | null> = []; sequence: string[] = [];
+  decisions: CodexDecisionV2[] = [dispatch(), accept()]; failFable = false; checksPass = true; staleDiff = false; staleCommit = false; moveCommitDuringFinalChecks = false; merged = false; mergeFails = false; codexCalls = 0; fableCalls = 0; opusCalls = 0; merges = 0; checkCalls = 0; commitIndex = 1; current = 'abcdef1'; sequence: string[] = []; opusPrompts: string[] = []; codexEvidence: CodexDecisionEvidence[] = [];
   constructor(private root: string) {}
   async available() { return { available: true, detail: 'fake' }; }
-  async brief(p: WorkflowPassportV1): Promise<{ value: CodexBrief; session_id: string }> { this.codexBriefCalls++; this.sequence.push('brief'); if (this.failCodex) throw new Error('codex failed once'); return { value: { job_id: p.job_id, objective: p.objective, constraints: [], allowed_file_scope: p.allowed_file_scope, required_checks: p.required_checks }, session_id: 'codex-thread' }; }
-  async plan(p: WorkflowPassportV1, _b: CodexBrief, _previous: FablePlan | null, _changes: string[], options: FableCallOptions) { this.fablePlanCalls++; this.fableOptions.push(options); if (this.failFable) throw new Error('fable failed once'); return { value: plan(p) }; }
-  async reviewPlan(p: WorkflowPassportV1, value: FablePlan) { this.codexPlanReviews++; const verdict = this.planVerdicts.shift() ?? 'GO'; const requiresReReview = this.materialPatch; this.materialPatch = false; return { value: { job_id: p.job_id, revision: value.revision, verdict, summary: verdict, required_changes: verdict === 'APPLY_AND_GO' ? ['bounded patch'] : verdict === 'REVISE' ? ['replan'] : [], requires_re_review: requiresReReview, risk_level: requiresReReview ? 'high' : 'low', reason: verdict, acceptance_criteria: value.acceptance_criteria } as CodexPlanReview, session_id: 'codex-thread', resumed: true }; }
-  async finalPrompt(_p: WorkflowPassportV1, _plan: FablePlan, amendments: string[], options: FableCallOptions) { this.finalAmendments = amendments; this.fableOptions.push(options); return { value: 'Implement approved plan' }; }
-  async compileFinalPrompt() { this.codexPromptFallbacks++; return { value: 'Codex fallback prompt', session_id: 'codex-thread' }; }
-  async prepare(id: string) { const worktree = path.join(this.root, 'worktree', id); await fs.mkdir(worktree, { recursive: true }); return { branch: `branch/${id}`, worktree, target_branch: 'main', base_commit: 'abcdef1' }; }
-  async execute(p: WorkflowPassportV1, _prompt: string, _workspace: string, session: string | null, mode: 'new' | 'native_resume' | 'passport_handoff') { this.opusCalls++; this.opusModes.push(mode); this.opusSessionInputs.push(session); this.current = `abcdef${++this.commitIndex}`; return { value: { job_id: p.job_id, status: 'completed', files_changed: ['src/x.ts'], commands_run: ['test'], tests_reported: ['pass'], deviations: [], unresolved: [], summary: 'done' } as OpusResult, session_id: mode === 'new' ? `opus-session-${this.opusCalls}` : session ?? undefined, session_mode: mode }; }
-  async inspect(branch: string, worktree: string): Promise<GitEvidence> { const changed = this.staleDiffAtMerge && this.sequence.at(-1) === 'synthesis'; return { branch, worktree, commit: this.current, diff: changed ? 'changed diff' : 'full diff', diff_hash: changed ? 'b'.repeat(64) : hashCanonical('full diff'), files_changed: ['src/x.ts'], insertions: 2, deletions: 1, risk_signals: this.risky ? ['security'] : [] }; }
-  async runChecks(worktree: string, commit: string, commands: string[]): Promise<CheckResults> { return { job_id: path.basename(worktree), commit, passed: this.checksPass, checks: commands.map((command) => ({ command, passed: this.checksPass, output: 'complete output' })) }; }
-  async technicalReview(p: WorkflowPassportV1, evidence: GitEvidence, checks: CheckResults) { this.sequence.push('technical'); return { value: { job_id: p.job_id, reviewed_commit: evidence.commit, checks_passed: checks.passed, evidence: ['diff'], required_fixes: checks.passed ? [] : ['checks failed'], concise_reason: 'reviewed' } as CodexTechnicalReview, session_id: 'codex-thread', resumed: true }; }
-  async compliance(p: WorkflowPassportV1, _plan: FablePlan, _opus: OpusResult, _evidence: GitEvidence, _checks: CheckResults, options: FableCallOptions) { this.complianceCalls++; this.sequence.push('compliance'); this.fableOptions.push(options); return { value: { job_id: p.job_id, approved_plan_hash: p.approved_plan_hash!, verdict: 'ALIGNED', plan_deviations: [], missing_requirements: [], recommended_repairs: [] } as FableComplianceReview }; }
-  async synthesize(p: WorkflowPassportV1, _evidence: GitEvidence, technical: CodexTechnicalReview, compliance: FableComplianceReview | null, checks: CheckResults) { this.sequence.push('synthesis'); this.synthesisSawCompliance = compliance !== null; const verdict = this.synthesisVerdicts.shift() ?? 'GO'; const go = verdict === 'GO'; return { value: { job_id: p.job_id, reviewed_commit: technical.reviewed_commit, verdict, merge_allowed: go && checks.passed, evidence: [], summary: verdict, required_changes: verdict === 'REVISE' ? ['repair'] : [], requires_re_review: verdict === 'REVISE', risk_level: verdict === 'STOP' ? 'high' : 'low', reason: verdict } as CodexSynthesis, session_id: 'codex-thread', resumed: true }; }
-  async currentCommit() { return this.staleAtMerge ? 'fffffff' : this.current; }
-  async isMerged() { return false; }
-  async merge() { this.merges++; this.mergeBeforeDoneApproval = this.sequence.at(-1) !== 'synthesis'; return this.mergeFails ? { success: false, detail: 'conflict' } : { success: true, detail: 'merged' }; }
+  async decide(p: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence) { this.codexCalls++; this.sequence.push(`codex:${stage}`); this.codexEvidence.push(evidence); const value = this.decisions.shift() ?? accept(); return { value: { ...value, job_id: p.job_id, ...(value.reviewed_commit === 'CURRENT' ? { reviewed_commit: evidence.evidence?.commit ?? null } : {}) }, session_id: 'codex-thread' }; }
+  async consult(_job: string, consultationId: string, _query: unknown, _options: FableCallOptions) { this.fableCalls++; this.sequence.push('fable'); if (this.failFable) throw new Error('fable unavailable'); return { value: { schema_version: 1, consultation_id: consultationId, answer: 'option A', alternatives: ['option B'], uncertainties: [] } as FableAdviceV1 }; }
+  async prepare(id: string) { const worktree = path.join(this.root, 'worktree', id); await fs.mkdir(worktree, { recursive: true }); return { branch: `orchestry/workflow/${id}`, worktree, target_branch: 'main', base_commit: 'abcdef1' }; }
+  async execute(p: WorkflowPassportV2, prompt: string) { this.opusCalls++; this.sequence.push('opus'); this.opusPrompts.push(prompt); this.current = `abcdef${++this.commitIndex}`; return { value: { job_id: p.job_id, status: 'completed', files_changed: ['src/x.ts'], commands_run: ['npm test'], tests_reported: ['pass'], deviations: [], unresolved: [], summary: 'done' } as OpusResult, session_id: 'opus-session' }; }
+  async inspect(branch: string, worktree: string): Promise<GitEvidence> { const changed = this.staleDiff && this.sequence.at(-1) === 'codex:post_opus'; return { branch, worktree, commit: this.current, diff: changed ? 'changed' : 'diff', diff_hash: changed ? 'b'.repeat(64) : hashCanonical('diff'), files_changed: ['src/x.ts'], insertions: 1, deletions: 0, risk_signals: [] }; }
+  async runChecks(worktree: string, commit: string, commands: string[]): Promise<CheckResults> { this.checkCalls++; if (this.moveCommitDuringFinalChecks && this.checkCalls === 3) this.current = '9999999'; return { job_id: path.basename(worktree), commit, passed: this.checksPass, checks: commands.map((command) => ({ command, passed: this.checksPass, output: 'ok' })) }; }
+  async currentCommit() { return this.staleCommit ? 'fffffff' : this.current; }
+  async isMerged() { return this.merged; }
+  async merge() { this.merges++; return this.mergeFails ? { success: false, detail: 'conflict' } : { success: true, detail: 'merged' }; }
 }
 
-function plan(p: WorkflowPassportV1): FablePlan { return { job_id: p.job_id, revision: p.current_revision, assumptions: [], acceptance_criteria: ['works'], implementation_steps: ['implement'], risks: [], questions_requiring_human: [] }; }
-function makeEngine(workflowStore: WorkflowArtifactStore, fake: Fakes): WorkflowEngine { return new WorkflowEngine(workflowStore, { codex: fake, fable: fake, opus: fake, git: fake }); }
+function dispatch(brief = 'implement directly'): CodexDecisionV2 { return { schema_version: 2, job_id: 'wf_placeholder', action: 'DISPATCH_OPUS', summary: 'dispatch', implementation_brief: brief, required_changes: [], risk_level: 'low', fable_query: null, reviewed_commit: null }; }
+function accept(): CodexDecisionV2 { return { schema_version: 2, job_id: 'wf_placeholder', action: 'ACCEPT', summary: 'accept', implementation_brief: null, required_changes: [], risk_level: 'low', fable_query: null, reviewed_commit: 'CURRENT' }; }
+function correct(change: string): CodexDecisionV2 { return { schema_version: 2, job_id: 'wf_placeholder', action: 'CORRECT_OPUS', summary: 'correct', implementation_brief: null, required_changes: [change], risk_level: 'medium', fable_query: null, reviewed_commit: 'CURRENT' }; }
+function consult(fallback: 'DISPATCH_OPUS' | 'CORRECT_OPUS'): CodexDecisionV2 { return { schema_version: 2, job_id: 'wf_placeholder', action: 'CONSULT_FABLE', summary: 'consult', implementation_brief: null, required_changes: [], risk_level: 'low', fable_query: { purpose: 'COMPARE_BOUNDED_OPTIONS', question: 'A or B?', verification_method: 'compare deterministic tests', fallback_if_skipped: { action: fallback, instructions: 'safe fallback' } }, reviewed_commit: fallback === 'CORRECT_OPUS' ? 'CURRENT' : null }; }

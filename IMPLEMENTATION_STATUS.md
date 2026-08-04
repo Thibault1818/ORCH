@@ -10,7 +10,7 @@ Dangerous permission bypass and shell execution are disabled by default and requ
 
 ## Verification
 
-The deterministic fake-adapter workflow covers GO, APPLY_AND_GO, REVISE, STOP, Fable caps, passport handoff, correction cycles, review ordering, stale commit and diff approvals, deterministic checks, and fail-closed merging. Native-boundary tests verify role-specific Claude argv and stdin-only prompt transport. CI runs the exact-commit Git install in isolated prefixes on macOS and Linux with Node 20 and 24.
+The workflow uses a schema-v2 direct Codex -> Opus -> Codex state machine. Deterministic fake adapters cover adaptive zero-Fable execution, direct mode, one optional advisory consultation, safe consultation fallback, direct correction cycles, phase-valid actions, restart recovery, stale commit/diff rejection, deterministic checks, and fail-closed merging. Native-boundary tests verify role-specific argv and stdin-only prompt transport. Legacy schema-v1 jobs remain inspectable but are blocked from unsafe resume. CI runs exact-commit Git installation in isolated prefixes on macOS and Linux with Node 20 and 24.
 
 ## Upstream Reconciliation
 

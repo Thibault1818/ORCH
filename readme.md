@@ -42,16 +42,17 @@ cd ~/your-project && orch
 
 This repository is private/local package identity and is not published to npm. Review and update the pinned commit deliberately when adopting later fork changes.
 
-## Codex to Fable to Opus workflow
+## Direct Codex to Opus workflow
 
-The secured fork includes a recoverable, artifact-based implementation pipeline. Opus works on a dedicated worktree and cannot merge until deterministic checks pass and Codex returns `GO` with explicit merge authorization for the unchanged commit and diff.
+The secured fork includes a recoverable, artifact-based implementation pipeline. The normal path is Codex supervisor to Opus implementer to Codex supervisor. Opus works on a dedicated worktree and cannot merge until deterministic checks pass and Codex returns `ACCEPT` for the unchanged commit and diff.
 
 ```bash
 # First verify that the local Codex and Claude CLIs are available.
 orch workflow doctor
 
 # Start the autonomous foreground controller. It prints the recoverable job ID first.
-orch workflow start "Describe the change you want" --pipeline codex-fable-opus
+orch workflow start "Describe the change you want"            # adaptive, normally zero Fable calls
+orch workflow start "Describe the change you want" --mode direct
 
 # Monitor or recover the printed job ID from another terminal.
 orch workflow status <job-id>
@@ -62,7 +63,7 @@ orch workflow artifacts <job-id>
 orch workflow cancel <job-id>
 ```
 
-Fable is limited to one turn per call in an empty temporary workspace. Defaults are two pre-Opus calls, one mandatory review per implementation iteration, and five calls for the complete workflow. Reaching a cap pauses safely; ORCH never substitutes another model or silently exceeds it. Canonical artifacts and session references live under `.orchestry/workflows/<job-id>/` with restrictive permissions and secret redaction.
+Fable is an optional, stateless, advisory-only consultant. Adaptive mode permits at most one narrowly scoped call for the entire workflow when Codex requests it inside an already-required decision. Direct mode prohibits Fable. Denied or failed consultations execute Codex's predeclared safe fallback and do not block the direct workflow. Canonical artifacts and Codex/Opus session references live under `.orchestry/workflows/<job-id>/` with restrictive permissions and secret redaction.
 
 <br/>
 
@@ -160,15 +161,16 @@ Install the fork from the pinned Git commit shown above. ORCH auto-initializes a
 
 Installation never changes user configuration. To deliberately register the optional `/orch` skill, run `orch setup claude-integration` and confirm the change. For an explicitly authorized persistent installation, use the same exact-SHA command with a dedicated prefix you control instead of the temporary prefix; do not install the unpinned upstream package.
 
-### Recoverable low-token workflow
+### Recoverable direct workflow
 
 ```bash
 orch setup
 orch workflow start "Describe the implementation" --check "npm test"
+orch workflow start "Never consult Fable" --mode direct --check "npm test"
 orch workflow status
 ```
 
-`GO` proceeds, `APPLY_AND_GO` lets Fable apply bounded changes without another Codex plan review, `REVISE` starts a bounded correction, and `STOP` requires `orch workflow resume <job-id> --approve-stop --reason "approved exception"`. Every Opus iteration receives one Fable review before the final Codex decision. Fable defaults to two pre-Opus calls, one post-Opus call per implementation iteration, and five calls for the whole workflow. `orch workflow status` shows counters, character/token estimates, duration, failures, context mode, and session rotations.
+Codex returns strict phase-valid actions: `DISPATCH_OPUS`, `ACCEPT`, `CORRECT_OPUS`, `CONSULT_FABLE`, `PAUSE`, or `STOP`. Codex sends briefs and corrections directly to Opus. `CONSULT_FABLE` is exceptional, low-risk, bounded to one call, and its advice must return to Codex before it can influence execution. `orch workflow status` shows mode, optional consultation status, usage, context mode, and session rotations.
 
 After a terminal restart, use `orch workflow status` and then `orch workflow resume <job-id> --reason "terminal restarted"`. If status reports an interrupted invocation without a durable receipt, retry only after review with `--retry-invocation --reason "approved retry"`. Use `orch workflow session-rotate <job-id> opus --reason "expired session"` when a stored identity is invalid. ORCH defaults to an honest compact `passport_handoff`, even when help output advertises resume. Set `ORCHESTRY_ENABLE_NATIVE_RESUME=1` only after empirically verifying continuation for the installed CLI versions; invalid identities then rotate once through a handoff, while ambiguous timeouts fail closed without a second call.
 
@@ -226,7 +228,7 @@ orch run --all --watch
 
 ### Your code is safe
 
-> **Every agent works in an isolated git worktree.** Your `main` branch is never touched until you explicitly approve and merge. Mandatory review step in the state machine — no code ships without your OK. Agents can't overwrite each other's work.
+> **Every implementing agent works in an isolated git worktree.** The direct workflow cannot merge until Codex accepts the exact commit and diff and deterministic checks pass. Agents can't overwrite each other's work.
 
 <details>
 <summary><strong>Why does each agent need ~300 MB?</strong></summary>
@@ -708,7 +710,7 @@ No. **Solo founders are the primary users.** You + 2 agents is already a zero-hu
 
 <br/>
 
-No. Every agent works in an isolated git worktree on its own branch. Nothing touches `main` until you explicitly approve. Mandatory review step in the state machine. Scope overlap detection prevents conflicts before they happen.
+No. Every implementing agent works in an isolated git worktree on its own branch. The direct workflow merges only after Codex accepts the exact reviewed commit and diff and deterministic checks pass. Scope overlap detection prevents conflicts before they happen.
 
 </details>
 

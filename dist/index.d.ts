@@ -239,34 +239,37 @@ interface RunEvent {
 }
 type RunEventType = 'agent_output' | 'file_changed' | 'command_run' | 'tool_call' | 'error' | 'done';
 
-declare const WORKFLOW_SCHEMA_VERSION: 1;
+declare const WORKFLOW_SCHEMA_VERSION: 2;
 type ProducingRole = 'fable' | 'codex' | 'opus' | 'orchestrator';
-interface CodexBrief {
-    job_id: string;
-    objective: string;
-    constraints: string[];
-    allowed_file_scope: string[];
-    required_checks: string[];
+type CodexAction = 'DISPATCH_OPUS' | 'ACCEPT' | 'CORRECT_OPUS' | 'CONSULT_FABLE' | 'PAUSE' | 'STOP';
+type FablePurpose = 'COMPARE_BOUNDED_OPTIONS' | 'GENERATE_NONCRITICAL_ALTERNATIVES' | 'CHALLENGE_REVERSIBLE_PLAN';
+interface FableFallbackV1 {
+    action: 'DISPATCH_OPUS' | 'CORRECT_OPUS' | 'PAUSE';
+    instructions: string;
 }
-interface FablePlan {
-    job_id: string;
-    revision: number;
-    assumptions: string[];
-    acceptance_criteria: string[];
-    implementation_steps: string[];
-    risks: string[];
-    questions_requiring_human: string[];
+interface FableQueryV1 {
+    purpose: FablePurpose;
+    question: string;
+    verification_method: string;
+    fallback_if_skipped: FableFallbackV1;
 }
-interface CodexPlanReview {
+interface CodexDecisionV2 {
+    schema_version: 2;
     job_id: string;
-    revision: number;
-    verdict: 'GO' | 'APPLY_AND_GO' | 'REVISE' | 'STOP';
+    action: CodexAction;
     summary: string;
+    implementation_brief: string | null;
     required_changes: string[];
-    requires_re_review: boolean;
     risk_level: 'low' | 'medium' | 'high';
-    reason: string;
-    acceptance_criteria: string[];
+    fable_query: FableQueryV1 | null;
+    reviewed_commit: string | null;
+}
+interface FableAdviceV1 {
+    schema_version: 1;
+    consultation_id: string;
+    answer: string;
+    alternatives: string[];
+    uncertainties: string[];
 }
 interface OpusResult {
     job_id: string;
@@ -278,34 +281,6 @@ interface OpusResult {
     unresolved: string[];
     summary: string;
 }
-interface FableComplianceReview {
-    job_id: string;
-    approved_plan_hash: string;
-    verdict: 'ALIGNED' | 'GAPS_FOUND' | 'UNCERTAIN';
-    plan_deviations: string[];
-    missing_requirements: string[];
-    recommended_repairs: string[];
-}
-interface CodexTechnicalReview {
-    job_id: string;
-    reviewed_commit: string;
-    checks_passed: boolean;
-    evidence: string[];
-    required_fixes: string[];
-    concise_reason: string;
-}
-interface CodexSynthesis {
-    job_id: string;
-    reviewed_commit: string;
-    verdict: 'GO' | 'REVISE' | 'STOP';
-    merge_allowed: boolean;
-    evidence: string[];
-    summary: string;
-    required_changes: string[];
-    requires_re_review: boolean;
-    risk_level: 'low' | 'medium' | 'high';
-    reason: string;
-}
 interface CheckResults {
     job_id: string;
     commit: string;
@@ -316,23 +291,22 @@ interface CheckResults {
         output: string;
     }>;
 }
-type WorkflowContract = CodexBrief | FablePlan | CodexPlanReview | OpusResult | FableComplianceReview | CodexTechnicalReview | CodexSynthesis | CheckResults;
-declare function validateCodexBrief(value: unknown): CodexBrief;
-declare function validateFablePlan(value: unknown): FablePlan;
-declare function validateCodexPlanReview(value: unknown): CodexPlanReview;
+type CodexDecisionStage = 'pre_opus' | 'post_opus' | 'after_fable_pre' | 'after_fable_post';
+declare function validateCodexDecision(value: unknown, stage: CodexDecisionStage): CodexDecisionV2;
+declare function validateFableQuery(value: unknown): FableQueryV1;
+declare function validateFableAdvice(value: unknown): FableAdviceV1;
 declare function validateOpusResult(value: unknown): OpusResult;
-declare function validateFableComplianceReview(value: unknown): FableComplianceReview;
-declare function validateCodexTechnicalReview(value: unknown): CodexTechnicalReview;
-declare function validateCodexSynthesis(value: unknown): CodexSynthesis;
 declare function validateCheckResults(value: unknown): CheckResults;
 
-type WorkflowPhase = 'codex_brief' | 'fable_plan' | 'codex_plan_review' | 'fable_final_prompt' | 'opus_execution' | 'codex_technical_review' | 'fable_compliance_review' | 'codex_synthesis' | 'merge_ready' | 'done' | 'blocked' | 'paused' | 'cancelled' | 'failed';
+type WorkflowPhase = 'codex_pre_opus' | 'fable_consultation' | 'codex_after_fable' | 'opus_execution' | 'codex_post_opus' | 'verification' | 'merge_ready' | 'done' | 'blocked' | 'paused' | 'cancelled' | 'failed';
 declare const WORKFLOW_PHASE_TRANSITIONS: Readonly<Record<WorkflowPhase, readonly WorkflowPhase[]>>;
 declare function canTransitionWorkflow(from: WorkflowPhase, to: WorkflowPhase): boolean;
 declare function transitionWorkflow(from: WorkflowPhase, to: WorkflowPhase): WorkflowPhase;
 declare function isTerminalWorkflowPhase(phase: WorkflowPhase): boolean;
 
-type PostReviewMode = 'always';
+type WorkflowMode = 'adaptive' | 'direct';
+type ConsultationOrigin = 'pre_opus' | 'post_opus';
+type ConsultationStatus = 'unused' | 'requested' | 'attempt_started' | 'result_persisted' | 'skipped' | 'fallback_executed';
 interface RoleProfile {
     model: string;
     effort: 'low' | 'medium' | 'high';
@@ -341,20 +315,18 @@ interface RoleProfile {
     permission_mode: 'read_only' | 'worktree';
 }
 interface WorkflowConfig {
-    fable_pre_opus_cap: number;
-    fable_post_opus_per_iteration_cap: number;
-    fable_total_cap: number;
+    fable_total_cap: 0 | 1;
     max_input_bytes: number;
     max_output_bytes: number;
     passport_max_bytes: number;
-    post_review: PostReviewMode;
     profiles: {
         fable: RoleProfile;
         opus: RoleProfile;
         codex: RoleProfile;
     };
 }
-type WorkflowConfigOverrides = Partial<Omit<WorkflowConfig, 'profiles'>> & {
+type WorkflowConfigOverrides = Partial<Omit<WorkflowConfig, 'profiles' | 'fable_total_cap'>> & {
+    fable_total_cap?: 0 | 1;
     profiles?: Partial<Record<'fable' | 'opus' | 'codex', Partial<RoleProfile>>>;
 };
 interface ArtifactReference {
@@ -367,32 +339,33 @@ interface ArtifactReference {
 }
 interface WorkflowDecision {
     invocation_id: string;
-    verdict: string;
-    reason: string;
+    action: string;
+    summary: string;
+    provenance: 'codex';
     timestamp: string;
 }
-interface WorkflowJobV1 {
-    schema_version: 1;
+interface WorkflowJobV2 {
+    schema_version: 2;
     job_id: string;
+    mode: WorkflowMode;
     phase: WorkflowPhase;
     resume_phase: WorkflowPhase | null;
     revision: number;
     artifact_revision: number;
     latest_artifact_hash: string | null;
-    fable_pre_opus_calls: number;
-    fable_post_opus_calls: number;
-    fable_post_opus_iteration_calls: number;
-    fable_total_calls: number;
-    fix_cycles: number;
     opus_iteration: number;
+    fix_cycles: number;
+    fable_calls: number;
+    consultation_status: ConsultationStatus;
+    consultation_origin: ConsultationOrigin | null;
     branch: string | null;
     worktree: string | null;
     target_branch: string | null;
     base_commit: string | null;
     current_commit: string | null;
-    approved_plan_hash: string | null;
     reviewed_diff_hash: string | null;
-    last_verdict: string | null;
+    accepted_brief_hash: string | null;
+    last_action: string | null;
     blocker: string | null;
     next_action: string;
     current_operation: {
@@ -404,18 +377,18 @@ interface WorkflowJobV1 {
     created_at: string;
     updated_at: string;
 }
-interface WorkflowPassportV1 {
-    schema_version: 1;
+interface WorkflowPassportV2 {
+    schema_version: 2;
     passport_revision: number;
     job_id: string;
+    mode: WorkflowMode;
     current_revision: number;
     objective: string;
     current_phase: WorkflowPhase;
-    approved_plan_hash: string | null;
-    latest_accepted_plan: ArtifactReference | null;
+    accepted_brief_hash: string | null;
+    latest_implementation_brief: ArtifactReference | null;
     hard_constraints: string[];
     acceptance_criteria: string[];
-    mandatory_amendments: string[];
     decisions: WorkflowDecision[];
     allowed_file_scope: string[];
     required_checks: string[];
@@ -428,12 +401,10 @@ interface WorkflowPassportV1 {
     current_commit: string | null;
     session_references: {
         codex: string | null;
-        fable: string | null;
         opus: string | null;
     };
     session_modes: {
         codex: SessionMode;
-        fable: SessionMode;
         opus: SessionMode;
     };
     rotation_history: SessionRotation[];
@@ -441,7 +412,7 @@ interface WorkflowPassportV1 {
 }
 type SessionMode = 'new' | 'native_resume' | 'passport_handoff' | 'none';
 interface SessionRotation {
-    role: 'codex' | 'fable' | 'opus';
+    role: 'codex' | 'opus';
     previous_id: string | null;
     next_id: string | null;
     reason: string;
@@ -461,21 +432,20 @@ interface AgentUsage {
     resumes: number;
     compactions: number;
 }
-interface WorkflowSessionsV1 {
-    schema_version: 1;
+interface WorkflowSessionsV2 {
+    schema_version: 2;
     job_id: string;
     codex_thread_id: string | null;
-    fable_session_id: string | null;
     opus_session_id: string | null;
-    opus_plan_hash: string | null;
-    modes: Record<'codex' | 'fable' | 'opus', SessionMode>;
+    opus_brief_hash: string | null;
+    modes: Record<'codex' | 'opus', SessionMode>;
     rotation_history: SessionRotation[];
     recorded_invocations: string[];
     usage: Record<'codex' | 'fable' | 'opus', AgentUsage>;
     updated_at: string;
 }
-interface WorkflowArtifactMetadataV1 {
-    schema_version: 1;
+interface WorkflowArtifactMetadataV2 {
+    schema_version: 2;
     job_id: string;
     artifact_name: string;
     filename: string;
@@ -489,22 +459,30 @@ interface WorkflowArtifactMetadataV1 {
     timestamp: string;
     artifact_hash: string;
 }
-interface WorkflowInvocationReceiptV1 {
-    schema_version: 1;
+interface WorkflowInvocationReceiptV2 {
+    schema_version: 2;
     job_id: string;
     invocation_id: string;
     phase: WorkflowPhase;
     role: 'codex' | 'fable' | 'opus';
+    request_hash: string;
+    workflow_revision: number;
     timestamp: string;
     result: unknown;
 }
-interface WorkflowEventV1 {
-    schema_version: 1;
+interface WorkflowEventV2 {
+    schema_version: 2;
     job_id: string;
     type: string;
     timestamp: string;
     data: unknown;
 }
+type WorkflowJobV1 = WorkflowJobV2;
+type WorkflowPassportV1 = WorkflowPassportV2;
+type WorkflowSessionsV1 = WorkflowSessionsV2;
+type WorkflowArtifactMetadataV1 = WorkflowArtifactMetadataV2;
+type WorkflowInvocationReceiptV1 = WorkflowInvocationReceiptV2;
+type WorkflowEventV1 = WorkflowEventV2;
 
 /**
  * Configuration domain model.
@@ -1812,16 +1790,14 @@ declare class Orchestrator {
 }
 
 declare const ARTIFACT_FILES: {
-    readonly codex_brief: "codex-brief-r%REV%-i%ITER%-a%SEQ%.json";
-    readonly fable_plan: "fable-plan-r%REV%-i%ITER%-a%SEQ%.json";
-    readonly codex_plan_review: "codex-plan-review-r%REV%-i%ITER%-a%SEQ%.json";
-    readonly fable_final_prompt: "fable-final-prompt-r%REV%-i%ITER%-a%SEQ%.md";
+    readonly codex_decision: "codex-decision-r%REV%-i%ITER%-a%SEQ%.json";
+    readonly opus_instruction: "opus-instruction-r%REV%-i%ITER%-a%SEQ%.md";
+    readonly fable_request: "fable-request-r%REV%-i%ITER%-a%SEQ%.json";
+    readonly fable_advice: "fable-advice-r%REV%-i%ITER%-a%SEQ%.json";
+    readonly routing_decision: "routing-decision-r%REV%-i%ITER%-a%SEQ%.json";
     readonly opus_report: "opus-report-r%REV%-i%ITER%-a%SEQ%.json";
     readonly opus_diff: "opus-r%REV%-i%ITER%-a%SEQ%.diff";
     readonly test_results: "test-results-r%REV%-i%ITER%-a%SEQ%.json";
-    readonly codex_technical_review: "codex-technical-review-r%REV%-i%ITER%-a%SEQ%.json";
-    readonly fable_compliance_review: "fable-compliance-review-r%REV%-i%ITER%-a%SEQ%.json";
-    readonly codex_synthesis: "codex-synthesis-r%REV%-i%ITER%-a%SEQ%.json";
 };
 type ArtifactName = keyof typeof ARTIFACT_FILES;
 interface StoredArtifact<T = unknown> {
@@ -1902,28 +1878,28 @@ interface FableCallOptions {
     max_input_bytes: number;
     max_output_bytes: number;
 }
+interface CodexDecisionEvidence {
+    evidence: GitEvidence | null;
+    checks: CheckResults | null;
+    opus: OpusResult | null;
+    fable_advice: FableAdviceV1 | null;
+}
 interface CodexRolePort {
-    brief(passport: WorkflowPassportV1, threadId: string | null): Promise<RoleResult<CodexBrief>>;
-    reviewPlan(passport: WorkflowPassportV1, plan: FablePlan, threadId: string | null): Promise<RoleResult<CodexPlanReview>>;
-    compileFinalPrompt(passport: WorkflowPassportV1, plan: FablePlan, threadId: string | null): Promise<RoleResult<string>>;
-    technicalReview(passport: WorkflowPassportV1, evidence: GitEvidence, checks: CheckResults, threadId: string | null): Promise<RoleResult<CodexTechnicalReview>>;
-    synthesize(passport: WorkflowPassportV1, evidence: GitEvidence, technical: CodexTechnicalReview, compliance: FableComplianceReview | null, checks: CheckResults, threadId: string | null): Promise<RoleResult<CodexSynthesis>>;
+    decide(passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null): Promise<RoleResult<CodexDecisionV2>>;
     available(): Promise<{
         available: boolean;
         detail: string;
     }>;
 }
 interface FableRolePort {
-    plan(passport: WorkflowPassportV1, brief: CodexBrief, previous: FablePlan | null, changes: string[], options: FableCallOptions): Promise<RoleResult<FablePlan>>;
-    finalPrompt(passport: WorkflowPassportV1, plan: FablePlan, amendments: string[], options: FableCallOptions): Promise<RoleResult<string>>;
-    compliance(passport: WorkflowPassportV1, plan: FablePlan, opus: OpusResult, evidence: GitEvidence, checks: CheckResults, options: FableCallOptions): Promise<RoleResult<FableComplianceReview>>;
+    consult(jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions): Promise<RoleResult<FableAdviceV1>>;
     available(): Promise<{
         available: boolean;
         detail: string;
     }>;
 }
 interface OpusRolePort {
-    execute(passport: WorkflowPassportV1, prompt: string, workspace: string, sessionId: string | null, mode: 'new' | 'native_resume' | 'passport_handoff'): Promise<RoleResult<OpusResult>>;
+    execute(passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: 'new' | 'native_resume' | 'passport_handoff'): Promise<RoleResult<OpusResult>>;
     available(): Promise<{
         available: boolean;
         detail: string;
@@ -1951,7 +1927,7 @@ interface WorkflowGitPort {
     runChecks(worktree: string, commit: string, commands: string[]): Promise<CheckResults>;
     currentCommit(branch: string): Promise<string>;
     isMerged(branch: string, commit: string, targetBranch: string, baseCommit: string): Promise<boolean>;
-    merge(branch: string, targetBranch: string, baseCommit: string): Promise<{
+    merge(branch: string, expectedCommit: string, targetBranch: string, baseCommit: string): Promise<{
         success: boolean;
         detail: string;
     }>;
@@ -1966,6 +1942,7 @@ interface WorkflowRolePorts {
 declare const DEFAULT_WORKFLOW_CONFIG: WorkflowConfig;
 interface StartWorkflowInput {
     objective: string;
+    mode?: WorkflowMode;
     allowed_file_scope?: string[];
     required_checks?: string[];
     config?: WorkflowConfigOverrides;
@@ -1976,25 +1953,25 @@ declare class WorkflowEngine {
     private readonly ports;
     constructor(store: WorkflowArtifactStore, ports: WorkflowRolePorts);
     start(input: StartWorkflowInput): Promise<string>;
-    run(jobId: string): Promise<WorkflowJobV1>;
-    advance(jobId: string): Promise<WorkflowJobV1>;
-    pause(jobId: string): Promise<WorkflowJobV1>;
+    run(jobId: string): Promise<WorkflowJobV2>;
+    advance(jobId: string): Promise<WorkflowJobV2>;
+    pause(jobId: string): Promise<WorkflowJobV2>;
     resume(jobId: string, options?: {
-        approve_stop?: boolean;
         retry_invocation?: boolean;
         reason?: string;
-    }): Promise<WorkflowJobV1>;
-    cancel(jobId: string): Promise<WorkflowJobV1>;
+    }): Promise<WorkflowJobV2>;
+    cancel(jobId: string): Promise<WorkflowJobV2>;
     private step;
-    private codexBrief;
-    private fablePlan;
-    private codexPlanReview;
-    private finalPrompt;
+    private codexDecision;
+    private routeConsultation;
+    private fableConsultation;
+    private executeConsultationFallback;
+    private dispatchOpus;
     private opusExecution;
-    private technicalReview;
-    private complianceReview;
-    private synthesis;
+    private verification;
     private merge;
+    private reviewEvidence;
+    private consultationDenial;
     private artifact;
     private payload;
     private optionalPayload;
@@ -2002,19 +1979,15 @@ declare class WorkflowEngine {
     private transition;
     private block;
     private addArtifact;
-    private decision;
+    private recordDecision;
     private updatePassport;
-    rotateSession(jobId: string, role: 'codex' | 'fable' | 'opus', reason: string): Promise<void>;
+    rotateSession(jobId: string, role: 'codex' | 'opus', reason: string): Promise<void>;
     private recordRole;
     private fableOptions;
     private fableCall;
     private invoke;
     private recordFailedRoleCall;
     private invocation;
-    private reserveFable;
-    private reserveFableInvocation;
-    private hasInvocationReceipt;
-    private assertFableOutput;
     private assertAllowedScope;
     private assertJob;
     private context;
@@ -2265,4 +2238,4 @@ declare function buildFullContainer(context: CliContext): Promise<Container>;
  */
 declare function buildContainer(context: CliContext): Promise<Container>;
 
-export { AGENT_SHOP_TEMPLATES, ARTIFACT_FILES, type AdapterErrorHint, AdapterErrorKind, type AdapterKind, AdapterRegistry, type AdapterTestResult, type Agent, type AgentConfig, type AgentEvent, type AgentLastError, AgentNotFoundError, AgentService, type AgentShopTemplate, type AgentStats, type AgentStatus, type AgentUsage, type ApprovalPolicy, type ArtifactReference, type CheckResults, type ClipboardContentType, type ClipboardImage, type CodexBrief, type CodexPlanReview, type CodexRolePort, type CodexSynthesis, type CodexTechnicalReview, type Container, type CreateAgentInput, type CreateGoalInput, type CreateTaskInput, DEFAULT_WORKFLOW_CONFIG, ERROR_HINTS, EventBus, type EventPayload, type ExecuteParams, type FableComplianceReview, type FablePlan, type FableRolePort, type FailurePhase, type Goal, GoalHasPendingTasksError, type GoalOrchestrationPhase, type GoalOrchestrationState, type GoalStatus, type GoalTaskRole, type IAgentAdapter, type ISkillLoader, type LightContainer, MODEL_TIER_MAP, type ModelTier, NotInitializedError, type OpusResult, type OpusRolePort, Orchestrator, type OrchestratorConfig, type OrchestratorEvent, type OrchestratorEventType, type OrchestratorState, OrchestryError, type PersistedFailure, type PostReviewMode, type ProducingRole, type ProjectConfig, type ReasoningEffort, type RetryEntry, type RoleProfile, type Run, type RunEvent, type RunEventType, RunService, type RunStatus, type RunningEntry, SUPPORTED_ADAPTERS, type SchedulingConfig, type SessionMode, type SessionRotation, SkillLoader, type StartWorkflowInput, type Task, TaskNotFoundError, type TaskProof, TaskService, type TaskStatus, type TokenUsage, WORKFLOW_PHASE_TRANSITIONS, WORKFLOW_SCHEMA_VERSION, type WorkflowArtifactMetadataV1, WorkflowArtifactStore, type WorkflowConfig, type WorkflowConfigOverrides, type WorkflowContract, type WorkflowDecision, WorkflowEngine, type WorkflowEventV1, type WorkflowGitPort, type WorkflowInvocationReceiptV1, type WorkflowJobV1, type WorkflowPassportV1, type WorkflowPhase, type WorkflowRolePorts, type WorkflowSessionsV1, WorkspaceError, type WorkspaceMode, buildContainer, buildFullContainer, buildLightContainer, canTransition, canTransitionWorkflow, classifyAdapterError, createTokenUsage, defaultModelForAdapter, detectClipboardType, getClipboardImage, getShopTemplateByKey, hashCanonical, isAdapterKind, isBlocked, isClipboardToolAvailable, isDispatchable, isMcpSkill, isModelTier, isTerminal, isTerminalWorkflowPhase, resolveFailureStatus, resolveModel, templateToAgentInput, transitionWorkflow, validateCheckResults, validateCodexBrief, validateCodexPlanReview, validateCodexSynthesis, validateCodexTechnicalReview, validateFableComplianceReview, validateFablePlan, validateOpusResult };
+export { AGENT_SHOP_TEMPLATES, ARTIFACT_FILES, type AdapterErrorHint, AdapterErrorKind, type AdapterKind, AdapterRegistry, type AdapterTestResult, type Agent, type AgentConfig, type AgentEvent, type AgentLastError, AgentNotFoundError, AgentService, type AgentShopTemplate, type AgentStats, type AgentStatus, type AgentUsage, type ApprovalPolicy, type ArtifactReference, type CheckResults, type ClipboardContentType, type ClipboardImage, type CodexAction, type CodexDecisionStage, type CodexDecisionV2, type CodexRolePort, type ConsultationOrigin, type ConsultationStatus, type Container, type CreateAgentInput, type CreateGoalInput, type CreateTaskInput, DEFAULT_WORKFLOW_CONFIG, ERROR_HINTS, EventBus, type EventPayload, type ExecuteParams, type FableAdviceV1, type FableFallbackV1, type FablePurpose, type FableQueryV1, type FableRolePort, type FailurePhase, type Goal, GoalHasPendingTasksError, type GoalOrchestrationPhase, type GoalOrchestrationState, type GoalStatus, type GoalTaskRole, type IAgentAdapter, type ISkillLoader, type LightContainer, MODEL_TIER_MAP, type ModelTier, NotInitializedError, type OpusResult, type OpusRolePort, Orchestrator, type OrchestratorConfig, type OrchestratorEvent, type OrchestratorEventType, type OrchestratorState, OrchestryError, type PersistedFailure, type ProducingRole, type ProjectConfig, type ReasoningEffort, type RetryEntry, type RoleProfile, type Run, type RunEvent, type RunEventType, RunService, type RunStatus, type RunningEntry, SUPPORTED_ADAPTERS, type SchedulingConfig, type SessionMode, type SessionRotation, SkillLoader, type StartWorkflowInput, type Task, TaskNotFoundError, type TaskProof, TaskService, type TaskStatus, type TokenUsage, WORKFLOW_PHASE_TRANSITIONS, WORKFLOW_SCHEMA_VERSION, type WorkflowArtifactMetadataV1, type WorkflowArtifactMetadataV2, WorkflowArtifactStore, type WorkflowConfig, type WorkflowConfigOverrides, type WorkflowDecision, WorkflowEngine, type WorkflowEventV1, type WorkflowEventV2, type WorkflowGitPort, type WorkflowInvocationReceiptV1, type WorkflowInvocationReceiptV2, type WorkflowJobV1, type WorkflowJobV2, type WorkflowMode, type WorkflowPassportV1, type WorkflowPassportV2, type WorkflowPhase, type WorkflowRolePorts, type WorkflowSessionsV1, type WorkflowSessionsV2, WorkspaceError, type WorkspaceMode, buildContainer, buildFullContainer, buildLightContainer, canTransition, canTransitionWorkflow, classifyAdapterError, createTokenUsage, defaultModelForAdapter, detectClipboardType, getClipboardImage, getShopTemplateByKey, hashCanonical, isAdapterKind, isBlocked, isClipboardToolAvailable, isDispatchable, isMcpSkill, isModelTier, isTerminal, isTerminalWorkflowPhase, resolveFailureStatus, resolveModel, templateToAgentInput, transitionWorkflow, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableQuery, validateOpusResult };

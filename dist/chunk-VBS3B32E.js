@@ -5,19 +5,17 @@ import fs from 'fs/promises';
 import path from 'path';
 
 // src/domain/workflow/transitions.ts
-var ACTIVE = ["codex_brief", "fable_plan", "codex_plan_review", "fable_final_prompt", "opus_execution", "codex_technical_review", "fable_compliance_review", "codex_synthesis", "merge_ready"];
+var ACTIVE = ["codex_pre_opus", "fable_consultation", "codex_after_fable", "opus_execution", "codex_post_opus", "verification", "merge_ready"];
 var WORKFLOW_PHASE_TRANSITIONS = {
-  codex_brief: ["fable_plan", "blocked", "paused", "cancelled", "failed"],
-  fable_plan: ["codex_plan_review", "blocked", "paused", "cancelled", "failed"],
-  codex_plan_review: ["fable_plan", "fable_final_prompt", "blocked", "paused", "cancelled", "failed"],
-  fable_final_prompt: ["opus_execution", "blocked", "paused", "cancelled", "failed"],
-  opus_execution: ["codex_technical_review", "blocked", "paused", "cancelled", "failed"],
-  codex_technical_review: ["fable_compliance_review", "codex_synthesis", "blocked", "paused", "cancelled", "failed"],
-  fable_compliance_review: ["codex_synthesis", "blocked", "paused", "cancelled", "failed"],
-  codex_synthesis: ["fable_final_prompt", "fable_plan", "merge_ready", "blocked", "paused", "cancelled", "failed"],
-  merge_ready: ["done", "blocked", "failed", "paused", "cancelled"],
+  codex_pre_opus: ["fable_consultation", "opus_execution", "paused", "cancelled", "failed"],
+  fable_consultation: ["codex_after_fable", "opus_execution", "paused", "cancelled", "failed"],
+  codex_after_fable: ["opus_execution", "verification", "paused", "cancelled", "failed"],
+  opus_execution: ["codex_post_opus", "blocked", "paused", "cancelled", "failed"],
+  codex_post_opus: ["fable_consultation", "opus_execution", "verification", "paused", "cancelled", "failed"],
+  verification: ["merge_ready", "blocked", "paused", "cancelled", "failed"],
+  merge_ready: ["done", "blocked", "paused", "cancelled", "failed"],
   done: [],
-  blocked: ["codex_brief", "fable_plan", "codex_plan_review", "fable_final_prompt", "opus_execution", "codex_technical_review", "fable_compliance_review", "codex_synthesis", "merge_ready", "cancelled"],
+  blocked: [...ACTIVE, "cancelled"],
   paused: [...ACTIVE, "blocked", "cancelled"],
   cancelled: [],
   failed: []
@@ -36,32 +34,36 @@ function isTerminalWorkflowPhase(phase2) {
 // src/domain/workflow/validation.ts
 var PHASES = Object.keys(WORKFLOW_PHASE_TRANSITIONS);
 var MODES = ["new", "native_resume", "passport_handoff", "none"];
-var ROLES = ["codex", "fable", "opus"];
 function validateWorkflowJob(value) {
-  const o = record(upgradeJob(value), "workflow job");
-  exact(o, ["schema_version", "job_id", "phase", "resume_phase", "revision", "artifact_revision", "latest_artifact_hash", "fable_pre_opus_calls", "fable_post_opus_calls", "fable_post_opus_iteration_calls", "fable_total_calls", "fix_cycles", "opus_iteration", "branch", "worktree", "target_branch", "base_commit", "current_commit", "approved_plan_hash", "reviewed_diff_hash", "last_verdict", "blocker", "next_action", "current_operation", "created_at", "updated_at"], "workflow job");
+  const raw = record(value, "workflow job");
+  if (raw.schema_version === 1) return legacyJob(raw);
+  const o = raw;
+  exact(o, ["schema_version", "job_id", "mode", "phase", "resume_phase", "revision", "artifact_revision", "latest_artifact_hash", "opus_iteration", "fix_cycles", "fable_calls", "consultation_status", "consultation_origin", "branch", "worktree", "target_branch", "base_commit", "current_commit", "reviewed_diff_hash", "accepted_brief_hash", "last_action", "blocker", "next_action", "current_operation", "created_at", "updated_at"], "workflow job");
   const operation = o.current_operation === null ? null : (() => {
     const p = record(o.current_operation, "current_operation");
     exact(p, ["phase", "invocation_id", "started_at", "retry_count"], "current_operation");
     return { phase: phase(p.phase), invocation_id: id(p.invocation_id, "invocation_id"), started_at: timestamp(p.started_at, "started_at"), retry_count: integer(p.retry_count, "retry_count", 0) };
   })();
-  return { schema_version: one(o.schema_version), job_id: id(o.job_id, "job_id"), phase: phase(o.phase), resume_phase: o.resume_phase === null ? null : phase(o.resume_phase), revision: integer(o.revision, "revision", 1), artifact_revision: integer(o.artifact_revision, "artifact_revision", 0), latest_artifact_hash: nullableHash(o.latest_artifact_hash, "latest_artifact_hash"), fable_pre_opus_calls: integer(o.fable_pre_opus_calls, "fable_pre_opus_calls", 0), fable_post_opus_calls: integer(o.fable_post_opus_calls, "fable_post_opus_calls", 0), fable_post_opus_iteration_calls: integer(o.fable_post_opus_iteration_calls, "fable_post_opus_iteration_calls", 0), fable_total_calls: integer(o.fable_total_calls, "fable_total_calls", 0), fix_cycles: integer(o.fix_cycles, "fix_cycles", 0), opus_iteration: integer(o.opus_iteration, "opus_iteration", 1), branch: nullableString(o.branch, "branch"), worktree: nullableString(o.worktree, "worktree"), target_branch: nullableString(o.target_branch, "target_branch"), base_commit: nullableString(o.base_commit, "base_commit"), current_commit: nullableString(o.current_commit, "current_commit"), approved_plan_hash: nullableHash(o.approved_plan_hash, "approved_plan_hash"), reviewed_diff_hash: nullableHash(o.reviewed_diff_hash, "reviewed_diff_hash"), last_verdict: nullableString(o.last_verdict, "last_verdict"), blocker: nullableString(o.blocker, "blocker"), next_action: string(o.next_action, "next_action"), current_operation: operation, created_at: timestamp(o.created_at, "created_at"), updated_at: timestamp(o.updated_at, "updated_at") };
+  return { schema_version: two(o.schema_version), job_id: id(o.job_id, "job_id"), mode: enumeration(o.mode, ["adaptive", "direct"], "mode"), phase: phase(o.phase), resume_phase: o.resume_phase === null ? null : phase(o.resume_phase), revision: integer(o.revision, "revision", 1), artifact_revision: integer(o.artifact_revision, "artifact_revision", 0), latest_artifact_hash: nullableHash(o.latest_artifact_hash, "latest_artifact_hash"), opus_iteration: integer(o.opus_iteration, "opus_iteration", 1), fix_cycles: integer(o.fix_cycles, "fix_cycles", 0), fable_calls: integer(o.fable_calls, "fable_calls", 0), consultation_status: enumeration(o.consultation_status, ["unused", "requested", "attempt_started", "result_persisted", "skipped", "fallback_executed"], "consultation_status"), consultation_origin: o.consultation_origin === null ? null : enumeration(o.consultation_origin, ["pre_opus", "post_opus"], "consultation_origin"), branch: nullableString(o.branch, "branch"), worktree: nullableString(o.worktree, "worktree"), target_branch: nullableString(o.target_branch, "target_branch"), base_commit: nullableString(o.base_commit, "base_commit"), current_commit: nullableString(o.current_commit, "current_commit"), reviewed_diff_hash: nullableHash(o.reviewed_diff_hash, "reviewed_diff_hash"), accepted_brief_hash: nullableHash(o.accepted_brief_hash, "accepted_brief_hash"), last_action: nullableString(o.last_action, "last_action"), blocker: nullableString(o.blocker, "blocker"), next_action: string(o.next_action, "next_action"), current_operation: operation, created_at: timestamp(o.created_at, "created_at"), updated_at: timestamp(o.updated_at, "updated_at") };
 }
 function validateWorkflowPassport(value) {
-  const o = record(upgradePassport(value), "workflow passport");
-  exact(o, ["schema_version", "passport_revision", "job_id", "current_revision", "objective", "current_phase", "approved_plan_hash", "latest_accepted_plan", "hard_constraints", "acceptance_criteria", "mandatory_amendments", "decisions", "allowed_file_scope", "required_checks", "current_blockers", "next_action", "artifacts", "active_worktree", "target_branch", "base_commit", "current_commit", "session_references", "session_modes", "rotation_history", "config"], "workflow passport");
-  return { schema_version: one(o.schema_version), passport_revision: integer(o.passport_revision, "passport_revision", 1), job_id: id(o.job_id, "job_id"), current_revision: integer(o.current_revision, "current_revision", 1), objective: nonEmpty(o.objective, "objective"), current_phase: phase(o.current_phase), approved_plan_hash: nullableHash(o.approved_plan_hash, "approved_plan_hash"), latest_accepted_plan: o.latest_accepted_plan === null ? null : artifact(o.latest_accepted_plan, "latest_accepted_plan"), hard_constraints: strings(o.hard_constraints, "hard_constraints"), acceptance_criteria: strings(o.acceptance_criteria, "acceptance_criteria"), mandatory_amendments: strings(o.mandatory_amendments, "mandatory_amendments"), decisions: array(o.decisions, "decisions").map((item, index) => decision(item, `decisions[${index}]`)), allowed_file_scope: strings(o.allowed_file_scope, "allowed_file_scope"), required_checks: strings(o.required_checks, "required_checks"), current_blockers: strings(o.current_blockers, "current_blockers"), next_action: string(o.next_action, "next_action"), artifacts: array(o.artifacts, "artifacts").map((item, index) => artifact(item, `artifacts[${index}]`)), active_worktree: nullableString(o.active_worktree, "active_worktree"), target_branch: nullableString(o.target_branch, "target_branch"), base_commit: nullableString(o.base_commit, "base_commit"), current_commit: nullableString(o.current_commit, "current_commit"), session_references: roleRecord(o.session_references, nullableString), session_modes: roleRecord(o.session_modes, mode), rotation_history: array(o.rotation_history, "rotation_history").map((item, index) => rotation(item, `rotation_history[${index}]`)), config: config(o.config) };
+  const raw = record(value, "workflow passport");
+  if (raw.schema_version === 1) return legacyPassport(raw);
+  const o = raw;
+  exact(o, ["schema_version", "passport_revision", "job_id", "mode", "current_revision", "objective", "current_phase", "accepted_brief_hash", "latest_implementation_brief", "hard_constraints", "acceptance_criteria", "decisions", "allowed_file_scope", "required_checks", "current_blockers", "next_action", "artifacts", "active_worktree", "target_branch", "base_commit", "current_commit", "session_references", "session_modes", "rotation_history", "config"], "workflow passport");
+  return { schema_version: two(o.schema_version), passport_revision: integer(o.passport_revision, "passport_revision", 1), job_id: id(o.job_id, "job_id"), mode: enumeration(o.mode, ["adaptive", "direct"], "mode"), current_revision: integer(o.current_revision, "current_revision", 1), objective: nonEmpty(o.objective, "objective"), current_phase: phase(o.current_phase), accepted_brief_hash: nullableHash(o.accepted_brief_hash, "accepted_brief_hash"), latest_implementation_brief: o.latest_implementation_brief === null ? null : artifact(o.latest_implementation_brief, "latest_implementation_brief"), hard_constraints: strings(o.hard_constraints, "hard_constraints"), acceptance_criteria: strings(o.acceptance_criteria, "acceptance_criteria"), decisions: array(o.decisions, "decisions").map((item, index) => decision(item, `decisions[${index}]`)), allowed_file_scope: strings(o.allowed_file_scope, "allowed_file_scope"), required_checks: strings(o.required_checks, "required_checks"), current_blockers: strings(o.current_blockers, "current_blockers"), next_action: string(o.next_action, "next_action"), artifacts: array(o.artifacts, "artifacts").map((item, index) => artifact(item, `artifacts[${index}]`)), active_worktree: nullableString(o.active_worktree, "active_worktree"), target_branch: nullableString(o.target_branch, "target_branch"), base_commit: nullableString(o.base_commit, "base_commit"), current_commit: nullableString(o.current_commit, "current_commit"), session_references: duo(o.session_references, nullableString), session_modes: duo(o.session_modes, sessionMode), rotation_history: array(o.rotation_history, "rotation_history").map((item, index) => rotation(item, `rotation_history[${index}]`)), config: config(o.config) };
 }
 function validateWorkflowSessions(value) {
-  const o = record(upgradeSessions(value), "workflow sessions");
-  exact(o, ["schema_version", "job_id", "codex_thread_id", "fable_session_id", "opus_session_id", "opus_plan_hash", "modes", "rotation_history", "recorded_invocations", "usage", "updated_at"], "workflow sessions");
-  return { schema_version: one(o.schema_version), job_id: id(o.job_id, "job_id"), codex_thread_id: nullableString(o.codex_thread_id, "codex_thread_id"), fable_session_id: nullableString(o.fable_session_id, "fable_session_id"), opus_session_id: nullableString(o.opus_session_id, "opus_session_id"), opus_plan_hash: nullableHash(o.opus_plan_hash, "opus_plan_hash"), modes: roleRecord(o.modes, mode), rotation_history: array(o.rotation_history, "rotation_history").map((item, index) => rotation(item, `rotation_history[${index}]`)), recorded_invocations: strings(o.recorded_invocations, "recorded_invocations").map((item) => id(item, "invocation_id")), usage: roleRecord(o.usage, usage), updated_at: timestamp(o.updated_at, "updated_at") };
+  const raw = record(value, "workflow sessions");
+  if (raw.schema_version === 1) return legacySessions(raw);
+  const o = raw;
+  exact(o, ["schema_version", "job_id", "codex_thread_id", "opus_session_id", "opus_brief_hash", "modes", "rotation_history", "recorded_invocations", "usage", "updated_at"], "workflow sessions");
+  return { schema_version: two(o.schema_version), job_id: id(o.job_id, "job_id"), codex_thread_id: nullableString(o.codex_thread_id, "codex_thread_id"), opus_session_id: nullableString(o.opus_session_id, "opus_session_id"), opus_brief_hash: nullableHash(o.opus_brief_hash, "opus_brief_hash"), modes: duo(o.modes, sessionMode), rotation_history: array(o.rotation_history, "rotation_history").map((item, index) => rotation(item, `rotation_history[${index}]`)), recorded_invocations: strings(o.recorded_invocations, "recorded_invocations").map((item) => id(item, "invocation_id")), usage: trio(o.usage, usage), updated_at: timestamp(o.updated_at, "updated_at") };
 }
 function config(value) {
   const o = record(value, "workflow config");
-  exact(o, ["fable_pre_opus_cap", "fable_post_opus_per_iteration_cap", "fable_total_cap", "max_input_bytes", "max_output_bytes", "passport_max_bytes", "post_review", "profiles"], "workflow config");
-  const profiles = roleRecord(o.profiles, profile);
-  return { fable_pre_opus_cap: integer(o.fable_pre_opus_cap, "fable_pre_opus_cap", 1), fable_post_opus_per_iteration_cap: integer(o.fable_post_opus_per_iteration_cap, "fable_post_opus_per_iteration_cap", 0), fable_total_cap: integer(o.fable_total_cap, "fable_total_cap", 1), max_input_bytes: integer(o.max_input_bytes, "max_input_bytes", 1), max_output_bytes: integer(o.max_output_bytes, "max_output_bytes", 1), passport_max_bytes: integer(o.passport_max_bytes, "passport_max_bytes", 1), post_review: enumeration(o.post_review, ["always"], "post_review"), profiles };
+  exact(o, ["fable_total_cap", "max_input_bytes", "max_output_bytes", "passport_max_bytes", "profiles"], "workflow config");
+  return { fable_total_cap: enumeration(o.fable_total_cap, [0, 1], "fable_total_cap"), max_input_bytes: integer(o.max_input_bytes, "max_input_bytes", 1), max_output_bytes: integer(o.max_output_bytes, "max_output_bytes", 1), passport_max_bytes: integer(o.passport_max_bytes, "passport_max_bytes", 1), profiles: trio(o.profiles, profile) };
 }
 function profile(value, label) {
   const o = record(value, label);
@@ -77,25 +79,30 @@ function artifact(value, label) {
 }
 function decision(value, label) {
   const o = record(value, label);
-  exact(o, ["invocation_id", "verdict", "reason", "timestamp"], label);
-  return { invocation_id: id(o.invocation_id, `${label}.invocation_id`), verdict: nonEmpty(o.verdict, `${label}.verdict`), reason: nonEmpty(o.reason, `${label}.reason`), timestamp: timestamp(o.timestamp, `${label}.timestamp`) };
+  exact(o, ["invocation_id", "action", "summary", "provenance", "timestamp"], label);
+  return { invocation_id: id(o.invocation_id, `${label}.invocation_id`), action: nonEmpty(o.action, `${label}.action`), summary: nonEmpty(o.summary, `${label}.summary`), provenance: enumeration(o.provenance, ["codex"], `${label}.provenance`), timestamp: timestamp(o.timestamp, `${label}.timestamp`) };
 }
 function rotation(value, label) {
   const o = record(value, label);
   exact(o, ["role", "previous_id", "next_id", "reason", "timestamp"], label);
-  return { role: enumeration(o.role, ROLES, `${label}.role`), previous_id: nullableString(o.previous_id, `${label}.previous_id`), next_id: nullableString(o.next_id, `${label}.next_id`), reason: nonEmpty(o.reason, `${label}.reason`), timestamp: timestamp(o.timestamp, `${label}.timestamp`) };
+  return { role: enumeration(o.role, ["codex", "opus"], `${label}.role`), previous_id: nullableString(o.previous_id, `${label}.previous_id`), next_id: nullableString(o.next_id, `${label}.next_id`), reason: nonEmpty(o.reason, `${label}.reason`), timestamp: timestamp(o.timestamp, `${label}.timestamp`) };
 }
 function usage(value, label) {
   const o = record(value, label);
   exact(o, ["calls", "input_chars", "output_chars", "input_tokens", "output_tokens", "estimated_tokens", "cache_read", "cache_write", "duration_ms", "failed_calls", "resumes", "compactions"], label);
   return Object.fromEntries(Object.keys(o).map((key) => [key, integer(o[key], `${label}.${key}`, 0)]));
 }
-function roleRecord(value, validate) {
+function duo(value, validate) {
   const o = record(value, "role record");
-  exact(o, [...ROLES], "role record");
+  exact(o, ["codex", "opus"], "role record");
+  return { codex: validate(o.codex, "codex"), opus: validate(o.opus, "opus") };
+}
+function trio(value, validate) {
+  const o = record(value, "role record");
+  exact(o, ["codex", "fable", "opus"], "role record");
   return { codex: validate(o.codex, "codex"), fable: validate(o.fable, "fable"), opus: validate(o.opus, "opus") };
 }
-function mode(value, label) {
+function sessionMode(value, label) {
   return enumeration(value, MODES, label);
 }
 function phase(value) {
@@ -151,43 +158,38 @@ function id(value, label) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(result)) throw new Error(`${label} is invalid`);
   return result;
 }
-function one(value) {
-  if (value !== 1) throw new Error("Unsupported workflow schema version");
-  return 1;
+function two(value) {
+  if (value !== 2) throw new Error("Unsupported workflow schema version");
+  return 2;
 }
 function enumeration(value, allowed, label) {
-  if (typeof value !== "string" || !allowed.includes(value)) throw new Error(`${label} has an invalid value`);
+  if (!allowed.includes(value)) throw new Error(`${label} has an invalid value`);
   return value;
 }
-function upgradeJob(value) {
-  const o = record(value, "workflow job");
-  if (o.schema_version !== 1) return value;
-  const operation = o.current_operation && typeof o.current_operation === "object" && !Array.isArray(o.current_operation) ? { ...o.current_operation, retry_count: o.current_operation.retry_count ?? 0 } : o.current_operation;
-  return { ...o, target_branch: o.target_branch ?? null, base_commit: o.base_commit ?? null, reviewed_diff_hash: o.reviewed_diff_hash ?? null, current_operation: operation };
+function legacyJob(o) {
+  const terminal = o.phase === "done" || o.phase === "cancelled" || o.phase === "failed" ? o.phase : "blocked";
+  const now = typeof o.updated_at === "string" ? o.updated_at : (/* @__PURE__ */ new Date(0)).toISOString();
+  return { schema_version: 2, job_id: id(o.job_id, "job_id"), mode: "adaptive", phase: terminal, resume_phase: null, revision: Number(o.revision) || 1, artifact_revision: Number(o.artifact_revision) || 0, latest_artifact_hash: typeof o.latest_artifact_hash === "string" ? o.latest_artifact_hash : null, opus_iteration: Number(o.opus_iteration) || 1, fix_cycles: Number(o.fix_cycles) || 0, fable_calls: Number(o.fable_total_calls) || 0, consultation_status: "skipped", consultation_origin: null, branch: stringOrNull(o.branch), worktree: stringOrNull(o.worktree), target_branch: stringOrNull(o.target_branch), base_commit: stringOrNull(o.base_commit), current_commit: stringOrNull(o.current_commit), reviewed_diff_hash: stringOrNull(o.reviewed_diff_hash), accepted_brief_hash: null, last_action: null, blocker: terminal === "blocked" ? "LEGACY_SCHEMA: start a new workflow; v1 execution cannot be resumed safely" : stringOrNull(o.blocker), next_action: terminal === "blocked" ? "Start a new adaptive or direct workflow" : String(o.next_action ?? "No further action"), current_operation: null, created_at: typeof o.created_at === "string" ? o.created_at : now, updated_at: now };
 }
-function upgradePassport(value) {
-  const o = record(value, "workflow passport");
-  if (o.schema_version !== 1) return value;
-  const rawConfig = record(o.config, "workflow config");
-  const { risk_triggers: _obsolete, ...configFields } = rawConfig;
-  const artifacts = Array.isArray(o.artifacts) ? o.artifacts.map((item) => {
-    const a = record(item, "artifact");
-    const filename = typeof a.filename === "string" ? a.filename : "";
-    return { ...a, iteration: a.iteration ?? 1, role: a.role ?? roleForLegacyArtifact(filename) };
-  }) : o.artifacts;
-  const decisions = Array.isArray(o.decisions) ? o.decisions.map((item, index) => ({ ...record(item, "decision"), invocation_id: record(item, "decision").invocation_id ?? `legacy_decision_${index + 1}` })) : o.decisions;
-  return { ...o, latest_accepted_plan: o.latest_accepted_plan ?? null, hard_constraints: o.hard_constraints ?? [], target_branch: o.target_branch ?? null, base_commit: o.base_commit ?? null, artifacts, decisions, config: { ...configFields, post_review: "always" } };
+function legacyPassport(o) {
+  const jobId = id(o.job_id, "job_id");
+  return { schema_version: 2, passport_revision: Number(o.passport_revision) || 1, job_id: jobId, mode: "adaptive", current_revision: Number(o.current_revision) || 1, objective: String(o.objective ?? "Legacy workflow"), current_phase: "blocked", accepted_brief_hash: null, latest_implementation_brief: null, hard_constraints: Array.isArray(o.hard_constraints) ? o.hard_constraints.map(String) : [], acceptance_criteria: Array.isArray(o.acceptance_criteria) ? o.acceptance_criteria.map(String) : [], decisions: [], allowed_file_scope: Array.isArray(o.allowed_file_scope) ? o.allowed_file_scope.map(String) : [], required_checks: Array.isArray(o.required_checks) ? o.required_checks.map(String) : [], current_blockers: ["LEGACY_SCHEMA: v1 workflow is inspectable but not resumable"], next_action: "Start a new workflow", artifacts: [], active_worktree: stringOrNull(o.active_worktree), target_branch: stringOrNull(o.target_branch), base_commit: stringOrNull(o.base_commit), current_commit: stringOrNull(o.current_commit), session_references: { codex: null, opus: null }, session_modes: { codex: "none", opus: "none" }, rotation_history: [], config: legacyConfig(o.config) };
 }
-function upgradeSessions(value) {
-  const o = record(value, "workflow sessions");
-  if (o.schema_version !== 1) return value;
-  return { ...o, recorded_invocations: o.recorded_invocations ?? [] };
+function legacySessions(o) {
+  const empty = zeroUsage();
+  const oldUsage = o.usage && typeof o.usage === "object" ? o.usage : {};
+  return { schema_version: 2, job_id: id(o.job_id, "job_id"), codex_thread_id: stringOrNull(o.codex_thread_id), opus_session_id: stringOrNull(o.opus_session_id), opus_brief_hash: null, modes: { codex: "none", opus: "none" }, rotation_history: [], recorded_invocations: Array.isArray(o.recorded_invocations) ? o.recorded_invocations.map(String) : [], usage: { codex: oldUsage.codex ?? empty, fable: oldUsage.fable ?? empty, opus: oldUsage.opus ?? empty }, updated_at: typeof o.updated_at === "string" ? o.updated_at : (/* @__PURE__ */ new Date(0)).toISOString() };
 }
-function roleForLegacyArtifact(filename) {
-  if (filename.startsWith("codex-")) return "codex";
-  if (filename.startsWith("fable-")) return "fable";
-  if (filename.startsWith("opus-report")) return "opus";
-  return "orchestrator";
+function legacyConfig(value) {
+  const o = value && typeof value === "object" ? value : {};
+  const defaults = { fable: { model: "fable", effort: "low", max_turns: 1, timeout_ms: 3e5, permission_mode: "read_only" }, opus: { model: "opus", effort: "high", max_turns: 50, timeout_ms: 18e5, permission_mode: "worktree" }, codex: { model: "codex", effort: "medium", max_turns: 1, timeout_ms: 6e5, permission_mode: "read_only" } };
+  return { fable_total_cap: 1, max_input_bytes: Number(o.max_input_bytes) || 128e3, max_output_bytes: Number(o.max_output_bytes) || 64e3, passport_max_bytes: Number(o.passport_max_bytes) || 64e3, profiles: o.profiles && typeof o.profiles === "object" ? o.profiles : defaults };
+}
+function zeroUsage() {
+  return { calls: 0, input_chars: 0, output_chars: 0, input_tokens: 0, output_tokens: 0, estimated_tokens: 0, cache_read: 0, cache_write: 0, duration_ms: 0, failed_calls: 0, resumes: 0, compactions: 0 };
+}
+function stringOrNull(value) {
+  return typeof value === "string" ? value : null;
 }
 
 // src/infrastructure/workflow/artifact-store.ts
@@ -195,16 +197,14 @@ var SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 var SHA256 = /^[a-f0-9]{64}$/;
 var FORBIDDEN_FIELD = /^(?:env|environment|credentials?|private[_-]?key|privatekey|pem|api[_-]?key|password|passwd|secret|token)$/i;
 var ARTIFACT_FILES = {
-  codex_brief: "codex-brief-r%REV%-i%ITER%-a%SEQ%.json",
-  fable_plan: "fable-plan-r%REV%-i%ITER%-a%SEQ%.json",
-  codex_plan_review: "codex-plan-review-r%REV%-i%ITER%-a%SEQ%.json",
-  fable_final_prompt: "fable-final-prompt-r%REV%-i%ITER%-a%SEQ%.md",
+  codex_decision: "codex-decision-r%REV%-i%ITER%-a%SEQ%.json",
+  opus_instruction: "opus-instruction-r%REV%-i%ITER%-a%SEQ%.md",
+  fable_request: "fable-request-r%REV%-i%ITER%-a%SEQ%.json",
+  fable_advice: "fable-advice-r%REV%-i%ITER%-a%SEQ%.json",
+  routing_decision: "routing-decision-r%REV%-i%ITER%-a%SEQ%.json",
   opus_report: "opus-report-r%REV%-i%ITER%-a%SEQ%.json",
   opus_diff: "opus-r%REV%-i%ITER%-a%SEQ%.diff",
-  test_results: "test-results-r%REV%-i%ITER%-a%SEQ%.json",
-  codex_technical_review: "codex-technical-review-r%REV%-i%ITER%-a%SEQ%.json",
-  fable_compliance_review: "fable-compliance-review-r%REV%-i%ITER%-a%SEQ%.json",
-  codex_synthesis: "codex-synthesis-r%REV%-i%ITER%-a%SEQ%.json"
+  test_results: "test-results-r%REV%-i%ITER%-a%SEQ%.json"
 };
 var WorkflowArtifactStore = class {
   root;
@@ -240,7 +240,7 @@ var WorkflowArtifactStore = class {
       const timestamp2 = iso(input.timestamp ?? (/* @__PURE__ */ new Date()).toISOString());
       const artifactHash = hashCanonical(payload);
       const filename = artifactFilename(input.name, job.revision, job.opus_iteration, input.revision);
-      const stored = { metadata: { schema_version: 1, job_id: id2, artifact_name: input.name, filename, phase: input.phase, workflow_revision: job.revision, iteration: job.opus_iteration, revision: input.revision, invocation_id: input.invocation_id, producing_role: input.producing_role, parent_artifact_hash: input.parent_artifact_hash, timestamp: timestamp2, artifact_hash: artifactHash }, payload };
+      const stored = { metadata: { schema_version: 2, job_id: id2, artifact_name: input.name, filename, phase: input.phase, workflow_revision: job.revision, iteration: job.opus_iteration, revision: input.revision, invocation_id: input.invocation_id, producing_role: input.producing_role, parent_artifact_hash: input.parent_artifact_hash, timestamp: timestamp2, artifact_hash: artifactHash }, payload };
       const file = path.join(this.root, id2, "artifacts", filename);
       try {
         await fs.access(file);
@@ -277,7 +277,7 @@ var WorkflowArtifactStore = class {
     return this.lock(id2, async () => {
       const job = await this.requiredJob(id2);
       if (!canTransitionWorkflow(job.phase, next)) throw new Error(`Invalid workflow phase transition: ${job.phase} -> ${next}`);
-      const updated = validateWorkflowJob({ ...job, ...patch, schema_version: 1, job_id: id2, phase: next, updated_at: (/* @__PURE__ */ new Date()).toISOString() });
+      const updated = validateWorkflowJob({ ...job, ...patch, schema_version: 2, job_id: id2, phase: next, updated_at: (/* @__PURE__ */ new Date()).toISOString() });
       await this.write(this.file(id2, "job.json"), updated);
       return updated;
     });
@@ -291,10 +291,10 @@ var WorkflowArtifactStore = class {
       if (!passport) throw new Error(`Workflow passport not found: ${id2}`);
       if (!canTransitionWorkflow(job.phase, next)) throw new Error(`Invalid workflow phase transition: ${job.phase} -> ${next}`);
       const now = (/* @__PURE__ */ new Date()).toISOString();
-      const updatedJob = validateWorkflowJob({ ...job, ...patch, schema_version: 1, job_id: id2, phase: next, updated_at: now });
-      const updatedPassport = validateWorkflowPassport({ ...passport, ...passportPatch, schema_version: 1, job_id: id2, passport_revision: passport.passport_revision + 1, current_phase: next, current_revision: updatedJob.revision, next_action: updatedJob.next_action, current_blockers: updatedJob.blocker ? [updatedJob.blocker] : [] });
+      const updatedJob = validateWorkflowJob({ ...job, ...patch, schema_version: 2, job_id: id2, phase: next, updated_at: now });
+      const updatedPassport = validateWorkflowPassport({ ...passport, ...passportPatch, schema_version: 2, job_id: id2, passport_revision: passport.passport_revision + 1, current_phase: next, current_revision: updatedJob.revision, next_action: updatedJob.next_action, current_blockers: updatedJob.blocker ? [updatedJob.blocker] : [] });
       if (Buffer.byteLength(JSON.stringify(updatedPassport)) > updatedPassport.config.passport_max_bytes) throw new Error("Workflow passport exceeded configured maximum");
-      const event = { schema_version: 1, job_id: id2, type: "phase_changed", timestamp: now, data: { transition_id: `transition-${updatedPassport.passport_revision}`, from: job.phase, to: next } };
+      const event = { schema_version: 2, job_id: id2, type: "phase_changed", timestamp: now, data: { transition_id: `transition-${updatedPassport.passport_revision}`, from: job.phase, to: next } };
       const journal = { job: updatedJob, passport: updatedPassport, event };
       await this.write(this.file(id2, "transition.pending.json"), journal);
       await this.applyTransition(id2, journal);
@@ -305,7 +305,7 @@ var WorkflowArtifactStore = class {
     const id2 = safeId(jobId);
     return this.lock(id2, async () => {
       const job = await this.requiredJob(id2);
-      const updated = validateWorkflowJob({ ...job, ...patch, schema_version: 1, job_id: id2, phase: job.phase, updated_at: (/* @__PURE__ */ new Date()).toISOString() });
+      const updated = validateWorkflowJob({ ...job, ...patch, schema_version: 2, job_id: id2, phase: job.phase, updated_at: (/* @__PURE__ */ new Date()).toISOString() });
       await this.write(this.file(id2, "job.json"), updated);
       return updated;
     });
@@ -373,16 +373,20 @@ var WorkflowArtifactStore = class {
   async writeInvocationReceipt(value) {
     const id2 = safeId(value.job_id);
     const file = this.file(id2, `invocations/${safeId(value.invocation_id)}.json`);
-    try {
-      await fs.access(file);
-      return;
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
-    await this.write(file, value);
+    await this.lock(id2, async () => {
+      const prior = await readJson(file);
+      if (prior) {
+        if (canonicalJson(prior) !== canonicalJson(value)) throw new Error("Conflicting invocation receipt already exists");
+        return;
+      }
+      await this.write(file, value);
+    });
   }
   async readInvocationReceipt(jobId, invocationId) {
-    return readJson(this.file(safeId(jobId), `invocations/${safeId(invocationId)}.json`));
+    const value = await readJson(this.file(safeId(jobId), `invocations/${safeId(invocationId)}.json`));
+    if (!value) return null;
+    if (value.schema_version !== 2 || value.job_id !== jobId || value.invocation_id !== invocationId || !SHA256.test(value.request_hash) || !Number.isSafeInteger(value.workflow_revision)) throw new Error("Invalid invocation receipt");
+    return value;
   }
   async listJobs() {
     let entries;
@@ -521,5 +525,5 @@ function artifactFilename(name, workflowRevision, iteration, sequence) {
 }
 
 export { ARTIFACT_FILES, WORKFLOW_PHASE_TRANSITIONS, WorkflowArtifactStore, artifactReference, canTransitionWorkflow, hashCanonical, isTerminalWorkflowPhase, transitionWorkflow };
-//# sourceMappingURL=chunk-HLWQUKYI.js.map
-//# sourceMappingURL=chunk-HLWQUKYI.js.map
+//# sourceMappingURL=chunk-VBS3B32E.js.map
+//# sourceMappingURL=chunk-VBS3B32E.js.map

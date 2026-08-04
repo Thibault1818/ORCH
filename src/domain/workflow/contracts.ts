@@ -1,35 +1,39 @@
-export const WORKFLOW_SCHEMA_VERSION = 1 as const;
+export const WORKFLOW_SCHEMA_VERSION = 2 as const;
 
 export type ProducingRole = 'fable' | 'codex' | 'opus' | 'orchestrator';
+export type CodexAction = 'DISPATCH_OPUS' | 'ACCEPT' | 'CORRECT_OPUS' | 'CONSULT_FABLE' | 'PAUSE' | 'STOP';
+export type FablePurpose = 'COMPARE_BOUNDED_OPTIONS' | 'GENERATE_NONCRITICAL_ALTERNATIVES' | 'CHALLENGE_REVERSIBLE_PLAN';
 
-export interface CodexBrief {
-  job_id: string;
-  objective: string;
-  constraints: string[];
-  allowed_file_scope: string[];
-  required_checks: string[];
+export interface FableFallbackV1 {
+  action: 'DISPATCH_OPUS' | 'CORRECT_OPUS' | 'PAUSE';
+  instructions: string;
 }
 
-export interface FablePlan {
-  job_id: string;
-  revision: number;
-  assumptions: string[];
-  acceptance_criteria: string[];
-  implementation_steps: string[];
-  risks: string[];
-  questions_requiring_human: string[];
+export interface FableQueryV1 {
+  purpose: FablePurpose;
+  question: string;
+  verification_method: string;
+  fallback_if_skipped: FableFallbackV1;
 }
 
-export interface CodexPlanReview {
+export interface CodexDecisionV2 {
+  schema_version: 2;
   job_id: string;
-  revision: number;
-  verdict: 'GO' | 'APPLY_AND_GO' | 'REVISE' | 'STOP';
+  action: CodexAction;
   summary: string;
+  implementation_brief: string | null;
   required_changes: string[];
-  requires_re_review: boolean;
   risk_level: 'low' | 'medium' | 'high';
-  reason: string;
-  acceptance_criteria: string[];
+  fable_query: FableQueryV1 | null;
+  reviewed_commit: string | null;
+}
+
+export interface FableAdviceV1 {
+  schema_version: 1;
+  consultation_id: string;
+  answer: string;
+  alternatives: string[];
+  uncertainties: string[];
 }
 
 export interface OpusResult {
@@ -43,37 +47,6 @@ export interface OpusResult {
   summary: string;
 }
 
-export interface FableComplianceReview {
-  job_id: string;
-  approved_plan_hash: string;
-  verdict: 'ALIGNED' | 'GAPS_FOUND' | 'UNCERTAIN';
-  plan_deviations: string[];
-  missing_requirements: string[];
-  recommended_repairs: string[];
-}
-
-export interface CodexTechnicalReview {
-  job_id: string;
-  reviewed_commit: string;
-  checks_passed: boolean;
-  evidence: string[];
-  required_fixes: string[];
-  concise_reason: string;
-}
-
-export interface CodexSynthesis {
-  job_id: string;
-  reviewed_commit: string;
-  verdict: 'GO' | 'REVISE' | 'STOP';
-  merge_allowed: boolean;
-  evidence: string[];
-  summary: string;
-  required_changes: string[];
-  requires_re_review: boolean;
-  risk_level: 'low' | 'medium' | 'high';
-  reason: string;
-}
-
 export interface CheckResults {
   job_id: string;
   commit: string;
@@ -81,30 +54,47 @@ export interface CheckResults {
   checks: Array<{ command: string; passed: boolean; output: string }>;
 }
 
-export type WorkflowContract = CodexBrief | FablePlan | CodexPlanReview | OpusResult |
-  FableComplianceReview | CodexTechnicalReview | CodexSynthesis | CheckResults;
+export type CodexDecisionStage = 'pre_opus' | 'post_opus' | 'after_fable_pre' | 'after_fable_post';
 
-type ObjectValue = Record<string, unknown>;
-
-export function validateCodexBrief(value: unknown): CodexBrief {
-  const o = exact(value, ['job_id', 'objective', 'constraints', 'allowed_file_scope', 'required_checks'], 'Codex brief');
-  return { job_id: id(o.job_id), objective: nonEmpty(o.objective, 'objective'), constraints: strings(o.constraints, 'constraints'), allowed_file_scope: strings(o.allowed_file_scope, 'allowed_file_scope'), required_checks: strings(o.required_checks, 'required_checks') };
-}
-
-export function validateFablePlan(value: unknown): FablePlan {
-  const o = exact(value, ['job_id', 'revision', 'assumptions', 'acceptance_criteria', 'implementation_steps', 'risks', 'questions_requiring_human'], 'Fable plan');
-  return { job_id: id(o.job_id), revision: revision(o.revision), assumptions: strings(o.assumptions, 'assumptions'), acceptance_criteria: strings(o.acceptance_criteria, 'acceptance_criteria'), implementation_steps: strings(o.implementation_steps, 'implementation_steps'), risks: strings(o.risks, 'risks'), questions_requiring_human: strings(o.questions_requiring_human, 'questions_requiring_human') };
-}
-
-export function validateCodexPlanReview(value: unknown): CodexPlanReview {
-  const o = exact(value, ['job_id', 'revision', 'verdict', 'summary', 'required_changes', 'requires_re_review', 'risk_level', 'reason', 'acceptance_criteria'], 'Codex plan review');
-  const verdict = enumeration(o.verdict, ['GO', 'APPLY_AND_GO', 'REVISE', 'STOP'] as const, 'verdict');
+export function validateCodexDecision(value: unknown, stage: CodexDecisionStage): CodexDecisionV2 {
+  const o = exact(value, ['schema_version', 'job_id', 'action', 'summary', 'implementation_brief', 'required_changes', 'risk_level', 'fable_query', 'reviewed_commit'], 'Codex decision');
+  if (o.schema_version !== 2) throw new Error('Unsupported Codex decision schema version');
+  const action = enumeration(o.action, ['DISPATCH_OPUS', 'ACCEPT', 'CORRECT_OPUS', 'CONSULT_FABLE', 'PAUSE', 'STOP'] as const, 'action');
+  const allowed = stage === 'pre_opus' ? ['DISPATCH_OPUS', 'CONSULT_FABLE', 'PAUSE', 'STOP'] : stage === 'post_opus' ? ['ACCEPT', 'CORRECT_OPUS', 'CONSULT_FABLE', 'PAUSE', 'STOP'] : stage === 'after_fable_pre' ? ['DISPATCH_OPUS', 'PAUSE', 'STOP'] : ['ACCEPT', 'CORRECT_OPUS', 'PAUSE', 'STOP'];
+  if (!allowed.includes(action)) throw new Error(`Codex action ${action} is invalid during ${stage}`);
+  const implementationBrief = o.implementation_brief === null ? null : nonEmpty(o.implementation_brief, 'implementation_brief');
   const requiredChanges = strings(o.required_changes, 'required_changes');
-  const requiresReReview = bool(o.requires_re_review, 'requires_re_review');
-  if (verdict === 'APPLY_AND_GO' && requiredChanges.length === 0) throw new Error('APPLY_AND_GO requires required_changes');
-  if (verdict === 'GO' && requiredChanges.length > 0) throw new Error('GO cannot include required_changes');
-  if (verdict === 'GO' && requiresReReview) throw new Error('GO cannot require re-review');
-  return { job_id: id(o.job_id), revision: revision(o.revision), verdict, summary: nonEmpty(o.summary, 'summary'), required_changes: requiredChanges, requires_re_review: requiresReReview, risk_level: enumeration(o.risk_level, ['low', 'medium', 'high'] as const, 'risk_level'), reason: nonEmpty(o.reason, 'reason'), acceptance_criteria: strings(o.acceptance_criteria, 'acceptance_criteria') };
+  const fableQuery = o.fable_query === null ? null : validateFableQuery(o.fable_query);
+  const reviewedCommit = o.reviewed_commit === null ? null : commit(o.reviewed_commit);
+  if (action === 'DISPATCH_OPUS' && !implementationBrief) throw new Error('DISPATCH_OPUS requires implementation_brief');
+  if (action !== 'DISPATCH_OPUS' && implementationBrief !== null) throw new Error(`${action} cannot include implementation_brief`);
+  if (action === 'CORRECT_OPUS' && requiredChanges.length === 0) throw new Error('CORRECT_OPUS requires required_changes');
+  if (action !== 'CORRECT_OPUS' && requiredChanges.length > 0) throw new Error(`${action} cannot include required_changes`);
+  if (action === 'CONSULT_FABLE' && !fableQuery) throw new Error('CONSULT_FABLE requires fable_query');
+  if (action !== 'CONSULT_FABLE' && fableQuery !== null) throw new Error(`${action} requires fable_query null`);
+  if (action === 'CONSULT_FABLE' && o.risk_level !== 'low') throw new Error('CONSULT_FABLE requires low risk');
+  if (fableQuery && (stage === 'pre_opus' || stage === 'after_fable_pre') && fableQuery.fallback_if_skipped.action === 'CORRECT_OPUS') throw new Error('Pre-Opus consultation cannot use CORRECT_OPUS fallback');
+  if (fableQuery && (stage === 'post_opus' || stage === 'after_fable_post') && fableQuery.fallback_if_skipped.action === 'DISPATCH_OPUS') throw new Error('Post-Opus consultation cannot use DISPATCH_OPUS fallback');
+  if ((stage === 'post_opus' || stage === 'after_fable_post') && reviewedCommit === null) throw new Error('Post-Opus decision requires reviewed_commit');
+  if ((stage === 'pre_opus' || stage === 'after_fable_pre') && reviewedCommit !== null) throw new Error('Pre-Opus decision cannot include reviewed_commit');
+  return { schema_version: 2, job_id: id(o.job_id), action, summary: nonEmpty(o.summary, 'summary'), implementation_brief: implementationBrief, required_changes: requiredChanges, risk_level: enumeration(o.risk_level, ['low', 'medium', 'high'] as const, 'risk_level'), fable_query: fableQuery, reviewed_commit: reviewedCommit };
+}
+
+export function validateFableQuery(value: unknown): FableQueryV1 {
+  const o = exact(value, ['purpose', 'question', 'verification_method', 'fallback_if_skipped'], 'Fable query');
+  const fallback = exact(o.fallback_if_skipped, ['action', 'instructions'], 'Fable fallback');
+  return {
+    purpose: enumeration(o.purpose, ['COMPARE_BOUNDED_OPTIONS', 'GENERATE_NONCRITICAL_ALTERNATIVES', 'CHALLENGE_REVERSIBLE_PLAN'] as const, 'purpose'),
+    question: nonEmpty(o.question, 'question'),
+    verification_method: nonEmpty(o.verification_method, 'verification_method'),
+    fallback_if_skipped: { action: enumeration(fallback.action, ['DISPATCH_OPUS', 'CORRECT_OPUS', 'PAUSE'] as const, 'fallback action'), instructions: nonEmpty(fallback.instructions, 'fallback instructions') },
+  };
+}
+
+export function validateFableAdvice(value: unknown): FableAdviceV1 {
+  const o = exact(value, ['schema_version', 'consultation_id', 'answer', 'alternatives', 'uncertainties'], 'Fable advice');
+  if (o.schema_version !== 1) throw new Error('Unsupported Fable advice schema version');
+  return { schema_version: 1, consultation_id: id(o.consultation_id), answer: nonEmpty(o.answer, 'answer'), alternatives: strings(o.alternatives, 'alternatives'), uncertainties: strings(o.uncertainties, 'uncertainties') };
 }
 
 export function validateOpusResult(value: unknown): OpusResult {
@@ -112,54 +102,21 @@ export function validateOpusResult(value: unknown): OpusResult {
   return { job_id: id(o.job_id), status: enumeration(o.status, ['completed', 'partial', 'failed'] as const, 'status'), files_changed: strings(o.files_changed, 'files_changed'), commands_run: strings(o.commands_run, 'commands_run'), tests_reported: strings(o.tests_reported, 'tests_reported'), deviations: strings(o.deviations, 'deviations'), unresolved: strings(o.unresolved, 'unresolved'), summary: nonEmpty(o.summary, 'summary') };
 }
 
-export function validateFableComplianceReview(value: unknown): FableComplianceReview {
-  const o = exact(value, ['job_id', 'approved_plan_hash', 'verdict', 'plan_deviations', 'missing_requirements', 'recommended_repairs'], 'Fable compliance review');
-  return { job_id: id(o.job_id), approved_plan_hash: hash(o.approved_plan_hash), verdict: enumeration(o.verdict, ['ALIGNED', 'GAPS_FOUND', 'UNCERTAIN'] as const, 'verdict'), plan_deviations: strings(o.plan_deviations, 'plan_deviations'), missing_requirements: strings(o.missing_requirements, 'missing_requirements'), recommended_repairs: strings(o.recommended_repairs, 'recommended_repairs') };
-}
-
-export function validateCodexTechnicalReview(value: unknown): CodexTechnicalReview {
-  const o = exact(value, ['job_id', 'reviewed_commit', 'checks_passed', 'evidence', 'required_fixes', 'concise_reason'], 'Codex technical review');
-  return { job_id: id(o.job_id), reviewed_commit: commit(o.reviewed_commit), checks_passed: bool(o.checks_passed, 'checks_passed'), evidence: strings(o.evidence, 'evidence'), required_fixes: strings(o.required_fixes, 'required_fixes'), concise_reason: nonEmpty(o.concise_reason, 'concise_reason') };
-}
-
-export function validateCodexSynthesis(value: unknown): CodexSynthesis {
-  const o = exact(value, ['job_id', 'reviewed_commit', 'verdict', 'merge_allowed', 'evidence', 'summary', 'required_changes', 'requires_re_review', 'risk_level', 'reason'], 'Codex synthesis');
-  const verdict = enumeration(o.verdict, ['GO', 'REVISE', 'STOP'] as const, 'verdict');
-  const mergeAllowed = bool(o.merge_allowed, 'merge_allowed');
-  const requiredChanges = strings(o.required_changes, 'required_changes');
-  if (mergeAllowed && verdict !== 'GO') throw new Error('merge_allowed requires GO');
-  if (verdict === 'GO' && requiredChanges.length > 0) throw new Error('GO cannot include required_changes');
-  const requiresReReview = bool(o.requires_re_review, 'requires_re_review');
-  if (mergeAllowed && requiresReReview) throw new Error('merge_allowed cannot require re-review');
-  return { job_id: id(o.job_id), reviewed_commit: commit(o.reviewed_commit), verdict, merge_allowed: mergeAllowed, evidence: strings(o.evidence, 'evidence'), summary: nonEmpty(o.summary, 'summary'), required_changes: requiredChanges, requires_re_review: requiresReReview, risk_level: enumeration(o.risk_level, ['low', 'medium', 'high'] as const, 'risk_level'), reason: nonEmpty(o.reason, 'reason') };
-}
-
 export function validateCheckResults(value: unknown): CheckResults {
   const o = exact(value, ['job_id', 'commit', 'passed', 'checks'], 'Check results');
-  const checks = array(o.checks, 'checks').map((item, index) => {
-    const c = exact(item, ['command', 'passed', 'output'], `checks[${index}]`);
-    return { command: nonEmpty(c.command, 'command'), passed: bool(c.passed, 'passed'), output: text(c.output, 'output') };
-  });
+  const checks = array(o.checks, 'checks').map((item, index) => { const c = exact(item, ['command', 'passed', 'output'], `checks[${index}]`); return { command: nonEmpty(c.command, 'command'), passed: bool(c.passed, 'passed'), output: text(c.output, 'output') }; });
   const passed = bool(o.passed, 'passed');
   if (passed !== checks.every((check) => check.passed)) throw new Error('Check aggregate does not match individual results');
   return { job_id: id(o.job_id), commit: commit(o.commit), passed, checks };
 }
 
-function exact(value: unknown, keys: string[], label: string): ObjectValue {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`);
-  const object = value as ObjectValue;
-  for (const key of keys) if (!(key in object)) throw new Error(`${label} is missing ${key}`);
-  const allowed = new Set(keys);
-  for (const key of Object.keys(object)) if (!allowed.has(key)) throw new Error(`${label} contains unknown field ${key}`);
-  return object;
-}
+type ObjectValue = Record<string, unknown>;
+function exact(value: unknown, keys: string[], label: string): ObjectValue { if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`); const object = value as ObjectValue; for (const key of keys) if (!(key in object)) throw new Error(`${label} is missing ${key}`); const allowed = new Set(keys); for (const key of Object.keys(object)) if (!allowed.has(key)) throw new Error(`${label} contains unknown field ${key}`); return object; }
 function array(value: unknown, label: string): unknown[] { if (!Array.isArray(value)) throw new Error(`${label} must be an array`); return value; }
 function text(value: unknown, label: string): string { if (typeof value !== 'string') throw new Error(`${label} must be a string`); return value; }
 function nonEmpty(value: unknown, label: string): string { const result = text(value, label); if (!result.trim()) throw new Error(`${label} must not be empty`); return result; }
 function strings(value: unknown, label: string): string[] { return array(value, label).map((v, i) => text(v, `${label}[${i}]`)); }
 function bool(value: unknown, label: string): boolean { if (typeof value !== 'boolean') throw new Error(`${label} must be a boolean`); return value; }
-function revision(value: unknown): number { if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error('revision must be a positive integer'); return value as number; }
-function id(value: unknown): string { const result = nonEmpty(value, 'job_id'); if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(result)) throw new Error('Invalid job_id'); return result; }
-function hash(value: unknown): string { const result = text(value, 'hash'); if (!/^[a-f0-9]{64}$/.test(result)) throw new Error('Invalid hash'); return result; }
+function id(value: unknown): string { const result = nonEmpty(value, 'id'); if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(result)) throw new Error('Invalid id'); return result; }
 function commit(value: unknown): string { const result = text(value, 'commit'); if (!/^[a-f0-9]{7,64}$/.test(result)) throw new Error('Invalid commit'); return result; }
 function enumeration<const T extends readonly string[]>(value: unknown, values: T, label: string): T[number] { if (typeof value !== 'string' || !values.includes(value)) throw new Error(`${label} has an invalid value`); return value as T[number]; }

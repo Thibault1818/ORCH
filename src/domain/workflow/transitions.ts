@@ -1,23 +1,16 @@
-export type WorkflowPhase =
-  | 'codex_brief' | 'fable_plan' | 'codex_plan_review' | 'fable_final_prompt'
-  | 'opus_execution' | 'codex_technical_review' | 'fable_compliance_review'
-  | 'codex_synthesis' | 'merge_ready' | 'done' | 'blocked' | 'paused'
-  | 'cancelled' | 'failed';
+export type WorkflowPhase = 'codex_pre_opus' | 'fable_consultation' | 'codex_after_fable' | 'opus_execution' | 'codex_post_opus' | 'verification' | 'merge_ready' | 'done' | 'blocked' | 'paused' | 'cancelled' | 'failed';
 
-const ACTIVE: WorkflowPhase[] = ['codex_brief', 'fable_plan', 'codex_plan_review', 'fable_final_prompt', 'opus_execution', 'codex_technical_review', 'fable_compliance_review', 'codex_synthesis', 'merge_ready'];
+const ACTIVE: WorkflowPhase[] = ['codex_pre_opus', 'fable_consultation', 'codex_after_fable', 'opus_execution', 'codex_post_opus', 'verification', 'merge_ready'];
 
 export const WORKFLOW_PHASE_TRANSITIONS: Readonly<Record<WorkflowPhase, readonly WorkflowPhase[]>> = {
-  codex_brief: ['fable_plan', 'blocked', 'paused', 'cancelled', 'failed'],
-  fable_plan: ['codex_plan_review', 'blocked', 'paused', 'cancelled', 'failed'],
-  codex_plan_review: ['fable_plan', 'fable_final_prompt', 'blocked', 'paused', 'cancelled', 'failed'],
-  fable_final_prompt: ['opus_execution', 'blocked', 'paused', 'cancelled', 'failed'],
-  opus_execution: ['codex_technical_review', 'blocked', 'paused', 'cancelled', 'failed'],
-  codex_technical_review: ['fable_compliance_review', 'codex_synthesis', 'blocked', 'paused', 'cancelled', 'failed'],
-  fable_compliance_review: ['codex_synthesis', 'blocked', 'paused', 'cancelled', 'failed'],
-  codex_synthesis: ['fable_final_prompt', 'fable_plan', 'merge_ready', 'blocked', 'paused', 'cancelled', 'failed'],
-  merge_ready: ['done', 'blocked', 'failed', 'paused', 'cancelled'],
-  done: [], blocked: ['codex_brief', 'fable_plan', 'codex_plan_review', 'fable_final_prompt', 'opus_execution', 'codex_technical_review', 'fable_compliance_review', 'codex_synthesis', 'merge_ready', 'cancelled'],
-  paused: [...ACTIVE, 'blocked', 'cancelled'], cancelled: [], failed: [],
+  codex_pre_opus: ['fable_consultation', 'opus_execution', 'paused', 'cancelled', 'failed'],
+  fable_consultation: ['codex_after_fable', 'opus_execution', 'paused', 'cancelled', 'failed'],
+  codex_after_fable: ['opus_execution', 'verification', 'paused', 'cancelled', 'failed'],
+  opus_execution: ['codex_post_opus', 'blocked', 'paused', 'cancelled', 'failed'],
+  codex_post_opus: ['fable_consultation', 'opus_execution', 'verification', 'paused', 'cancelled', 'failed'],
+  verification: ['merge_ready', 'blocked', 'paused', 'cancelled', 'failed'],
+  merge_ready: ['done', 'blocked', 'paused', 'cancelled', 'failed'],
+  done: [], blocked: [...ACTIVE, 'cancelled'], paused: [...ACTIVE, 'blocked', 'cancelled'], cancelled: [], failed: [],
 };
 
 export function canTransitionWorkflow(from: WorkflowPhase, to: WorkflowPhase): boolean { return WORKFLOW_PHASE_TRANSITIONS[from].includes(to); }

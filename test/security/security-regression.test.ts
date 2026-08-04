@@ -111,7 +111,9 @@ describe('secured fork static invariants', () => {
     expect(engine).not.toContain("['git diff --check']");
     expect(engine).toMatch(/checks\.checks\.length\s*===\s*0/);
     expect(native).toContain("'--sandbox', 'read-only'");
-    expect(native).toContain('thread, evidence.worktree');
+    expect(native).toContain('evidence.evidence?.worktree ?? process.cwd()');
+    expect(engine).toContain("mode === 'direct' ? 0");
+    expect(native).toContain('Do not return actions, verdicts, execution instructions, passport updates, or merge advice.');
     expect(native).toContain("branch.startsWith('orchestry/workflow/')");
     expect(native).toContain("['status', '--porcelain']");
     expect(native).toContain('allowed_file_scope: passport.allowed_file_scope');
