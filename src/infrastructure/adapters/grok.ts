@@ -1,9 +1,9 @@
 /**
  * Grok CLI adapter.
  *
- * Spawns `grok -p ... --output-format streaming-json` in headless mode.
- * Grok streams text/thought deltas; this adapter aggregates text deltas into
- * bounded output chunks and emits a terminal `done` event at session end.
+ * Generic execution intentionally fails closed before spawning a process until
+ * stdin prompt transport is proven for a supported Grok CLI version. Passing a
+ * prompt with `-p` would expose it in argv and is therefore prohibited.
  */
 
 import type { ChildProcess } from 'node:child_process';
@@ -25,7 +25,7 @@ export class GrokAdapter implements IAgentAdapter {
 
   async test(): Promise<AdapterTestResult> {
     try {
-      const { stdout } = await execFileAsync('grok', ['--version']);
+      const { stdout } = await execFileAsync('grok', ['--version'], { env: buildChildEnv() });
       return { ok: true, version: stdout.trim() };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -38,39 +38,8 @@ export class GrokAdapter implements IAgentAdapter {
   }
 
   execute(params: ExecuteParams): ExecuteHandle {
-    const args = [
-      '-p', params.prompt,
-      '--output-format', 'streaming-json',
-      '--cwd', params.workspace,
-    ];
-
-    if (params.security?.allowPermissionBypass === true) {
-      args.push('--permission-mode', 'bypassPermissions', '--always-approve');
-    }
-
-    if (params.config.model) {
-      args.push('--model', params.config.model);
-    }
-    if (params.config.effort) {
-      args.push('--effort', params.config.effort);
-    }
-    if (params.config.max_turns) {
-      args.push('--max-turns', String(params.config.max_turns));
-    }
-
-    const effectiveSystemPrompt = params.systemPrompt ?? params.config.system_prompt;
-    if (effectiveSystemPrompt) {
-      args.push('--system-prompt-override', effectiveSystemPrompt);
-    }
-
-    const { process: proc, pid } = this.processManager.spawn('grok', args, {
-      cwd: params.workspace,
-      env: buildChildEnv(params.env),
-      signal: params.signal,
-    });
-
-    const events = createGrokEvents(proc, params.signal);
-    return { pid, events };
+    void params;
+    throw new Error('Grok execution is disabled: supported stdin prompt transport is not proven and argv prompt transport is prohibited');
   }
 
   async stop(pid: number): Promise<void> {
@@ -78,6 +47,7 @@ export class GrokAdapter implements IAgentAdapter {
   }
 }
 
+// Retained and unit-tested independently for a future secure transport implementation.
 function createGrokEvents(proc: ChildProcess, signal?: AbortSignal): AsyncGenerator<AgentEvent> {
   async function* generate(): AsyncGenerator<AgentEvent> {
     let gotDoneEvent = false;

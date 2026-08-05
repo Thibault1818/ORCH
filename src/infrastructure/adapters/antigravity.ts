@@ -1,16 +1,16 @@
 /**
  * Antigravity CLI adapter.
  *
- * Spawns `agy -p ...` in headless mode. Current Antigravity CLI headless mode
- * is plain-text oriented, so stdout is streamed as output lines and a terminal
- * `done` event is emitted after a successful process exit.
+ * Generic execution intentionally fails closed before spawning a process until
+ * stdin prompt transport is proven for a supported Antigravity CLI version.
+ * Passing a prompt with `-p` would expose it in argv and is therefore prohibited.
  */
 
 import type { ChildProcess } from 'node:child_process';
 import type { IAgentAdapter, AdapterTestResult, ExecuteParams, AgentEvent, ExecuteHandle } from './interface.js';
 import type { IProcessManager } from '../process/process-manager.js';
 import { readLines } from '../process/process-manager.js';
-import { buildFullPrompt, buildChildEnv } from './utils.js';
+import { buildChildEnv } from './utils.js';
 import { classifyAdapterError } from '../../domain/errors.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -24,7 +24,7 @@ export class AntigravityAdapter implements IAgentAdapter {
 
   async test(): Promise<AdapterTestResult> {
     try {
-      const { stdout } = await execFileAsync('agy', ['--version']);
+      const { stdout } = await execFileAsync('agy', ['--version'], { env: buildChildEnv() });
       return { ok: true, version: stdout.trim() };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -37,27 +37,8 @@ export class AntigravityAdapter implements IAgentAdapter {
   }
 
   execute(params: ExecuteParams): ExecuteHandle {
-    const args = [
-      '-p',
-      buildFullPrompt(params.systemPrompt ?? params.config.system_prompt, params.prompt),
-    ];
-
-    if (params.security?.allowPermissionBypass === true) {
-      args.push('--dangerously-skip-permissions');
-    }
-
-    if (params.config.model) {
-      args.push('--model', params.config.model);
-    }
-
-    const { process: proc, pid } = this.processManager.spawn('agy', args, {
-      cwd: params.workspace,
-      env: buildChildEnv(params.env),
-      signal: params.signal,
-    });
-
-    const events = createAntigravityEvents(proc, params.signal);
-    return { pid, events };
+    void params;
+    throw new Error('Antigravity execution is disabled: supported stdin prompt transport is not proven and argv prompt transport is prohibited');
   }
 
   async stop(pid: number): Promise<void> {
@@ -65,6 +46,7 @@ export class AntigravityAdapter implements IAgentAdapter {
   }
 }
 
+// Retained and unit-tested independently for a future secure transport implementation.
 function createAntigravityEvents(proc: ChildProcess, signal?: AbortSignal): AsyncGenerator<AgentEvent> {
   async function* generate(): AsyncGenerator<AgentEvent> {
     let finalText = '';

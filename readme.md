@@ -48,17 +48,22 @@ export PATH="$TEMP_PREFIX/bin:$PATH"
 
 This repository is private/local package identity and is not published to npm. Review and update the pinned commit deliberately when adopting later fork changes.
 
-## Direct Codex to Opus workflow
+## Recoverable implementation workflow
 
-The secured fork includes a recoverable, artifact-based implementation pipeline. The normal path is Codex supervisor to Opus implementer to Codex supervisor. Opus works on a dedicated worktree and cannot merge until deterministic checks pass and Codex returns `ACCEPT` for the unchanged commit and diff.
+The dedicated workflow is organized by semantic role: the **Supervisor** plans and controls transitions, the **Implementer** changes code in a dedicated worktree, an optional low-authority **Adviser** may answer a narrow question, and the **Reviewer** approves the unchanged commit and diff (by default, the Supervisor also reviews). The built-in adaptive preset follows the direct path by default: Adviser is `None` and `max_adviser_calls` is `0`. `--mode direct` additionally prohibits an Adviser.
 
 ```bash
-# First verify that the local Codex and Claude CLIs are available.
+# Inspect discovered checks, CLI capabilities, and incompatibility reasons.
 orch workflow doctor
 
-# Start the autonomous foreground controller. It prints the recoverable job ID first.
-orch workflow start "Describe the change you want"            # adaptive, normally zero Fable calls
-orch workflow start "Describe the change you want" --mode direct
+# Run only inside a project whose discovered scripts you have reviewed and trust.
+# In a TTY, start performs check discovery, then opens the configuration wizard.
+orch workflow start "Describe the change you want"
+
+# Exact noninteractive launch with an explicitly trusted check.
+orch workflow start "Describe the change you want" --yes --check "npm run test"
+
+# Every noninteractive launch that is not a dry-run requires --yes.
 
 # Monitor or recover the printed job ID from another terminal.
 orch workflow status <job-id>
@@ -69,7 +74,7 @@ orch workflow artifacts <job-id>
 orch workflow cancel <job-id>
 ```
 
-Fable is an optional, stateless, advisory-only consultant. Adaptive mode permits at most one narrowly scoped call for the entire workflow when Codex requests it inside an already-required decision. Direct mode prohibits Fable. Denied or failed consultations execute Codex's predeclared safe fallback and do not block the direct workflow. Canonical artifacts and Codex/Opus session references live under `.orchestry/workflows/<job-id>/` with restrictive permissions and secret redaction.
+The TTY wizard selects a preset, mode, semantic-role bindings, Adviser budget, and trusted checks, then prints the resolved launch summary before execution. The roster snapshot is immutable after launch; to change a binding, pause at a safe boundary and run `orch workflow binding-rotate <job-id> <role> --adapter <cli> --model <model> --effort <level> --reason "..."`. Status reports the initial and active roster and hashes, roster revision, rotation history, phase/current role, per-role usage and tokens, remaining Adviser budget, checks, and blockers. Canonical artifacts and session references live under `.orchestry/workflows/<job-id>/` with restrictive permissions and secret redaction.
 
 <br/>
 
@@ -167,18 +172,34 @@ Install the fork from the pinned Git commit shown above. ORCH auto-initializes a
 
 Installation never changes user configuration. To deliberately register the optional `/orch` skill, run `orch setup claude-integration` and confirm the change. For an explicitly authorized persistent installation, use `npm install -g "git+https://github.com/Thibault1818/ORCH.git#<reviewed-commit-sha>" --prefix "$HOME/.local"`; direct dependencies are pinned and a shrinkwrap is shipped, while npm/Git/platform behavior remains outside byte-for-byte reproducibility guarantees.
 
-### Recoverable direct workflow
+### Workflow presets and configuration
 
 ```bash
-orch setup
-orch workflow start "Describe the implementation" --check "npm test"
-orch workflow start "Never consult Fable" --mode direct --check "npm test"
-orch workflow status
+orch workflow doctor
+orch workflow start "Describe the implementation" --mode direct --yes --check "npm run test"
+orch workflow status <job-id>
 ```
 
-Codex returns strict phase-valid actions: `DISPATCH_OPUS`, `ACCEPT`, `CORRECT_OPUS`, `CONSULT_FABLE`, `PAUSE`, or `STOP`. Codex sends briefs and corrections directly to Opus. `CONSULT_FABLE` is exceptional, low-risk, bounded to one call, and its advice must return to Codex before it can influence execution. `orch workflow status` shows mode, optional consultation status, usage, context mode, and session rotations.
+Project configuration lives in `.orchestry/config.yml`; global defaults live in `~/.orchestry/global.yml`. Project presets override global presets with the same name, and explicit flags override the selected preset.
 
-After a terminal restart, use `orch workflow status` and then `orch workflow resume <job-id> --reason "terminal restarted"`. If status reports an interrupted invocation without a durable receipt, retry only after review with `--retry-invocation --reason "approved retry"`. Use `orch workflow session-rotate <job-id> opus --reason "expired session"` when a stored identity is invalid. ORCH defaults to an honest compact `passport_handoff`, even when help output advertises resume. Set `ORCHESTRY_ENABLE_NATIVE_RESUME=1` only after empirically verifying continuation for the installed CLI versions; invalid identities then rotate once through a handoff, while ambiguous timeouts fail closed without a second call.
+```yaml
+workflow_launch:
+  default_preset: direct-review
+  presets:
+    direct-review:
+      supervisor: { adapter: codex, model: codex, effort: high }
+      implementer: { adapter: claude, model: opus, effort: high }
+      adviser: null
+      reviewer: supervisor
+      mode: direct
+      max_adviser_calls: 0
+```
+
+The same `workflow_launch` structure may be placed in the global file, for example with `default_preset: codex-claude-opus`. The built-in `codex-claude-opus` preset is adaptive but still defaults to the direct path with no Adviser and a zero call cap.
+
+Internally, persisted schema-v2 state retains the wire action names `DISPATCH_OPUS`, `ACCEPT`, `CORRECT_OPUS`, `CONSULT_FABLE`, `PAUSE`, and `STOP` for compatibility. User-facing behavior is defined by the semantic roles, not by those legacy provider-oriented identifiers.
+
+After a terminal restart, use `orch workflow status` and then `orch workflow resume <job-id> --reason "terminal restarted"`. If status reports an interrupted invocation without a durable receipt, retry only after review with `--retry-invocation --reason "approved retry"`. Use `orch workflow session-rotate <job-id> implementer --reason "expired session"` when a stored identity is invalid. Native resume is not assumed from CLI help: ORCH defaults to a compact `passport_handoff`. Enable `ORCHESTRY_ENABLE_NATIVE_RESUME=1` only after an end-to-end continuation probe for the installed CLI versions; ambiguous timeouts fail closed without a second call.
 
 To remove the complete sandbox installation, workflow state, and worktrees, run `git worktree list`, remove any listed `.orchestry/workspaces/<job-id>` with `git worktree remove`, delete corresponding `orchestry/workflow/<job-id>` branches, then run `rm -rf .orchestry "$ORCH_SANDBOX"`. If optional Claude integration was explicitly installed, remove `~/.claude/skills/orch` separately. ORCH does not alter shell profiles.
 
@@ -234,7 +255,7 @@ orch run --all --watch
 
 ### Your code is safe
 
-> **Every implementing agent works in an isolated git worktree.** The direct workflow cannot merge until Codex accepts the exact commit and diff and deterministic checks pass. Agents can't overwrite each other's work.
+> **Every Implementer works in an isolated git worktree.** The dedicated workflow cannot merge until the Reviewer accepts the exact commit and diff and deterministic checks pass. Agents can't overwrite each other's work.
 
 <details>
 <summary><strong>Why does each agent need ~300 MB?</strong></summary>
@@ -716,7 +737,7 @@ No. **Solo founders are the primary users.** You + 2 agents is already a zero-hu
 
 <br/>
 
-No. Every implementing agent works in an isolated git worktree on its own branch. The direct workflow merges only after Codex accepts the exact reviewed commit and diff and deterministic checks pass. Scope overlap detection prevents conflicts before they happen.
+No. Every Implementer works in an isolated git worktree on its own branch. The dedicated workflow merges only after the Reviewer accepts the exact reviewed commit and diff and deterministic checks pass. Scope overlap detection prevents conflicts before they happen.
 
 </details>
 

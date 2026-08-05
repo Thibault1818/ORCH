@@ -5,8 +5,9 @@ export { createTokenUsage } from './chunk-UG72A2JI.js';
 import { InvalidArgumentsError, TaskNotFoundError, InvalidTransitionError, AgentNotFoundError, OrchestryError, TeamNotFoundError, GoalNotFoundError, GoalHasPendingTasksError } from './chunk-Z7JNYNWE.js';
 export { AdapterErrorKind, AgentNotFoundError, ERROR_HINTS, GoalHasPendingTasksError, NotInitializedError, OrchestryError, TaskNotFoundError, WorkspaceError, classifyAdapterError } from './chunk-Z7JNYNWE.js';
 import { GOAL_LEAD_LABEL, GOAL_REVIEW_LABEL, AUTONOMOUS_LABEL } from './chunk-YNPZFT75.js';
-export { DEFAULT_WORKFLOW_CONFIG, WORKFLOW_SCHEMA_VERSION, WorkflowEngine, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult } from './chunk-Z6DOEI2O.js';
-export { ARTIFACT_FILES, WORKFLOW_PHASE_TRANSITIONS, WorkflowArtifactStore, canTransitionWorkflow, hashCanonical, isTerminalWorkflowPhase, transitionWorkflow } from './chunk-UTG567T3.js';
+export { DEFAULT_WORKFLOW_CONFIG, LegacyWorkflowRoleResolver, WORKFLOW_SCHEMA_VERSION, WorkflowEngine, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult } from './chunk-HB4X2WT2.js';
+export { discoverDeterministicChecks, validateDeterministicCheckCommands, validateExplicitChecks } from './chunk-D6YHC656.js';
+export { ARTIFACT_FILES, ROLE_PERMISSIONS, SEMANTIC_ROLES, WORKFLOW_PHASE_TRANSITIONS, WorkflowArtifactStore, canTransitionWorkflow, createRosterSnapshot, hashCanonical, hashRosterAgent, hashRosterSnapshot, isTerminalWorkflowPhase, legacyRosterSnapshot, transitionWorkflow, validateRosterAgent, validateRosterSnapshot } from './chunk-TN5K7UDO.js';
 export { AdapterRegistry } from './chunk-6DWHQPTE.js';
 export { SkillLoader } from './chunk-Y5P4NXTL.js';
 import { ensureDir, readYaml, writeYaml, readJson, writeJson, listFiles, appendJsonl, readJsonl, readJsonlTail, closeAppendHandle, pathExists } from './chunk-54K3JU53.js';
@@ -1953,6 +1954,7 @@ var GlobalConfigStore = class {
     if (!data) return { ...DEFAULT_GLOBAL_CONFIG, tui: { ...DEFAULT_GLOBAL_CONFIG.tui, notifications: { ...DEFAULT_GLOBAL_CONFIG.tui.notifications } } };
     const tui = data.tui;
     const notif = tui?.notifications;
+    const workflowLaunch = data.workflow_launch;
     return {
       tui: {
         activity_filter: tui?.activity_filter ?? DEFAULT_GLOBAL_CONFIG.tui.activity_filter,
@@ -1960,7 +1962,8 @@ var GlobalConfigStore = class {
           toast: typeof notif?.toast === "boolean" ? notif.toast : DEFAULT_GLOBAL_CONFIG.tui.notifications.toast,
           bell: typeof notif?.bell === "boolean" ? notif.bell : DEFAULT_GLOBAL_CONFIG.tui.notifications.bell
         }
-      }
+      },
+      ...workflowLaunch ? { workflow_launch: workflowLaunch } : {}
     };
   }
   async write(config) {
@@ -2796,7 +2799,7 @@ async function buildFullContainer(context) {
     { DoctorService },
     { WorkflowArtifactStore: WorkflowArtifactStore2 },
     { WorkflowEngine: WorkflowEngine2 },
-    { NativeCodexWorkflowAdapter, NativeFableWorkflowAdapter, NativeOpusWorkflowAdapter, NativeWorkflowGitGateway }
+    { NativeWorkflowRoleResolver, NativeWorkflowGitGateway }
   ] = await Promise.all([
     import('./process-manager-BRCBBME3.js'),
     import('./registry-JXXRLJ5J.js'),
@@ -2806,16 +2809,16 @@ async function buildFullContainer(context) {
     import('./shell-NETW4YGX.js'),
     import('./opencode-OIBR56TL.js'),
     import('./pi-Y7GCJNN6.js'),
-    import('./grok-UFNQFTNN.js'),
-    import('./antigravity-XDE24CYL.js'),
+    import('./grok-CSU34ZYL.js'),
+    import('./antigravity-R57MABEO.js'),
     import('./workspace-manager-NGJ6YVTB.js'),
     import('./template-engine-ZZWWQC5M.js'),
     import('./skill-loader-4GSQSW7Q.js'),
     import('./orchestrator-OTG2FJWD.js'),
     import('./doctor-service-WPXAUB6S.js'),
-    import('./artifact-store-BP7AEBYI.js'),
-    import('./engine-7TAXWGTH.js'),
-    import('./native-adapters-MDNK25SY.js')
+    import('./artifact-store-FH2I5WP2.js'),
+    import('./engine-UU4ZT7LM.js'),
+    import('./native-adapters-22NLSRIR.js')
   ]);
   const processManager = new ProcessManager();
   const templateEngine = new LiquidTemplateEngine();
@@ -2837,9 +2840,7 @@ async function buildFullContainer(context) {
   const doctorService = new DoctorService(adapterRegistry, processManager, context.projectRoot);
   const workflowStore = new WorkflowArtifactStore2(context.projectRoot);
   const workflowEngine = new WorkflowEngine2(workflowStore, {
-    codex: new NativeCodexWorkflowAdapter(processManager),
-    fable: new NativeFableWorkflowAdapter(processManager),
-    opus: new NativeOpusWorkflowAdapter(processManager),
+    roles: new NativeWorkflowRoleResolver(processManager),
     git: new NativeWorkflowGitGateway(context.projectRoot)
   });
   const orchestrator = new Orchestrator2({

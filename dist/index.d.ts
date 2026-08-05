@@ -310,6 +310,48 @@ declare function validateFableFallbackRecord(value: unknown): FableFallbackRecor
 declare function validateOpusResult(value: unknown): OpusResult;
 declare function validateCheckResults(value: unknown): CheckResults;
 
+declare const SEMANTIC_ROLES: readonly ["supervisor", "implementer", "adviser", "reviewer"];
+type SemanticRole = typeof SEMANTIC_ROLES[number];
+interface RolePermissions {
+    readonly workspace: 'read_only' | 'worktree';
+    readonly tools: 'enabled' | 'none';
+    readonly advisory_only: boolean;
+}
+declare const ROLE_PERMISSIONS: Readonly<Record<SemanticRole, RolePermissions>>;
+interface RosterAgent {
+    adapter: string;
+    profile: RosterProfileSnapshot;
+}
+interface RosterProfileSnapshot {
+    name: string;
+    model: string;
+    effort: 'low' | 'medium' | 'high';
+    max_turns: number;
+    timeout_ms: number;
+}
+interface SameAsSupervisor {
+    same_as: 'supervisor';
+}
+interface WorkflowRosterSnapshot {
+    schema_version: 1;
+    supervisor: RosterAgent;
+    implementer: RosterAgent;
+    adviser: RosterAgent | null;
+    reviewer: RosterAgent | SameAsSupervisor;
+}
+interface RosterInput {
+    supervisor: RosterAgent;
+    implementer: RosterAgent;
+    adviser?: RosterAgent | null;
+    reviewer?: RosterAgent | SameAsSupervisor;
+}
+declare function createRosterSnapshot(input: RosterInput, mode?: WorkflowMode): WorkflowRosterSnapshot;
+declare function legacyRosterSnapshot(mode: WorkflowMode): WorkflowRosterSnapshot;
+declare function validateRosterSnapshot(value: unknown, mode?: WorkflowMode): WorkflowRosterSnapshot;
+declare function hashRosterSnapshot(value: WorkflowRosterSnapshot): string;
+declare function validateRosterAgent(value: unknown, label?: string): RosterAgent;
+declare function hashRosterAgent(value: RosterAgent): string;
+
 type WorkflowPhase = 'codex_pre_opus' | 'fable_consultation' | 'codex_after_fable' | 'opus_execution' | 'codex_post_opus' | 'verification' | 'merge_ready' | 'done' | 'blocked' | 'paused' | 'cancelled' | 'failed';
 declare const WORKFLOW_PHASE_TRANSITIONS: Readonly<Record<WorkflowPhase, readonly WorkflowPhase[]>>;
 declare function canTransitionWorkflow(from: WorkflowPhase, to: WorkflowPhase): boolean;
@@ -424,7 +466,14 @@ interface WorkflowPassportV2 {
     };
     rotation_history: SessionRotation[];
     config: WorkflowConfig;
+    roster?: WorkflowRosterSnapshot;
+    roster_hash?: string;
+    active_roster?: WorkflowRosterSnapshot;
+    active_roster_hash?: string;
+    roster_revision?: number;
+    binding_rotation_history?: BindingRotation[];
 }
+type ValidatedWorkflowPassportV2 = WorkflowPassportV2 & Required<Pick<WorkflowPassportV2, 'roster' | 'roster_hash' | 'active_roster' | 'active_roster_hash' | 'roster_revision' | 'binding_rotation_history'>>;
 type SessionMode = 'new' | 'native_resume' | 'passport_handoff' | 'none';
 interface SessionRotation {
     role: 'codex' | 'opus';
@@ -432,6 +481,16 @@ interface SessionRotation {
     next_id: string | null;
     reason: string;
     timestamp: string;
+}
+interface BindingRotation {
+    role: SemanticRole;
+    previous_binding_hash: string | null;
+    new_binding_hash: string | null;
+    previous_binding: RosterAgent | null;
+    new_binding: RosterAgent | null;
+    reason: string;
+    timestamp: string;
+    revision: number;
 }
 interface AgentUsage {
     calls: number;
@@ -481,6 +540,11 @@ interface WorkflowInvocationReceiptV2 {
     invocation_id: string;
     phase: WorkflowPhase;
     role: 'codex' | 'fable' | 'opus';
+    semantic_role?: SemanticRole;
+    roster_hash?: string;
+    roster_revision?: number;
+    binding_hash?: string;
+    role_adapter?: string;
     request_hash: string;
     request: unknown;
     result_hash: string;
@@ -515,6 +579,26 @@ type WorkflowSessionsV1 = WorkflowSessionsV2;
 type WorkflowArtifactMetadataV1 = WorkflowArtifactMetadataV2;
 type WorkflowInvocationReceiptV1 = WorkflowInvocationReceiptV2;
 type WorkflowEventV1 = WorkflowEventV2;
+
+type WorkflowPresetEffort = 'low' | 'medium' | 'high';
+interface WorkflowPresetAgent {
+    adapter: string;
+    model: string;
+    effort: WorkflowPresetEffort;
+}
+interface WorkflowLaunchPresetDefinition {
+    supervisor: WorkflowPresetAgent;
+    implementer: WorkflowPresetAgent;
+    adviser: WorkflowPresetAgent | null;
+    reviewer: 'supervisor' | WorkflowPresetAgent;
+    mode: WorkflowMode;
+    max_adviser_calls: 0 | 1;
+}
+/** A named collection can be stored in project or global configuration. */
+interface WorkflowPresetConfig {
+    default_preset?: string;
+    presets?: Record<string, WorkflowLaunchPresetDefinition>;
+}
 
 /**
  * Configuration domain model.
@@ -560,6 +644,7 @@ interface OrchestratorConfig {
         security: ExecutionSecurityConfig;
     };
     workflow?: WorkflowConfigOverrides;
+    workflow_launch?: WorkflowPresetConfig;
     prompt?: {
         template?: string;
         system_template?: string;
@@ -1866,15 +1951,18 @@ declare class WorkflowArtifactStore {
     readSessions(jobId: string): Promise<WorkflowSessionsV1 | null>;
     writeSessions(value: WorkflowSessionsV1): Promise<void>;
     commitSessionsAndPassport(sessionsValue: WorkflowSessionsV1, passportValue: WorkflowPassportV1): Promise<void>;
+    commitBindingRotation(sessionsValue: WorkflowSessionsV1, passportValue: WorkflowPassportV1): Promise<void>;
     appendEvent(event: WorkflowEventV1): Promise<void>;
     readEvents(jobId: string): Promise<WorkflowEventV1[]>;
     writeInvocationReceipt(value: WorkflowInvocationReceiptV1): Promise<void>;
     readInvocationReceipt(jobId: string, invocationId: string): Promise<WorkflowInvocationReceiptV1 | null>;
+    readInvocationReceipts(jobId: string): Promise<WorkflowInvocationReceiptV1[]>;
     readEffectReceipt(jobId: string, invocationId: string, kind: WorkflowEffectReceiptV2['kind']): Promise<WorkflowEffectReceiptV2 | null>;
     writeEffectReceipt(value: WorkflowEffectReceiptV2): Promise<void>;
     listJobs(): Promise<WorkflowJobV1[]>;
     artifactPath(jobId: string, name: ArtifactName, revision: number): string;
     private requiredJob;
+    private commitSessionsPassport;
     private file;
     private latestArtifact;
     private artifactForInvocation;
@@ -1885,6 +1973,8 @@ declare class WorkflowArtifactStore {
     private applyPassport;
     private recoverSessions;
     private applySessions;
+    private assertRecoverableBindingRotation;
+    private normalizePendingPassport;
     private secureDir;
     private lock;
 }
@@ -1944,6 +2034,15 @@ interface OpusRolePort {
         detail: string;
     }>;
 }
+interface WorkflowRoleResolver {
+    availability(binding: RosterAgent, role: SemanticRole): Promise<{
+        available: boolean;
+        detail: string;
+    }>;
+    decide(binding: RosterAgent, passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null): Promise<RoleResult<CodexDecisionV2>>;
+    execute(binding: RosterAgent, passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: 'new' | 'native_resume' | 'passport_handoff'): Promise<RoleResult<OpusResult>>;
+    consult(binding: RosterAgent, jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions): Promise<RoleResult<FableAdviceV1>>;
+}
 interface GitEvidence {
     branch: string;
     worktree: string;
@@ -1956,6 +2055,7 @@ interface GitEvidence {
     risk_signals: string[];
 }
 interface WorkflowGitPort {
+    validateChecks(commands: string[], root?: string): Promise<string[]>;
     prepare(jobId: string): Promise<{
         branch: string;
         worktree: string;
@@ -1977,6 +2077,21 @@ interface WorkflowRolePorts {
     opus: OpusRolePort;
     git: WorkflowGitPort;
 }
+interface WorkflowRuntimePorts {
+    roles: WorkflowRoleResolver;
+    git: WorkflowGitPort;
+}
+declare class LegacyWorkflowRoleResolver implements WorkflowRoleResolver {
+    private readonly ports;
+    constructor(ports: Pick<WorkflowRolePorts, 'codex' | 'fable' | 'opus'>);
+    availability(binding: RosterAgent, role: SemanticRole): Promise<{
+        available: boolean;
+        detail: string;
+    }>;
+    decide(_binding: RosterAgent, passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null): Promise<RoleResult<CodexDecisionV2>>;
+    execute(_binding: RosterAgent, passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: 'new' | 'native_resume' | 'passport_handoff'): Promise<RoleResult<OpusResult>>;
+    consult(_binding: RosterAgent, jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions): Promise<RoleResult<FableAdviceV1>>;
+}
 
 declare const DEFAULT_WORKFLOW_CONFIG: WorkflowConfig;
 interface StartWorkflowInput {
@@ -1985,12 +2100,14 @@ interface StartWorkflowInput {
     allowed_file_scope?: string[];
     required_checks?: string[];
     config?: WorkflowConfigOverrides;
+    roster?: WorkflowRosterSnapshot;
     job_id?: string;
 }
 declare class WorkflowEngine {
     private readonly store;
-    private readonly ports;
-    constructor(store: WorkflowArtifactStore, ports: WorkflowRolePorts);
+    private readonly roles;
+    private readonly git;
+    constructor(store: WorkflowArtifactStore, ports: WorkflowRuntimePorts | WorkflowRolePorts);
     start(input: StartWorkflowInput): Promise<string>;
     run(jobId: string): Promise<WorkflowJobV2>;
     advance(jobId: string): Promise<WorkflowJobV2>;
@@ -2022,12 +2139,14 @@ declare class WorkflowEngine {
     private recordDecision;
     private updatePassport;
     rotateSession(jobId: string, role: 'codex' | 'opus', reason: string): Promise<void>;
+    rotateBinding(jobId: string, role: SemanticRole, binding: RosterAgent, reason: string): Promise<void>;
     private recordRole;
     private syncPassportSessions;
     private fableOptions;
     private fableCall;
     private invoke;
     private runChecksOnce;
+    private ensureTrustedChecks;
     private mergeOnce;
     private effect;
     private recordFailedRoleCall;
@@ -2039,7 +2158,20 @@ declare class WorkflowEngine {
     private requiredPassport;
     private requiredSessions;
     private event;
+    private assertRuntimeRoster;
 }
+
+type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun';
+interface CheckDiscoveryResult {
+    package_manager: PackageManager | null;
+    checks: string[];
+}
+/** Inspect local manifests only. Discovery never starts a process. */
+declare function discoverDeterministicChecks(projectRoot: string): Promise<CheckDiscoveryResult>;
+/** Validate user-supplied checks without executing or probing any binary. */
+declare function validateExplicitChecks(projectRoot: string, checks: readonly string[]): Promise<string[]>;
+/** Reject shell syntax and commands outside the bounded deterministic grammar. */
+declare function validateDeterministicCheckCommands(checks: readonly string[]): string[];
 
 /**
  * Clipboard service for detecting and extracting images from the system clipboard.
@@ -2097,6 +2229,7 @@ interface CliContext {
  */
 /** Activity feed filter preset name */
 type ActivityFilterPreset = 'all' | 'text' | 'tools' | 'errors' | 'events';
+
 interface NotificationPreferences {
     toast: boolean;
     bell: boolean;
@@ -2107,6 +2240,7 @@ interface TuiPreferences {
 }
 interface GlobalConfig {
     tui: TuiPreferences;
+    workflow_launch?: WorkflowPresetConfig;
 }
 
 /**
@@ -2282,4 +2416,4 @@ declare function buildFullContainer(context: CliContext): Promise<Container>;
  */
 declare function buildContainer(context: CliContext): Promise<Container>;
 
-export { AGENT_SHOP_TEMPLATES, ARTIFACT_FILES, type AdapterErrorHint, AdapterErrorKind, type AdapterKind, AdapterRegistry, type AdapterTestResult, type Agent, type AgentConfig, type AgentEvent, type AgentLastError, AgentNotFoundError, AgentService, type AgentShopTemplate, type AgentStats, type AgentStatus, type AgentUsage, type ApprovalPolicy, type ArtifactReference, type CheckResults, type ClipboardContentType, type ClipboardImage, type CodexAction, type CodexDecisionStage, type CodexDecisionV2, type CodexRolePort, type ConsultationOrigin, type ConsultationStatus, type Container, type CreateAgentInput, type CreateGoalInput, type CreateTaskInput, DEFAULT_WORKFLOW_CONFIG, ERROR_HINTS, EventBus, type EventPayload, type ExecuteParams, type FableAdviceV1, type FableFallbackReason, type FableFallbackRecordV1, type FableFallbackV1, type FablePurpose, type FableQueryV1, type FableRolePort, type FailurePhase, type Goal, GoalHasPendingTasksError, type GoalOrchestrationPhase, type GoalOrchestrationState, type GoalStatus, type GoalTaskRole, type IAgentAdapter, type ISkillLoader, type LightContainer, MODEL_TIER_MAP, type ModelTier, NotInitializedError, type OpusResult, type OpusRolePort, Orchestrator, type OrchestratorConfig, type OrchestratorEvent, type OrchestratorEventType, type OrchestratorState, OrchestryError, type PersistedFailure, type ProducingRole, type ProjectConfig, type ReasoningEffort, type RetryEntry, type RoleProfile, type Run, type RunEvent, type RunEventType, RunService, type RunStatus, type RunningEntry, SUPPORTED_ADAPTERS, type SchedulingConfig, type SessionMode, type SessionRotation, SkillLoader, type StartWorkflowInput, type Task, TaskNotFoundError, type TaskProof, TaskService, type TaskStatus, type TokenUsage, WORKFLOW_PHASE_TRANSITIONS, WORKFLOW_SCHEMA_VERSION, type WorkflowArtifactMetadataV1, type WorkflowArtifactMetadataV2, WorkflowArtifactStore, type WorkflowConfig, type WorkflowConfigOverrides, type WorkflowDecision, type WorkflowEffectReceiptV2, WorkflowEngine, type WorkflowEventV1, type WorkflowEventV2, type WorkflowGitPort, type WorkflowInvocationReceiptV1, type WorkflowInvocationReceiptV2, type WorkflowJobV1, type WorkflowJobV2, type WorkflowMode, type WorkflowPassportV1, type WorkflowPassportV2, type WorkflowPhase, type WorkflowRolePorts, type WorkflowSessionsV1, type WorkflowSessionsV2, WorkspaceError, type WorkspaceMode, buildContainer, buildFullContainer, buildLightContainer, canTransition, canTransitionWorkflow, classifyAdapterError, createTokenUsage, defaultModelForAdapter, detectClipboardType, getClipboardImage, getShopTemplateByKey, hashCanonical, isAdapterKind, isBlocked, isClipboardToolAvailable, isDispatchable, isMcpSkill, isModelTier, isTerminal, isTerminalWorkflowPhase, resolveFailureStatus, resolveModel, templateToAgentInput, transitionWorkflow, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult };
+export { AGENT_SHOP_TEMPLATES, ARTIFACT_FILES, type AdapterErrorHint, AdapterErrorKind, type AdapterKind, AdapterRegistry, type AdapterTestResult, type Agent, type AgentConfig, type AgentEvent, type AgentLastError, AgentNotFoundError, AgentService, type AgentShopTemplate, type AgentStats, type AgentStatus, type AgentUsage, type ApprovalPolicy, type ArtifactReference, type BindingRotation, type CheckResults, type ClipboardContentType, type ClipboardImage, type CodexAction, type CodexDecisionStage, type CodexDecisionV2, type CodexRolePort, type ConsultationOrigin, type ConsultationStatus, type Container, type CreateAgentInput, type CreateGoalInput, type CreateTaskInput, DEFAULT_WORKFLOW_CONFIG, ERROR_HINTS, EventBus, type EventPayload, type ExecuteParams, type FableAdviceV1, type FableFallbackReason, type FableFallbackRecordV1, type FableFallbackV1, type FablePurpose, type FableQueryV1, type FableRolePort, type FailurePhase, type Goal, GoalHasPendingTasksError, type GoalOrchestrationPhase, type GoalOrchestrationState, type GoalStatus, type GoalTaskRole, type IAgentAdapter, type ISkillLoader, LegacyWorkflowRoleResolver, type LightContainer, MODEL_TIER_MAP, type ModelTier, NotInitializedError, type OpusResult, type OpusRolePort, Orchestrator, type OrchestratorConfig, type OrchestratorEvent, type OrchestratorEventType, type OrchestratorState, OrchestryError, type PersistedFailure, type ProducingRole, type ProjectConfig, ROLE_PERMISSIONS, type ReasoningEffort, type RetryEntry, type RolePermissions, type RoleProfile, type RosterAgent, type RosterInput, type RosterProfileSnapshot, type Run, type RunEvent, type RunEventType, RunService, type RunStatus, type RunningEntry, SEMANTIC_ROLES, SUPPORTED_ADAPTERS, type SameAsSupervisor, type SchedulingConfig, type SemanticRole, type SessionMode, type SessionRotation, SkillLoader, type StartWorkflowInput, type Task, TaskNotFoundError, type TaskProof, TaskService, type TaskStatus, type TokenUsage, type ValidatedWorkflowPassportV2, WORKFLOW_PHASE_TRANSITIONS, WORKFLOW_SCHEMA_VERSION, type WorkflowArtifactMetadataV1, type WorkflowArtifactMetadataV2, WorkflowArtifactStore, type WorkflowConfig, type WorkflowConfigOverrides, type WorkflowDecision, type WorkflowEffectReceiptV2, WorkflowEngine, type WorkflowEventV1, type WorkflowEventV2, type WorkflowGitPort, type WorkflowInvocationReceiptV1, type WorkflowInvocationReceiptV2, type WorkflowJobV1, type WorkflowJobV2, type WorkflowMode, type WorkflowPassportV1, type WorkflowPassportV2, type WorkflowPhase, type WorkflowRolePorts, type WorkflowRoleResolver, type WorkflowRosterSnapshot, type WorkflowRuntimePorts, type WorkflowSessionsV1, type WorkflowSessionsV2, WorkspaceError, type WorkspaceMode, buildContainer, buildFullContainer, buildLightContainer, canTransition, canTransitionWorkflow, classifyAdapterError, createRosterSnapshot, createTokenUsage, defaultModelForAdapter, detectClipboardType, discoverDeterministicChecks, getClipboardImage, getShopTemplateByKey, hashCanonical, hashRosterAgent, hashRosterSnapshot, isAdapterKind, isBlocked, isClipboardToolAvailable, isDispatchable, isMcpSkill, isModelTier, isTerminal, isTerminalWorkflowPhase, legacyRosterSnapshot, resolveFailureStatus, resolveModel, templateToAgentInput, transitionWorkflow, validateCheckResults, validateCodexDecision, validateDeterministicCheckCommands, validateExplicitChecks, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult, validateRosterAgent, validateRosterSnapshot };

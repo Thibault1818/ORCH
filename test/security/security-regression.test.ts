@@ -47,6 +47,12 @@ describe('secured fork static invariants', () => {
       expect(adapter).not.toMatch(/args\.push\((?:fullPrompt|params\.prompt|effectiveSystemPrompt)\)/);
       expect(adapter).toContain('buildChildEnv(params.env)');
     }
+    for (const path of ['src/infrastructure/adapters/grok.ts', 'src/infrastructure/adapters/antigravity.ts']) {
+      const adapter = source(path);
+      expect(adapter).not.toMatch(/args\.push\((?:fullPrompt|params\.prompt|effectiveSystemPrompt)/);
+      expect(adapter).not.toMatch(/['"]-p['"]\s*,\s*(?:params\.prompt|buildFullPrompt)/);
+      expect(adapter).toContain('argv prompt transport is prohibited');
+    }
     const shell = source('src/infrastructure/adapters/shell.ts');
     expect(shell).not.toMatch(/ORCH_(?:SYSTEM_)?PROMPT/);
     expect(shell).toContain('buildChildEnv(params.env)');

@@ -19,6 +19,7 @@ export class GlobalConfigStore {
     if (!data) return { ...DEFAULT_GLOBAL_CONFIG, tui: { ...DEFAULT_GLOBAL_CONFIG.tui, notifications: { ...DEFAULT_GLOBAL_CONFIG.tui.notifications } } };
     const tui = data.tui as Record<string, unknown> | undefined;
     const notif = tui?.notifications as Record<string, unknown> | undefined;
+    const workflowLaunch = data.workflow_launch as GlobalConfig['workflow_launch'];
     return {
       tui: {
         activity_filter: tui?.activity_filter as GlobalConfig['tui']['activity_filter']
@@ -28,6 +29,7 @@ export class GlobalConfigStore {
           bell: typeof notif?.bell === 'boolean' ? notif.bell : DEFAULT_GLOBAL_CONFIG.tui.notifications.bell,
         },
       },
+      ...(workflowLaunch ? { workflow_launch: workflowLaunch } : {}),
     };
   }
 

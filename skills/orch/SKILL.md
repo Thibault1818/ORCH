@@ -122,6 +122,41 @@ orch serve [options]               # Headless daemon mode
   --verbose                        # Include agent:output events
 ```
 
+### Dedicated Workflow
+
+Use the recoverable semantic-role workflow only in a project whose scripts are trusted. The first command is diagnostic and can complete without invoking an LLM:
+
+```bash
+orch workflow doctor
+```
+
+In a TTY, `start` discovers checks before opening the wizard. The wizard selects a preset, mode, Supervisor, Implementer, optional Adviser, Reviewer, Adviser cap, and checks, then prints the resolved summary. The built-in adaptive preset normally takes the direct path with Adviser `None` and `max_adviser_calls: 0`; direct mode forbids an Adviser.
+
+```bash
+# Interactive, only after reviewing discovered project scripts
+orch workflow start "Implement the requested change"
+
+# Exact noninteractive launch
+orch workflow start "Implement the requested change" --yes --check "npm run test"
+
+Every noninteractive launch that is not a dry-run requires `--yes`.
+
+orch workflow status [job-id]
+orch workflow pause <job-id>
+orch workflow resume <job-id> --reason "continue after review"
+orch workflow logs <job-id> [--raw]
+orch workflow artifacts <job-id>
+orch workflow cancel <job-id>
+orch workflow session-rotate <job-id> <supervisor|implementer> --reason "expired session"
+orch workflow binding-rotate <job-id> <supervisor|implementer|adviser|reviewer> --adapter <cli> --model <model> --effort <low|medium|high> --reason "approved rotation"
+```
+
+The launch roster is immutable. Binding rotation creates an explicit audited active-roster revision and is allowed only at a paused boundary. Status includes initial/active rosters and hashes, revision/history, phase/current role, per-role usage, token total, remaining Adviser budget, checks, and blocker.
+
+Project presets use `workflow_launch` in `.orchestry/config.yml`; global presets use the same structure in `~/.orchestry/global.yml`. Project definitions override same-named global definitions, and command flags override the selected preset.
+
+`workflow doctor` explains incompatibility reasons including missing required options and unproven prompt transport. All enabled workflow prompts are stdin-only; Grok and Antigravity fail closed because their secure stdin transport is unproven. No LLM runs before trusted check validation. Native resume is not assumed from advertised CLI help and defaults to `passport_handoff` unless explicitly enabled after an end-to-end probe.
+
 ### Goals (High-Level Objectives)
 
 ```bash

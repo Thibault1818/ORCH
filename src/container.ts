@@ -175,7 +175,7 @@ export async function buildFullContainer(context: CliContext): Promise<Container
     { DoctorService },
     { WorkflowArtifactStore },
     { WorkflowEngine },
-    { NativeCodexWorkflowAdapter, NativeFableWorkflowAdapter, NativeOpusWorkflowAdapter, NativeWorkflowGitGateway },
+    { NativeWorkflowRoleResolver, NativeWorkflowGitGateway },
   ] = await Promise.all([
     import('./infrastructure/process/process-manager.js'),
     import('./infrastructure/adapters/registry.js'),
@@ -220,9 +220,7 @@ export async function buildFullContainer(context: CliContext): Promise<Container
   const doctorService = new DoctorService(adapterRegistry, processManager, context.projectRoot);
   const workflowStore = new WorkflowArtifactStore(context.projectRoot);
   const workflowEngine = new WorkflowEngine(workflowStore, {
-    codex: new NativeCodexWorkflowAdapter(processManager),
-    fable: new NativeFableWorkflowAdapter(processManager),
-    opus: new NativeOpusWorkflowAdapter(processManager),
+    roles: new NativeWorkflowRoleResolver(processManager),
     git: new NativeWorkflowGitGateway(context.projectRoot),
   });
   const orchestrator = new Orchestrator({

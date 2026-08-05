@@ -30,7 +30,9 @@ export { RunService } from './application/run-service.js';
 export { Orchestrator } from './application/orchestrator.js';
 export { WorkflowEngine, DEFAULT_WORKFLOW_CONFIG } from './application/workflow/engine.js';
 export type { StartWorkflowInput } from './application/workflow/engine.js';
-export type { CodexRolePort, FableRolePort, OpusRolePort, WorkflowGitPort, WorkflowRolePorts } from './application/workflow/ports.js';
+export { LegacyWorkflowRoleResolver } from './application/workflow/ports.js';
+export type { CodexRolePort, FableRolePort, OpusRolePort, WorkflowGitPort, WorkflowRolePorts, WorkflowRoleResolver, WorkflowRuntimePorts } from './application/workflow/ports.js';
+export { discoverDeterministicChecks, validateDeterministicCheckCommands, validateExplicitChecks } from './application/workflow/check-discovery.js';
 
 // Infrastructure interfaces
 export type { IAgentAdapter, AgentEvent, ExecuteParams, AdapterTestResult } from './infrastructure/adapters/interface.js';
@@ -41,6 +43,7 @@ export { WorkflowArtifactStore, ARTIFACT_FILES, hashCanonical } from './infrastr
 export * from './domain/workflow/contracts.js';
 export * from './domain/workflow/state.js';
 export * from './domain/workflow/transitions.js';
+export * from './domain/workflow/roster.js';
 
 // Clipboard
 export { detectClipboardType, getClipboardImage, isClipboardToolAvailable } from './infrastructure/clipboard-service.js';
