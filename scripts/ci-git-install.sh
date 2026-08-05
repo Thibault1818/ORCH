@@ -111,7 +111,7 @@ orch init "$PROJECT" --adapter codex
 git -C "$PROJECT" init -b main
 git -C "$PROJECT" config user.name "ORCH CI"
 git -C "$PROJECT" config user.email "orch-ci@example.invalid"
-git -C "$PROJECT" add .gitignore .orchestry/config.yml package.json package-lock.json check.js
+git -C "$PROJECT" add .gitignore package.json package-lock.json check.js
 git -C "$PROJECT" commit -m "Initialize deterministic fixture"
 
 (
