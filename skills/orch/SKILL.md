@@ -130,14 +130,15 @@ Use the recoverable semantic-role workflow only in a project whose scripts are t
 orch workflow doctor
 ```
 
-In a TTY, `start` discovers checks before opening the wizard. The wizard selects a preset, mode, Supervisor, Implementer, optional Adviser, Reviewer, Adviser cap, and checks, then prints the resolved summary. The built-in adaptive preset normally takes the direct path with Adviser `None` and `max_adviser_calls: 0`; direct mode forbids an Adviser.
+In a TTY, `start` reads the objective through stdin, discovers checks, and opens the wizard. The wizard selects a preset, mode, Supervisor, Implementer, optional Adviser, Reviewer, Adviser cap, and checks, then prints the resolved summary and asks `Start this workflow? [y/N]`. Empty or negative confirmation creates no job and makes no model call. The built-in adaptive preset normally takes the direct path with Adviser `None` and `max_adviser_calls: 0`; direct mode forbids an Adviser.
 
 ```bash
 # Interactive, only after reviewing discovered project scripts
-orch workflow start "Implement the requested change"
+orch workflow start
 
 # Exact noninteractive launch
-orch workflow start "Implement the requested change" --yes --check "npm run test"
+printf '%s\n' "Implement the requested change" | orch workflow start --yes --check "npm run test"
+orch workflow start --objective-file ./objective.txt --yes --check "npm run test"
 
 Every noninteractive launch that is not a dry-run requires `--yes`.
 
@@ -151,11 +152,11 @@ orch workflow session-rotate <job-id> <supervisor|implementer> --reason "expired
 orch workflow binding-rotate <job-id> <supervisor|implementer|adviser|reviewer> --adapter <cli> --model <model> --effort <low|medium|high> --reason "approved rotation"
 ```
 
-The launch roster is immutable. Binding rotation creates an explicit audited active-roster revision and is allowed only at a paused boundary. Status includes initial/active rosters and hashes, revision/history, phase/current role, per-role usage, token total, remaining Adviser budget, checks, and blocker.
+The launch roster is immutable. Binding rotation creates an explicit audited active-roster revision and is allowed only at a paused boundary. Standard model selection is limited to verified/trusted-catalog profiles and `CLI default`, which omits `--model`; custom profiles require `--allow-unverified-model` and are marked `UNVERIFIED`. Status reports attempts, failures, durations, and known/estimated/unknown tokens by semantic role and adapter. Legacy provider aggregates remain separate.
 
 Project presets use `workflow_launch` in `.orchestry/config.yml`; global presets use the same structure in `~/.orchestry/global.yml`. Project definitions override same-named global definitions, and command flags override the selected preset.
 
-`workflow doctor` explains incompatibility reasons including missing required options and unproven prompt transport. All enabled workflow prompts are stdin-only; Grok and Antigravity fail closed because their secure stdin transport is unproven. No LLM runs before trusted check validation. Native resume is not assumed from advertised CLI help and defaults to `passport_handoff` unless explicitly enabled after an end-to-end probe.
+`workflow doctor` explains incompatibility reasons including missing required options and unproven prompt transport. All enabled workflow prompts are stdin-only; Grok and Antigravity fail closed because their secure stdin transport is unproven. Fake CLI tests prove local process invariants only, not real-provider compatibility. No LLM or workflow worktree starts before trusted-check validation, summary, and confirmation. Native resume is not assumed from advertised CLI help and defaults to `passport_handoff` unless explicitly enabled after an end-to-end probe.
 
 ### Goals (High-Level Objectives)
 

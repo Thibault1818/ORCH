@@ -33,7 +33,7 @@ export interface WorkflowPresetConfig {
 export const CODEX_CLAUDE_OPUS_PRESET: WorkflowLaunchPreset = {
   name: 'codex-claude-opus',
   scope: 'built_in',
-  supervisor: { adapter: 'codex', model: 'codex', effort: 'high' },
+  supervisor: { adapter: 'codex', model: '', effort: 'high' },
   implementer: { adapter: 'claude', model: 'opus', effort: 'high' },
   adviser: null,
   reviewer: 'supervisor',

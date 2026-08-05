@@ -7,7 +7,7 @@ function descriptor(adapter: AdapterCapabilityDescriptor['adapter'], compatible:
   const command = adapter === 'antigravity' ? 'agy' : adapter === 'fable' ? 'claude' : adapter as AdapterCapabilityDescriptor['command'];
   const roles = compatible === null ? [] : Array.isArray(compatible) ? compatible : [compatible];
   const role_compatibility = Object.fromEntries((['supervisor', 'implementer', 'adviser', 'reviewer'] as const).map((role) => [role, { compatible: roles.includes(role), reasons: roles.includes(role) ? [] : [reason] }])) as AdapterCapabilityDescriptor['role_compatibility'];
-  return { adapter, command, installed: true, version: '1.0.0', transport: roles.length ? 'stdin' : 'unsupported', structured_output: { supported: true, format: 'json' }, sandbox: { supported: true, mode: 'read-only' }, tools: { configurable: false, mode: 'enabled' }, resume: { advertised: false, enabled: false }, role_compatibility, supported_options: [], unsupported_options: [], detail: reason, available: true, advertised_native_resume: false, native_resume: false };
+  return { adapter, command, installed: true, version: '1.0.0', transport: roles.length ? 'stdin' : 'unsupported', structured_output: { supported: true, format: 'json' }, sandbox: { supported: true, mode: 'read-only' }, tools: { configurable: false, mode: 'enabled' }, resume: { advertised: false, enabled: false }, role_compatibility, models: { cli_default: roles.length > 0, verified: adapter === 'claude' ? [{ id: 'opus', source: 'trusted_catalog' }] : [] }, supported_options: [], unsupported_options: [], detail: reason, available: true, advertised_native_resume: false, native_resume: false };
 }
 
 const capabilities: WorkflowCapabilities = {
@@ -37,7 +37,7 @@ describe('workflow wizard', () => {
     const selected: WorkflowLaunchPreset = { ...CODEX_CLAUDE_OPUS_PRESET, name: 'with-adviser', scope: 'project', adviser: { adapter: 'fable', model: 'selected-fable', effort: 'medium' }, max_adviser_calls: 1 };
     const answers = ['with-adviser', '', '', '', '', '', '', '', '', '', '', '', ''];
     const prompt = vi.fn(async () => answers.shift() ?? '');
-    const result = await runWorkflowWizard({ preset: CODEX_CLAUDE_OPUS_PRESET, preset_names: [CODEX_CLAUDE_OPUS_PRESET.name, selected.name], presets: { [selected.name]: selected }, capabilities, discovered_checks: ['npm run test'] }, prompt);
+    const result = await runWorkflowWizard({ preset: CODEX_CLAUDE_OPUS_PRESET, preset_names: [CODEX_CLAUDE_OPUS_PRESET.name, selected.name], presets: { [selected.name]: selected }, capabilities, discovered_checks: ['npm run test'], allow_unverified_model: true }, prompt);
     expect(result).toMatchObject({ preset: 'with-adviser', adviser: { adapter: 'fable', model: 'selected-fable', effort: 'medium' }, max_adviser_calls: 1 });
   });
 
@@ -45,7 +45,7 @@ describe('workflow wizard', () => {
     const selected: WorkflowLaunchPreset = { ...CODEX_CLAUDE_OPUS_PRESET, name: 'reviewed', scope: 'project', reviewer: { adapter: 'codex', model: 'review-profile', effort: 'low' } };
     const answers = ['reviewed', '', '', '', '', '', '', '', '', '', '', '', ''];
     const prompt = vi.fn(async () => answers.shift() ?? '');
-    const result = await runWorkflowWizard({ preset: CODEX_CLAUDE_OPUS_PRESET, preset_names: [CODEX_CLAUDE_OPUS_PRESET.name, selected.name], presets: { [selected.name]: selected }, capabilities, discovered_checks: ['npm run test'] }, prompt);
+    const result = await runWorkflowWizard({ preset: CODEX_CLAUDE_OPUS_PRESET, preset_names: [CODEX_CLAUDE_OPUS_PRESET.name, selected.name], presets: { [selected.name]: selected }, capabilities, discovered_checks: ['npm run test'], allow_unverified_model: true }, prompt);
     expect(result.reviewer).toEqual({ adapter: 'codex', model: 'review-profile', effort: 'low' });
   });
 });

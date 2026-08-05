@@ -1,90 +1,1267 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import fs from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
-import { WorkflowEngine } from '../../src/application/workflow/engine.js';
-import type { CodexDecisionEvidence, CodexRolePort, FableCallOptions, FableRolePort, GitEvidence, OpusRolePort, WorkflowGitPort, WorkflowRoleResolver } from '../../src/application/workflow/ports.js';
-import type { CheckResults, CodexDecisionStage, CodexDecisionV2, FableAdviceV1, OpusResult } from '../../src/domain/workflow/contracts.js';
-import type { WorkflowPassportV2 } from '../../src/domain/workflow/state.js';
-import type { RosterAgent, SemanticRole, WorkflowRosterSnapshot } from '../../src/domain/workflow/roster.js';
-import { WorkflowArtifactStore, hashCanonical } from '../../src/infrastructure/workflow/artifact-store.js';
-import { clearEnsuredDirs, closeAllAppendHandles } from '../../src/infrastructure/storage/fs-utils.js';
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { WorkflowEngine } from "../../src/application/workflow/engine.js";
+import type {
+  CodexDecisionEvidence,
+  CodexRolePort,
+  FableCallOptions,
+  FableRolePort,
+  GitEvidence,
+  OpusRolePort,
+  WorkflowGitPort,
+  WorkflowRoleResolver,
+} from "../../src/application/workflow/ports.js";
+import type {
+  CheckResults,
+  CodexDecisionStage,
+  CodexDecisionV2,
+  FableAdviceV1,
+  OpusResult,
+} from "../../src/domain/workflow/contracts.js";
+import type { WorkflowPassportV2 } from "../../src/domain/workflow/state.js";
+import type {
+  RosterAgent,
+  SemanticRole,
+  WorkflowRosterSnapshot,
+} from "../../src/domain/workflow/roster.js";
+import {
+  WorkflowArtifactStore,
+  hashCanonical,
+} from "../../src/infrastructure/workflow/artifact-store.js";
+import {
+  clearEnsuredDirs,
+  closeAllAppendHandles,
+} from "../../src/infrastructure/storage/fs-utils.js";
 
-let root: string; let store: WorkflowArtifactStore; let fakes: Fakes; let engine: WorkflowEngine; const CHECKS = ['npm test'];
-beforeEach(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'workflow-v2-e2e-')); store = new WorkflowArtifactStore(root); fakes = new Fakes(root); engine = new WorkflowEngine(store, { codex: fakes, fable: fakes, opus: fakes, git: fakes }); });
-afterEach(async () => { closeAllAppendHandles(); clearEnsuredDirs(); await fs.rm(root, { recursive: true, force: true }); });
-
-describe('direct Codex-Opus workflow v2', () => {
-  it('completes adaptive default with zero Fable calls and two Codex decisions', async () => { const id = await engine.start({ objective: 'direct change', required_checks: CHECKS }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(result.fable_calls).toBe(0); expect(fakes).toMatchObject({ codexCalls: 2, fableCalls: 0, opusCalls: 1, merges: 1 }); expect(fakes.sequence).toEqual(['codex:pre_opus', 'opus', 'codex:post_opus']); });
-  it('persists the default null adviser and full binding profiles before calls', async () => { const id = await engine.start({ objective: 'snapshot', required_checks: CHECKS }); expect(await store.readPassport(id)).toMatchObject({ roster: { supervisor: { adapter: 'codex', profile: { name: 'codex', model: 'codex', effort: 'medium', max_turns: 1, timeout_ms: 600_000 } }, implementer: { adapter: 'claude', profile: { name: 'opus', model: 'opus', effort: 'high', max_turns: 50, timeout_ms: 1_800_000 } }, adviser: null, reviewer: { same_as: 'supervisor' } }, roster_hash: expect.stringMatching(/^[a-f0-9]{64}$/) }); expect(fakes.codexCalls).toBe(0); });
-  it('rejects incompatible bindings before job creation', async () => { const roster = { schema_version: 1 as const, supervisor: { adapter: 'claude', profile: { name: 'bad', model: 'opus', effort: 'high' as const, max_turns: 1, timeout_ms: 1000 } }, implementer: { adapter: 'claude', profile: { name: 'opus', model: 'opus', effort: 'high' as const, max_turns: 50, timeout_ms: 1000 } }, adviser: null, reviewer: { same_as: 'supervisor' as const } }; await expect(engine.start({ objective: 'bad binding', required_checks: CHECKS, roster })).rejects.toThrow('Unsupported supervisor binding: claude'); expect(await store.listJobs()).toEqual([]); });
-  it('rejects direct adviser before capability probes', async () => { const roster = { schema_version: 1 as const, supervisor: { adapter: 'codex', profile: { name: 'codex', model: 'codex', effort: 'high' as const, max_turns: 1, timeout_ms: 1000 } }, implementer: { adapter: 'claude', profile: { name: 'opus', model: 'opus', effort: 'high' as const, max_turns: 50, timeout_ms: 1000 } }, adviser: { adapter: 'fable', profile: { name: 'fable', model: 'fable', effort: 'low' as const, max_turns: 1, timeout_ms: 1000 } }, reviewer: { same_as: 'supervisor' as const } }; await expect(engine.start({ objective: 'direct adviser', mode: 'direct', required_checks: CHECKS, roster })).rejects.toThrow('cannot include an adviser'); expect(fakes.availableCalls).toBe(0); });
-  it('direct mode mechanically skips a requested consultation and executes fallback', async () => { fakes.decisions = [consult('DISPATCH_OPUS'), accept()]; const id = await engine.start({ objective: 'direct', mode: 'direct', required_checks: CHECKS }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(fakes.fableCalls).toBe(0); expect(result.consultation_status).toBe('fallback_executed'); expect(fakes.opusPrompts[0]).toContain('safe fallback'); });
-  it('adaptive mode honors a configured zero Fable cap', async () => { fakes.decisions = [consult('DISPATCH_OPUS'), accept()]; const id = await engine.start({ objective: 'zero cap', config: { fable_total_cap: 0 }, required_checks: CHECKS }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(fakes.fableCalls).toBe(0); expect(result.consultation_status).toBe('fallback_executed'); });
-  it('denies high-risk consultation through the persisted safe fallback', async () => { fakes.decisions = [{ ...consult('DISPATCH_OPUS'), risk_level: 'high' }, accept()]; const id = await engine.start({ objective: 'high risk', required_checks: CHECKS, config: { fable_total_cap: 1 } }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(fakes.fableCalls).toBe(0); expect((await store.readArtifact(id, 'routing_decision'))?.payload).toMatchObject({ reason: 'risk_not_low', action: 'DISPATCH_OPUS' }); });
-  it('runs one bounded adaptive consultation and returns advice to Codex before Opus', async () => { fakes.decisions = [consult('DISPATCH_OPUS'), dispatch('verified advice'), accept()]; const id = await engine.start({ objective: 'optional advice', required_checks: CHECKS, config: { fable_total_cap: 1 } }); expect((await engine.run(id)).phase).toBe('done'); expect(fakes.fableCalls).toBe(1); expect(fakes.sequence).toEqual(['codex:pre_opus', 'fable', 'codex:after_fable_pre', 'opus', 'codex:post_opus']); expect(fakes.codexEvidence[1]?.fable_advice?.answer).toBe('option A'); });
-  it('uses fallback when optional Fable fails without blocking direct progress', async () => { fakes.decisions = [consult('DISPATCH_OPUS'), accept()]; fakes.failFable = true; const id = await engine.start({ objective: 'fallback', required_checks: CHECKS, config: { fable_total_cap: 1 } }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(fakes.fableCalls).toBe(1); expect(result.consultation_status).toBe('fallback_executed'); expect(fakes.opusPrompts[0]).toContain('safe fallback'); });
-  it('resumes a persisted consultation fallback without a second Fable attempt', async () => { fakes.decisions = [consult('DISPATCH_OPUS'), accept()]; const id = await engine.start({ objective: 'fallback restart', required_checks: CHECKS, config: { fable_total_cap: 1 } }); expect((await engine.advance(id)).phase).toBe('fable_consultation'); const operation = { phase: 'fable_consultation' as const, invocation_id: 'inv_interrupted_fallback', started_at: new Date().toISOString(), retry_count: 0 }; expect(await store.reserveOperation(id, 'fable_consultation', operation)).toBe(true); await store.patchJob(id, { consultation_status: 'fallback_executed' }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(fakes.fableCalls).toBe(0); expect(fakes.opusPrompts[0]).toContain('safe fallback'); });
-  it('replays a successful Fable receipt after restart without losing its advice', async () => { fakes.decisions = [consult('DISPATCH_OPUS'), dispatch('verified advice'), accept()]; const id = await engine.start({ objective: 'receipt restart', required_checks: CHECKS, config: { fable_total_cap: 1 } }); expect((await engine.advance(id)).phase).toBe('fable_consultation'); const operation = { phase: 'fable_consultation' as const, invocation_id: 'inv_fable_receipt', started_at: new Date().toISOString(), retry_count: 0 }; expect(await store.reserveOperation(id, 'fable_consultation', operation)).toBe(true); const job = (await store.readJob(id))!; const query = (await store.readArtifact<ReturnType<typeof queryValue>>(id, 'fable_request'))!.payload; const consultationId = `consult_${id}_${job.revision}`; const request = { consultation_id: consultationId, query }; const receiptResult = { value: { schema_version: 1, consultation_id: consultationId, answer: 'persisted advice', alternatives: [], uncertainties: [] } }; await store.writeInvocationReceipt({ schema_version: 2, job_id: id, invocation_id: operation.invocation_id, phase: 'fable_consultation', role: 'fable', request_hash: hashCanonical(request), request, result_hash: hashCanonical(receiptResult), workflow_revision: job.revision, timestamp: new Date().toISOString(), result: receiptResult }); await store.patchJob(id, { consultation_status: 'attempt_started', fable_calls: 1 }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(fakes.fableCalls).toBe(0); expect(fakes.codexEvidence[1]?.fable_advice?.answer).toBe('persisted advice'); });
-  it('skips duplicate consultation after the workflow budget is consumed', async () => { fakes.decisions = [consult('DISPATCH_OPUS'), dispatch('after advice'), consult('CORRECT_OPUS'), accept()]; const id = await engine.start({ objective: 'one only', required_checks: CHECKS, config: { fable_total_cap: 1 } }); expect((await engine.run(id)).phase).toBe('done'); expect(fakes.fableCalls).toBe(1); expect(fakes.opusCalls).toBe(2); expect(fakes.opusPrompts[1]).toContain('safe fallback'); });
-  it('sends Codex corrections directly to Opus', async () => { fakes.decisions = [dispatch(), correct('fix directly'), accept()]; const id = await engine.start({ objective: 'correct', required_checks: CHECKS }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(fakes.fableCalls).toBe(0); expect(fakes.opusPrompts).toEqual(['implement directly', 'fix directly']); expect(result.opus_iteration).toBe(2); });
-  it('rejects ACCEPT before review evidence', async () => { fakes.decisions = [{ ...accept(), reviewed_commit: null }]; const id = await engine.start({ objective: 'bad accept', required_checks: CHECKS }); const result = await engine.run(id); expect(result.phase).toBe('failed'); expect(result.blocker).toContain('invalid during pre_opus'); expect(fakes.opusCalls).toBe(0); });
-  it('rejects launch before probes when meaningful checks are absent', async () => { await expect(engine.start({ objective: 'no checks', required_checks: ['true'] })).rejects.toThrow('meaningful deterministic check'); expect(fakes.availableCalls).toBe(0); expect(fakes.merges).toBe(0); });
-  it('rejects a malicious API check before validation or role probes', async () => { await expect(engine.start({ objective: 'malicious', required_checks: ['npm test; touch owned'] })).rejects.toThrow('Unsafe'); expect(fakes.availableCalls).toBe(0); expect(fakes.checkCalls).toBe(0); });
-  it('rejects a malicious check injected into a persisted legacy passport before a role call', async () => { const id = await engine.start({ objective: 'persisted malicious', required_checks: CHECKS }); const file = path.join(root, '.orchestry', 'workflows', id, 'passport.json'); const passport = JSON.parse(await fs.readFile(file, 'utf8')); await fs.writeFile(file, JSON.stringify({ ...passport, required_checks: ['npm test; touch owned'] })); const result = await engine.run(id); expect(result.phase).toBe('failed'); expect(result.blocker).toContain('Unsafe'); expect(fakes.codexCalls).toBe(0); });
-  it('restarts after every phase without duplicate calls or merge', async () => { const id = await engine.start({ objective: 'restart', required_checks: CHECKS }); let result = await store.readJob(id); for (let i = 0; i < 20 && result?.phase !== 'done'; i++) result = await new WorkflowEngine(new WorkflowArtifactStore(root), { codex: fakes, fable: fakes, opus: fakes, git: fakes }).advance(id); expect(result?.phase).toBe('done'); expect(result?.revision).toBe(6); expect(fakes).toMatchObject({ codexCalls: 2, opusCalls: 1, merges: 1, checkCalls: 3 }); });
-  it('restarts with the same immutable roster hash', async () => { const id = await engine.start({ objective: 'roster restart', required_checks: CHECKS }); const before = (await store.readPassport(id))!.roster_hash; await new WorkflowEngine(new WorkflowArtifactStore(root), { codex: fakes, fable: fakes, opus: fakes, git: fakes }).advance(id); expect((await store.readPassport(id))!.roster_hash).toBe(before); });
-  it('resumes an active phase after terminal restart', async () => { const id = await engine.start({ objective: 'active restart', required_checks: CHECKS }); expect((await engine.advance(id)).phase).toBe('opus_execution'); const result = await new WorkflowEngine(new WorkflowArtifactStore(root), { codex: fakes, fable: fakes, opus: fakes, git: fakes }).resume(id, { reason: 'terminal restarted' }); expect(result.phase).toBe('done'); expect(fakes).toMatchObject({ codexCalls: 2, opusCalls: 1, merges: 1 }); });
-  it('rotates session and passport identity in one recoverable commit', async () => { const id = await engine.start({ objective: 'rotation', required_checks: CHECKS }); await engine.rotateSession(id, 'opus', 'expired'); const sessions = await store.readSessions(id); const passport = await store.readPassport(id); expect(sessions).toMatchObject({ sessions_revision: 2, opus_session_id: null, rotation_history: [{ role: 'opus', reason: 'expired' }] }); expect(passport).toMatchObject({ session_references: { opus: null }, rotation_history: [{ role: 'opus', reason: 'expired' }] }); });
-  it('rotates a paused implementer binding, clears its session, and preserves the initial roster', async () => { const id = await engine.start({ objective: 'binding rotation', required_checks: CHECKS }); await engine.pause(id); const before = (await store.readPassport(id))!; await engine.rotateBinding(id, 'implementer', { adapter: 'claude', profile: { ...before.active_roster!.implementer.profile, model: 'sonnet', effort: 'medium' } }, 'use supported model'); const passport = (await store.readPassport(id))!; expect(passport).toMatchObject({ roster: before.roster, roster_hash: before.roster_hash, active_roster: { implementer: { profile: { model: 'sonnet', effort: 'medium' } } }, roster_revision: 2, binding_rotation_history: [{ role: 'implementer', reason: 'use supported model', revision: 2 }], config: { profiles: { opus: { model: 'sonnet', effort: 'medium' } } }, session_references: { opus: null } }); expect(await store.readSessions(id)).toMatchObject({ opus_session_id: null, rotation_history: [{ role: 'opus', reason: 'binding rotation: use supported model' }] }); });
-  it('rejects active, incompatible, and reasonless rotations without changing state', async () => { const id = await engine.start({ objective: 'binding guards', required_checks: CHECKS }); const binding = { adapter: 'claude', profile: { ...(await store.readPassport(id))!.active_roster!.implementer.profile, model: 'sonnet' } }; await expect(engine.rotateBinding(id, 'implementer', binding, 'active')).rejects.toThrow('while workflow is'); await engine.pause(id); const before = await store.readPassport(id); await expect(engine.rotateBinding(id, 'implementer', { ...binding, adapter: 'fable' }, 'bad')).rejects.toThrow('Unsupported implementer'); await expect(engine.rotateBinding(id, 'implementer', binding, ' ')).rejects.toThrow('nonempty reason'); expect(await store.readPassport(id)).toEqual(before); });
-  it('cannot authorize a previously absent adviser through rotation', async () => { const id = await engine.start({ objective: 'no adviser', required_checks: CHECKS }); await engine.pause(id); await expect(engine.rotateBinding(id, 'adviser', { adapter: 'fable', profile: { name: 'fable', model: 'fable', effort: 'low', max_turns: 1, timeout_ms: 1000 } }, 'add adviser')).rejects.toThrow('unauthorized adviser'); expect((await store.readPassport(id))!.config.fable_total_cap).toBe(0); });
-  it('uses the rotated binding after restart', async () => { const resolver = new SemanticFakes(fakes); const semanticEngine = new WorkflowEngine(store, { roles: resolver, git: fakes }); const id = await semanticEngine.start({ objective: 'rotated restart', required_checks: CHECKS, roster: semanticRoster() }); await semanticEngine.pause(id); const before = (await store.readPassport(id))!; await semanticEngine.rotateBinding(id, 'implementer', { ...before.active_roster!.implementer, profile: { ...before.active_roster!.implementer.profile, model: 'rotated-model' } }, 'upgrade'); await new WorkflowEngine(new WorkflowArtifactStore(root), { roles: resolver, git: fakes }).resume(id, { reason: 'continue' }); expect(resolver.calls.find((call) => call.role === 'implementer')?.binding.profile.model).toBe('rotated-model'); });
-  it('routes persisted bindings through semantic roles and a separate reviewer across restarts', async () => { const resolver = new SemanticFakes(fakes); const roster = semanticRoster(); const id = await new WorkflowEngine(store, { roles: resolver, git: fakes }).start({ objective: 'semantic routing', required_checks: CHECKS, roster }); let result = await store.readJob(id); for (let i = 0; i < 20 && result?.phase !== 'done'; i++) result = await new WorkflowEngine(new WorkflowArtifactStore(root), { roles: resolver, git: fakes }).advance(id); expect(result?.phase).toBe('done'); expect(resolver.calls.map((call) => `${call.role}:${call.binding.profile.name}`)).toEqual(['supervisor:supervisor-profile', 'implementer:implementer-profile', 'reviewer:reviewer-profile']); const receiptFiles = await fs.readdir(path.join(root, '.orchestry', 'workflows', id, 'invocations')); const receipts = await Promise.all(receiptFiles.map(async (file) => JSON.parse(await fs.readFile(path.join(root, '.orchestry', 'workflows', id, 'invocations', file), 'utf8')))); expect(receipts.map((receipt) => receipt.semantic_role)).toEqual(expect.arrayContaining(['supervisor', 'implementer', 'reviewer'])); expect(receipts.every((receipt) => /^[a-f0-9]{64}$/.test(receipt.binding_hash))).toBe(true); });
-  it('does not allow an adviser binding to implement', async () => { const resolver = new SemanticFakes(fakes); const semanticEngine = new WorkflowEngine(store, { roles: resolver, git: fakes }); const roster = semanticRoster(); roster.implementer = { ...roster.implementer, adapter: 'fable' }; await expect(semanticEngine.start({ objective: 'adviser cannot implement', required_checks: CHECKS, roster })).rejects.toThrow('Unsupported implementer binding: fable'); expect(await store.listJobs()).toEqual([]); });
-  it('replays completed verification checks without executing them twice', async () => { const id = await reachVerification(); const job = (await store.readJob(id))!; const operation = { phase: 'verification' as const, invocation_id: 'inv_checks_completed', started_at: new Date().toISOString(), retry_count: 0 }; expect(await store.reserveOperation(id, 'verification', operation)).toBe(true); const request = { worktree: job.worktree!, commit: job.current_commit!, commands: CHECKS }; const resultValue = checkResult(job.worktree!, job.current_commit!); await store.writeEffectReceipt({ schema_version: 2, job_id: id, invocation_id: operation.invocation_id, phase: 'verification', kind: 'checks', request_hash: hashCanonical(request), request, result_hash: hashCanonical(resultValue), workflow_revision: job.revision, status: 'completed', timestamp: new Date().toISOString(), result: resultValue }); const result = await engine.run(id); expect(result.phase).toBe('done'); expect(fakes.checkCalls).toBe(2); });
-  it('blocks rather than repeating an ambiguous interrupted check', async () => { const id = await reachVerification(); const job = (await store.readJob(id))!; const operation = { phase: 'verification' as const, invocation_id: 'inv_checks_started', started_at: new Date().toISOString(), retry_count: 0 }; expect(await store.reserveOperation(id, 'verification', operation)).toBe(true); const request = { worktree: job.worktree!, commit: job.current_commit!, commands: CHECKS }; await store.writeEffectReceipt({ schema_version: 2, job_id: id, invocation_id: operation.invocation_id, phase: 'verification', kind: 'checks', request_hash: hashCanonical(request), request, result_hash: null, workflow_revision: job.revision, status: 'started', timestamp: new Date().toISOString(), result: null }); const result = await engine.run(id); expect(result.phase).toBe('blocked'); expect(result.blocker).toContain('AMBIGUOUS_EFFECT'); expect(fakes.checkCalls).toBe(1); });
-  it('blocks on a stale reviewed diff', async () => { fakes.staleDiff = true; const id = await engine.start({ objective: 'stale diff', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('blocked'); expect(fakes.merges).toBe(0); });
-  it('fails closed on stale branch commit', async () => { fakes.staleCommit = true; const id = await engine.start({ objective: 'stale commit', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('failed'); expect(fakes.merges).toBe(0); });
-  it('fails closed when checks move the reviewed branch', async () => { fakes.moveCommitDuringFinalChecks = true; const id = await engine.start({ objective: 'moving commit', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('failed'); expect(fakes.merges).toBe(0); });
-  it('does not reconcile an externally merged unreviewed branch tip', async () => { fakes.staleCommit = true; fakes.merged = true; const id = await engine.start({ objective: 'unreviewed merge', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('failed'); expect(fakes.merges).toBe(0); });
-  it('fails closed on merge failure', async () => { fakes.mergeFails = true; const id = await engine.start({ objective: 'merge fail', required_checks: CHECKS }); expect((await engine.run(id)).phase).toBe('failed'); expect(fakes.merges).toBe(1); });
-
-  async function reachVerification() { const id = await engine.start({ objective: 'effect recovery', required_checks: CHECKS }); expect((await engine.advance(id)).phase).toBe('opus_execution'); expect((await engine.advance(id)).phase).toBe('codex_post_opus'); expect((await engine.advance(id)).phase).toBe('verification'); return id; }
+let root: string;
+let store: WorkflowArtifactStore;
+let fakes: Fakes;
+let engine: WorkflowEngine;
+const CHECKS = ["npm test"];
+beforeEach(async () => {
+  root = await fs.mkdtemp(path.join(os.tmpdir(), "workflow-v2-e2e-"));
+  store = new WorkflowArtifactStore(root);
+  fakes = new Fakes(root);
+  engine = new WorkflowEngine(store, {
+    codex: fakes,
+    fable: fakes,
+    opus: fakes,
+    git: fakes,
+  });
+});
+afterEach(async () => {
+  closeAllAppendHandles();
+  clearEnsuredDirs();
+  await fs.rm(root, { recursive: true, force: true });
 });
 
-class Fakes implements CodexRolePort, FableRolePort, OpusRolePort, WorkflowGitPort {
-  decisions: CodexDecisionV2[] = [dispatch(), accept()]; failFable = false; checksPass = true; staleDiff = false; staleCommit = false; moveCommitDuringFinalChecks = false; merged = false; mergeFails = false; codexCalls = 0; fableCalls = 0; opusCalls = 0; merges = 0; checkCalls = 0; commitIndex = 1; current = 'abcdef1'; sequence: string[] = []; opusPrompts: string[] = []; codexEvidence: CodexDecisionEvidence[] = [];
+describe("direct Codex-Opus workflow v2", () => {
+  it("completes adaptive default with zero Fable calls and two Codex decisions", async () => {
+    const id = await engine.start({
+      objective: "direct change",
+      required_checks: CHECKS,
+    });
+    const result = await engine.run(id);
+    expect(result.phase).toBe("done");
+    expect(result.fable_calls).toBe(0);
+    expect(fakes).toMatchObject({
+      codexCalls: 2,
+      fableCalls: 0,
+      opusCalls: 1,
+      merges: 1,
+    });
+    expect(fakes.sequence).toEqual([
+      "codex:pre_opus",
+      "opus",
+      "codex:post_opus",
+    ]);
+  });
+  it("records one semantic attempt for every successful role call", async () => {
+    const id = await engine.start({
+      objective: "attempts",
+      required_checks: CHECKS,
+    });
+    await engine.run(id);
+    const attempts = await store.readLlmAttempts(id);
+    expect(
+      attempts.map(
+        (attempt) =>
+          `${attempt.semantic_role}:${attempt.adapter}:${attempt.status}`,
+      ),
+    ).toEqual([
+      "supervisor:codex:succeeded",
+      "implementer:claude:succeeded",
+      "reviewer:codex:succeeded",
+    ]);
+    expect(new Set(attempts.map((attempt) => attempt.attempt_id)).size).toBe(3);
+  });
+  it("persists the default null adviser and full binding profiles before calls", async () => {
+    const id = await engine.start({
+      objective: "snapshot",
+      required_checks: CHECKS,
+    });
+    expect(await store.readPassport(id)).toMatchObject({
+      roster: {
+        supervisor: {
+          adapter: "codex",
+          profile: {
+            name: "codex",
+            model: "",
+            effort: "medium",
+            max_turns: 1,
+            timeout_ms: 600_000,
+          },
+        },
+        implementer: {
+          adapter: "claude",
+          profile: {
+            name: "opus",
+            model: "opus",
+            effort: "high",
+            max_turns: 50,
+            timeout_ms: 1_800_000,
+          },
+        },
+        adviser: null,
+        reviewer: { same_as: "supervisor" },
+      },
+      roster_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(fakes.codexCalls).toBe(0);
+  });
+  it("rejects incompatible bindings before job creation", async () => {
+    const roster = {
+      schema_version: 1 as const,
+      supervisor: {
+        adapter: "claude",
+        profile: {
+          name: "bad",
+          model: "opus",
+          effort: "high" as const,
+          max_turns: 1,
+          timeout_ms: 1000,
+        },
+      },
+      implementer: {
+        adapter: "claude",
+        profile: {
+          name: "opus",
+          model: "opus",
+          effort: "high" as const,
+          max_turns: 50,
+          timeout_ms: 1000,
+        },
+      },
+      adviser: null,
+      reviewer: { same_as: "supervisor" as const },
+    };
+    await expect(
+      engine.start({
+        objective: "bad binding",
+        required_checks: CHECKS,
+        roster,
+      }),
+    ).rejects.toThrow("Unsupported supervisor binding: claude");
+    expect(await store.listJobs()).toEqual([]);
+  });
+  it("rejects direct adviser before capability probes", async () => {
+    const roster = {
+      schema_version: 1 as const,
+      supervisor: {
+        adapter: "codex",
+        profile: {
+          name: "codex",
+          model: "codex",
+          effort: "high" as const,
+          max_turns: 1,
+          timeout_ms: 1000,
+        },
+      },
+      implementer: {
+        adapter: "claude",
+        profile: {
+          name: "opus",
+          model: "opus",
+          effort: "high" as const,
+          max_turns: 50,
+          timeout_ms: 1000,
+        },
+      },
+      adviser: {
+        adapter: "fable",
+        profile: {
+          name: "fable",
+          model: "fable",
+          effort: "low" as const,
+          max_turns: 1,
+          timeout_ms: 1000,
+        },
+      },
+      reviewer: { same_as: "supervisor" as const },
+    };
+    await expect(
+      engine.start({
+        objective: "direct adviser",
+        mode: "direct",
+        required_checks: CHECKS,
+        roster,
+      }),
+    ).rejects.toThrow("cannot include an adviser");
+    expect(fakes.availableCalls).toBe(0);
+  });
+  it("direct mode mechanically skips a requested consultation and executes fallback", async () => {
+    fakes.decisions = [consult("DISPATCH_OPUS"), accept()];
+    const id = await engine.start({
+      objective: "direct",
+      mode: "direct",
+      required_checks: CHECKS,
+    });
+    const result = await engine.run(id);
+    expect(result.phase).toBe("done");
+    expect(fakes.fableCalls).toBe(0);
+    expect(result.consultation_status).toBe("fallback_executed");
+    expect(fakes.opusPrompts[0]).toContain("safe fallback");
+  });
+  it("adaptive mode honors a configured zero Fable cap", async () => {
+    fakes.decisions = [consult("DISPATCH_OPUS"), accept()];
+    const id = await engine.start({
+      objective: "zero cap",
+      config: { fable_total_cap: 0 },
+      required_checks: CHECKS,
+    });
+    const result = await engine.run(id);
+    expect(result.phase).toBe("done");
+    expect(fakes.fableCalls).toBe(0);
+    expect(result.consultation_status).toBe("fallback_executed");
+  });
+  it("denies high-risk consultation through the persisted safe fallback", async () => {
+    fakes.decisions = [
+      { ...consult("DISPATCH_OPUS"), risk_level: "high" },
+      accept(),
+    ];
+    const id = await engine.start({
+      objective: "high risk",
+      required_checks: CHECKS,
+      config: { fable_total_cap: 1 },
+    });
+    const result = await engine.run(id);
+    expect(result.phase).toBe("done");
+    expect(fakes.fableCalls).toBe(0);
+    expect(
+      (await store.readArtifact(id, "routing_decision"))?.payload,
+    ).toMatchObject({ reason: "risk_not_low", action: "DISPATCH_OPUS" });
+  });
+  it("runs one bounded adaptive consultation and returns advice to Codex before Opus", async () => {
+    fakes.decisions = [
+      consult("DISPATCH_OPUS"),
+      dispatch("verified advice"),
+      accept(),
+    ];
+    const id = await engine.start({
+      objective: "optional advice",
+      required_checks: CHECKS,
+      config: { fable_total_cap: 1 },
+    });
+    expect((await engine.run(id)).phase).toBe("done");
+    expect(fakes.fableCalls).toBe(1);
+    expect(fakes.sequence).toEqual([
+      "codex:pre_opus",
+      "fable",
+      "codex:after_fable_pre",
+      "opus",
+      "codex:post_opus",
+    ]);
+    expect(fakes.codexEvidence[1]?.fable_advice?.answer).toBe("option A");
+  });
+  it("uses fallback when optional Fable fails without blocking direct progress", async () => {
+    fakes.decisions = [consult("DISPATCH_OPUS"), accept()];
+    fakes.failFable = true;
+    const id = await engine.start({
+      objective: "fallback",
+      required_checks: CHECKS,
+      config: { fable_total_cap: 1 },
+    });
+    const result = await engine.run(id);
+    expect(result.phase).toBe("done");
+    expect(fakes.fableCalls).toBe(1);
+    expect(result.consultation_status).toBe("fallback_executed");
+    expect(fakes.opusPrompts[0]).toContain("safe fallback");
+  });
+  it("records failed adviser usage as unknown without persisting the raw error", async () => {
+    fakes.decisions = [consult("DISPATCH_OPUS"), accept()];
+    fakes.failFable = true;
+    const id = await engine.start({
+      objective: "failed usage",
+      required_checks: CHECKS,
+      config: { fable_total_cap: 1 },
+    });
+    await engine.run(id);
+    const failed = (await store.readLlmAttempts(id)).find(
+      (attempt) => attempt.semantic_role === "adviser",
+    );
+    expect(failed).toMatchObject({
+      status: "failed",
+      usage_status: "unknown",
+      error_category: "adapter_error",
+      error_message: "Adapter call failed",
+    });
+    expect(JSON.stringify(failed)).not.toContain("fable unavailable");
+  });
+  it("resumes a persisted consultation fallback without a second Fable attempt", async () => {
+    fakes.decisions = [consult("DISPATCH_OPUS"), accept()];
+    const id = await engine.start({
+      objective: "fallback restart",
+      required_checks: CHECKS,
+      config: { fable_total_cap: 1 },
+    });
+    expect((await engine.advance(id)).phase).toBe("fable_consultation");
+    const operation = {
+      phase: "fable_consultation" as const,
+      invocation_id: "inv_interrupted_fallback",
+      started_at: new Date().toISOString(),
+      retry_count: 0,
+    };
+    expect(
+      await store.reserveOperation(id, "fable_consultation", operation),
+    ).toBe(true);
+    await store.patchJob(id, { consultation_status: "fallback_executed" });
+    const result = await engine.run(id);
+    expect(result.phase).toBe("done");
+    expect(fakes.fableCalls).toBe(0);
+    expect(fakes.opusPrompts[0]).toContain("safe fallback");
+  });
+  it("replays a successful Fable receipt after restart without losing its advice", async () => {
+    fakes.decisions = [
+      consult("DISPATCH_OPUS"),
+      dispatch("verified advice"),
+      accept(),
+    ];
+    const id = await engine.start({
+      objective: "receipt restart",
+      required_checks: CHECKS,
+      config: { fable_total_cap: 1 },
+    });
+    expect((await engine.advance(id)).phase).toBe("fable_consultation");
+    const operation = {
+      phase: "fable_consultation" as const,
+      invocation_id: "inv_fable_receipt",
+      started_at: new Date().toISOString(),
+      retry_count: 0,
+    };
+    expect(
+      await store.reserveOperation(id, "fable_consultation", operation),
+    ).toBe(true);
+    const job = (await store.readJob(id))!;
+    const query = (await store.readArtifact<ReturnType<typeof queryValue>>(
+      id,
+      "fable_request",
+    ))!.payload;
+    const consultationId = `consult_${id}_${job.revision}`;
+    const request = { consultation_id: consultationId, query };
+    const receiptResult = {
+      value: {
+        schema_version: 1,
+        consultation_id: consultationId,
+        answer: "persisted advice",
+        alternatives: [],
+        uncertainties: [],
+      },
+    };
+    await store.writeInvocationReceipt({
+      schema_version: 2,
+      job_id: id,
+      invocation_id: operation.invocation_id,
+      phase: "fable_consultation",
+      role: "fable",
+      request_hash: hashCanonical(request),
+      request,
+      result_hash: hashCanonical(receiptResult),
+      workflow_revision: job.revision,
+      timestamp: new Date().toISOString(),
+      result: receiptResult,
+    });
+    await store.patchJob(id, {
+      consultation_status: "attempt_started",
+      fable_calls: 1,
+    });
+    const result = await engine.run(id);
+    expect(result.phase).toBe("done");
+    expect(fakes.fableCalls).toBe(0);
+    expect(fakes.codexEvidence[1]?.fable_advice?.answer).toBe(
+      "persisted advice",
+    );
+  });
+  it("skips duplicate consultation after the workflow budget is consumed", async () => {
+    fakes.decisions = [
+      consult("DISPATCH_OPUS"),
+      dispatch("after advice"),
+      consult("CORRECT_OPUS"),
+      accept(),
+    ];
+    const id = await engine.start({
+      objective: "one only",
+      required_checks: CHECKS,
+      config: { fable_total_cap: 1 },
+    });
+    expect((await engine.run(id)).phase).toBe("done");
+    expect(fakes.fableCalls).toBe(1);
+    expect(fakes.opusCalls).toBe(2);
+    expect(fakes.opusPrompts[1]).toContain("safe fallback");
+  });
+  it("sends Codex corrections directly to Opus", async () => {
+    fakes.decisions = [dispatch(), correct("fix directly"), accept()];
+    const id = await engine.start({
+      objective: "correct",
+      required_checks: CHECKS,
+    });
+    const result = await engine.run(id);
+    expect(result.phase).toBe("done");
+    expect(fakes.fableCalls).toBe(0);
+    expect(fakes.opusPrompts).toEqual(["implement directly", "fix directly"]);
+    expect(result.opus_iteration).toBe(2);
+  });
+  it("rejects ACCEPT before review evidence", async () => {
+    fakes.decisions = [{ ...accept(), reviewed_commit: null }];
+    const id = await engine.start({
+      objective: "bad accept",
+      required_checks: CHECKS,
+    });
+    const result = await engine.run(id);
+    expect(result.phase).toBe("failed");
+    expect(result.blocker).toContain("invalid during pre_opus");
+    expect(fakes.opusCalls).toBe(0);
+  });
+  it("rejects launch before probes when meaningful checks are absent", async () => {
+    await expect(
+      engine.start({ objective: "no checks", required_checks: ["true"] }),
+    ).rejects.toThrow("meaningful deterministic check");
+    expect(fakes.availableCalls).toBe(0);
+    expect(fakes.merges).toBe(0);
+  });
+  it("rejects a malicious API check before validation or role probes", async () => {
+    await expect(
+      engine.start({
+        objective: "malicious",
+        required_checks: ["npm test; touch owned"],
+      }),
+    ).rejects.toThrow("Unsafe");
+    expect(fakes.availableCalls).toBe(0);
+    expect(fakes.checkCalls).toBe(0);
+  });
+  it("rejects a malicious check injected into a persisted legacy passport before a role call", async () => {
+    const id = await engine.start({
+      objective: "persisted malicious",
+      required_checks: CHECKS,
+    });
+    const file = path.join(
+      root,
+      ".orchestry",
+      "workflows",
+      id,
+      "passport.json",
+    );
+    const passport = JSON.parse(await fs.readFile(file, "utf8"));
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        ...passport,
+        required_checks: ["npm test; touch owned"],
+      }),
+    );
+    const result = await engine.run(id);
+    expect(result.phase).toBe("failed");
+    expect(result.blocker).toContain("Unsafe");
+    expect(fakes.codexCalls).toBe(0);
+  });
+  it("restarts after every phase without duplicate calls or merge", async () => {
+    const id = await engine.start({
+      objective: "restart",
+      required_checks: CHECKS,
+    });
+    let result = await store.readJob(id);
+    for (let i = 0; i < 20 && result?.phase !== "done"; i++)
+      result = await new WorkflowEngine(new WorkflowArtifactStore(root), {
+        codex: fakes,
+        fable: fakes,
+        opus: fakes,
+        git: fakes,
+      }).advance(id);
+    expect(result?.phase).toBe("done");
+    expect(result?.revision).toBe(6);
+    expect(fakes).toMatchObject({
+      codexCalls: 2,
+      opusCalls: 1,
+      merges: 1,
+      checkCalls: 3,
+    });
+  });
+  it("does not double count attempts during crash-safe replay", async () => {
+    const id = await engine.start({
+      objective: "attempt replay",
+      required_checks: CHECKS,
+    });
+    let result = await store.readJob(id);
+    for (let i = 0; i < 20 && result?.phase !== "done"; i++)
+      result = await new WorkflowEngine(new WorkflowArtifactStore(root), {
+        codex: fakes,
+        fable: fakes,
+        opus: fakes,
+        git: fakes,
+      }).advance(id);
+    const attempts = await store.readLlmAttempts(id);
+    expect(attempts).toHaveLength(3);
+    expect(new Set(attempts.map((attempt) => attempt.invocation_id)).size).toBe(
+      3,
+    );
+  });
+  it("restarts with the same immutable roster hash", async () => {
+    const id = await engine.start({
+      objective: "roster restart",
+      required_checks: CHECKS,
+    });
+    const before = (await store.readPassport(id))!.roster_hash;
+    await new WorkflowEngine(new WorkflowArtifactStore(root), {
+      codex: fakes,
+      fable: fakes,
+      opus: fakes,
+      git: fakes,
+    }).advance(id);
+    expect((await store.readPassport(id))!.roster_hash).toBe(before);
+  });
+  it("resumes an active phase after terminal restart", async () => {
+    const id = await engine.start({
+      objective: "active restart",
+      required_checks: CHECKS,
+    });
+    expect((await engine.advance(id)).phase).toBe("opus_execution");
+    const result = await new WorkflowEngine(new WorkflowArtifactStore(root), {
+      codex: fakes,
+      fable: fakes,
+      opus: fakes,
+      git: fakes,
+    }).resume(id, { reason: "terminal restarted" });
+    expect(result.phase).toBe("done");
+    expect(fakes).toMatchObject({ codexCalls: 2, opusCalls: 1, merges: 1 });
+  });
+  it("rotates session and passport identity in one recoverable commit", async () => {
+    const id = await engine.start({
+      objective: "rotation",
+      required_checks: CHECKS,
+    });
+    await engine.rotateSession(id, "opus", "expired");
+    const sessions = await store.readSessions(id);
+    const passport = await store.readPassport(id);
+    expect(sessions).toMatchObject({
+      sessions_revision: 2,
+      opus_session_id: null,
+      rotation_history: [{ role: "opus", reason: "expired" }],
+    });
+    expect(passport).toMatchObject({
+      session_references: { opus: null },
+      rotation_history: [{ role: "opus", reason: "expired" }],
+    });
+  });
+  it("rotates a paused implementer binding, clears its session, and preserves the initial roster", async () => {
+    const id = await engine.start({
+      objective: "binding rotation",
+      required_checks: CHECKS,
+    });
+    await engine.pause(id);
+    const before = (await store.readPassport(id))!;
+    await engine.rotateBinding(
+      id,
+      "implementer",
+      {
+        adapter: "claude",
+        profile: {
+          ...before.active_roster!.implementer.profile,
+          model: "sonnet",
+          effort: "medium",
+        },
+      },
+      "use supported model",
+      true,
+    );
+    const passport = (await store.readPassport(id))!;
+    expect(passport).toMatchObject({
+      roster: before.roster,
+      roster_hash: before.roster_hash,
+      active_roster: {
+        implementer: { profile: { model: "sonnet", effort: "medium" } },
+      },
+      roster_revision: 2,
+      binding_rotation_history: [
+        { role: "implementer", reason: "use supported model", revision: 2 },
+      ],
+      config: { profiles: { opus: { model: "sonnet", effort: "medium" } } },
+      session_references: { opus: null },
+    });
+    expect(await store.readSessions(id)).toMatchObject({
+      opus_session_id: null,
+      rotation_history: [
+        { role: "opus", reason: "binding rotation: use supported model" },
+      ],
+    });
+  });
+  it("rejects active, incompatible, and reasonless rotations without changing state", async () => {
+    const id = await engine.start({
+      objective: "binding guards",
+      required_checks: CHECKS,
+    });
+    const binding = {
+      adapter: "claude",
+      profile: {
+        ...(await store.readPassport(id))!.active_roster!.implementer.profile,
+        model: "sonnet",
+      },
+    };
+    await expect(
+      engine.rotateBinding(id, "implementer", binding, "active"),
+    ).rejects.toThrow("while workflow is");
+    await engine.pause(id);
+    const before = await store.readPassport(id);
+    await expect(
+      engine.rotateBinding(
+        id,
+        "implementer",
+        { ...binding, adapter: "fable" },
+        "bad",
+      ),
+    ).rejects.toThrow("Unsupported implementer");
+    await expect(
+      engine.rotateBinding(id, "implementer", binding, " "),
+    ).rejects.toThrow("nonempty reason");
+    expect(await store.readPassport(id)).toEqual(before);
+  });
+  it("cannot authorize a previously absent adviser through rotation", async () => {
+    const id = await engine.start({
+      objective: "no adviser",
+      required_checks: CHECKS,
+    });
+    await engine.pause(id);
+    await expect(
+      engine.rotateBinding(
+        id,
+        "adviser",
+        {
+          adapter: "fable",
+          profile: {
+            name: "fable",
+            model: "fable",
+            effort: "low",
+            max_turns: 1,
+            timeout_ms: 1000,
+          },
+        },
+        "add adviser",
+      ),
+    ).rejects.toThrow("unauthorized adviser");
+    expect((await store.readPassport(id))!.config.fable_total_cap).toBe(0);
+  });
+  it("uses the rotated binding after restart", async () => {
+    const resolver = new SemanticFakes(fakes);
+    const semanticEngine = new WorkflowEngine(store, {
+      roles: resolver,
+      git: fakes,
+    });
+    const id = await semanticEngine.start({
+      objective: "rotated restart",
+      required_checks: CHECKS,
+      roster: semanticRoster(),
+      allow_unverified_model: true,
+    });
+    await semanticEngine.pause(id);
+    const before = (await store.readPassport(id))!;
+    await semanticEngine.rotateBinding(
+      id,
+      "implementer",
+      {
+        ...before.active_roster!.implementer,
+        profile: {
+          ...before.active_roster!.implementer.profile,
+          model: "rotated-model",
+        },
+      },
+      "upgrade",
+      true,
+    );
+    await new WorkflowEngine(new WorkflowArtifactStore(root), {
+      roles: resolver,
+      git: fakes,
+    }).resume(id, { reason: "continue" });
+    expect(
+      resolver.calls.find((call) => call.role === "implementer")?.binding
+        .profile.model,
+    ).toBe("rotated-model");
+  });
+  it("preserves adapter and binding attribution across rotation", async () => {
+    const resolver = new SemanticFakes(fakes);
+    const semanticEngine = new WorkflowEngine(store, {
+      roles: resolver,
+      git: fakes,
+    });
+    const id = await semanticEngine.start({
+      objective: "rotation accounting",
+      required_checks: CHECKS,
+      roster: semanticRoster(),
+      allow_unverified_model: true,
+    });
+    expect((await semanticEngine.advance(id)).phase).toBe("opus_execution");
+    await semanticEngine.pause(id);
+    const before = (await store.readPassport(id))!;
+    await semanticEngine.rotateBinding(
+      id,
+      "implementer",
+      {
+        ...before.active_roster!.implementer,
+        profile: {
+          ...before.active_roster!.implementer.profile,
+          model: "rotated-model",
+        },
+      },
+      "rotate accounting",
+      true,
+    );
+    await semanticEngine.resume(id, { reason: "continue" });
+    const attempts = await store.readLlmAttempts(id);
+    expect(
+      attempts.find((attempt) => attempt.semantic_role === "supervisor"),
+    ).toMatchObject({ adapter: "codex", roster_revision: 1 });
+    expect(
+      attempts.find((attempt) => attempt.semantic_role === "implementer"),
+    ).toMatchObject({
+      adapter: "claude",
+      roster_revision: 2,
+      binding_hash: hashCanonical(
+        (await store.readPassport(id))!.active_roster!.implementer,
+      ),
+    });
+  });
+  it("routes persisted bindings through semantic roles and a separate reviewer across restarts", async () => {
+    const resolver = new SemanticFakes(fakes);
+    const roster = semanticRoster();
+    const id = await new WorkflowEngine(store, {
+      roles: resolver,
+      git: fakes,
+    }).start({
+      objective: "semantic routing",
+      required_checks: CHECKS,
+      roster,
+      allow_unverified_model: true,
+    });
+    let result = await store.readJob(id);
+    for (let i = 0; i < 20 && result?.phase !== "done"; i++)
+      result = await new WorkflowEngine(new WorkflowArtifactStore(root), {
+        roles: resolver,
+        git: fakes,
+      }).advance(id);
+    expect(result?.phase).toBe("done");
+    expect(
+      resolver.calls.map((call) => `${call.role}:${call.binding.profile.name}`),
+    ).toEqual([
+      "supervisor:supervisor-profile",
+      "implementer:implementer-profile",
+      "reviewer:reviewer-profile",
+    ]);
+    const receiptFiles = await fs.readdir(
+      path.join(root, ".orchestry", "workflows", id, "invocations"),
+    );
+    const receipts = await Promise.all(
+      receiptFiles.map(async (file) =>
+        JSON.parse(
+          await fs.readFile(
+            path.join(root, ".orchestry", "workflows", id, "invocations", file),
+            "utf8",
+          ),
+        ),
+      ),
+    );
+    expect(receipts.map((receipt) => receipt.semantic_role)).toEqual(
+      expect.arrayContaining(["supervisor", "implementer", "reviewer"]),
+    );
+    expect(
+      receipts.every((receipt) => /^[a-f0-9]{64}$/.test(receipt.binding_hash)),
+    ).toBe(true);
+  });
+  it("does not allow an adviser binding to implement", async () => {
+    const resolver = new SemanticFakes(fakes);
+    const semanticEngine = new WorkflowEngine(store, {
+      roles: resolver,
+      git: fakes,
+    });
+    const roster = semanticRoster();
+    roster.implementer = { ...roster.implementer, adapter: "fable" };
+    await expect(
+      semanticEngine.start({
+        objective: "adviser cannot implement",
+        required_checks: CHECKS,
+        roster,
+        allow_unverified_model: true,
+      }),
+    ).rejects.toThrow("Unsupported implementer binding: fable");
+    expect(await store.listJobs()).toEqual([]);
+  });
+  it("replays completed verification checks without executing them twice", async () => {
+    const id = await reachVerification();
+    const job = (await store.readJob(id))!;
+    const operation = {
+      phase: "verification" as const,
+      invocation_id: "inv_checks_completed",
+      started_at: new Date().toISOString(),
+      retry_count: 0,
+    };
+    expect(await store.reserveOperation(id, "verification", operation)).toBe(
+      true,
+    );
+    const request = {
+      worktree: job.worktree!,
+      commit: job.current_commit!,
+      commands: CHECKS,
+    };
+    const resultValue = checkResult(job.worktree!, job.current_commit!);
+    await store.writeEffectReceipt({
+      schema_version: 2,
+      job_id: id,
+      invocation_id: operation.invocation_id,
+      phase: "verification",
+      kind: "checks",
+      request_hash: hashCanonical(request),
+      request,
+      result_hash: hashCanonical(resultValue),
+      workflow_revision: job.revision,
+      status: "completed",
+      timestamp: new Date().toISOString(),
+      result: resultValue,
+    });
+    const result = await engine.run(id);
+    expect(result.phase).toBe("done");
+    expect(fakes.checkCalls).toBe(2);
+  });
+  it("blocks rather than repeating an ambiguous interrupted check", async () => {
+    const id = await reachVerification();
+    const job = (await store.readJob(id))!;
+    const operation = {
+      phase: "verification" as const,
+      invocation_id: "inv_checks_started",
+      started_at: new Date().toISOString(),
+      retry_count: 0,
+    };
+    expect(await store.reserveOperation(id, "verification", operation)).toBe(
+      true,
+    );
+    const request = {
+      worktree: job.worktree!,
+      commit: job.current_commit!,
+      commands: CHECKS,
+    };
+    await store.writeEffectReceipt({
+      schema_version: 2,
+      job_id: id,
+      invocation_id: operation.invocation_id,
+      phase: "verification",
+      kind: "checks",
+      request_hash: hashCanonical(request),
+      request,
+      result_hash: null,
+      workflow_revision: job.revision,
+      status: "started",
+      timestamp: new Date().toISOString(),
+      result: null,
+    });
+    const result = await engine.run(id);
+    expect(result.phase).toBe("blocked");
+    expect(result.blocker).toContain("AMBIGUOUS_EFFECT");
+    expect(fakes.checkCalls).toBe(1);
+  });
+  it("blocks on a stale reviewed diff", async () => {
+    fakes.staleDiff = true;
+    const id = await engine.start({
+      objective: "stale diff",
+      required_checks: CHECKS,
+    });
+    expect((await engine.run(id)).phase).toBe("blocked");
+    expect(fakes.merges).toBe(0);
+  });
+  it("fails closed on stale branch commit", async () => {
+    fakes.staleCommit = true;
+    const id = await engine.start({
+      objective: "stale commit",
+      required_checks: CHECKS,
+    });
+    expect((await engine.run(id)).phase).toBe("failed");
+    expect(fakes.merges).toBe(0);
+  });
+  it("fails closed when checks move the reviewed branch", async () => {
+    fakes.moveCommitDuringFinalChecks = true;
+    const id = await engine.start({
+      objective: "moving commit",
+      required_checks: CHECKS,
+    });
+    expect((await engine.run(id)).phase).toBe("failed");
+    expect(fakes.merges).toBe(0);
+  });
+  it("does not reconcile an externally merged unreviewed branch tip", async () => {
+    fakes.staleCommit = true;
+    fakes.merged = true;
+    const id = await engine.start({
+      objective: "unreviewed merge",
+      required_checks: CHECKS,
+    });
+    expect((await engine.run(id)).phase).toBe("failed");
+    expect(fakes.merges).toBe(0);
+  });
+  it("fails closed on merge failure", async () => {
+    fakes.mergeFails = true;
+    const id = await engine.start({
+      objective: "merge fail",
+      required_checks: CHECKS,
+    });
+    expect((await engine.run(id)).phase).toBe("failed");
+    expect(fakes.merges).toBe(1);
+  });
+
+  async function reachVerification() {
+    const id = await engine.start({
+      objective: "effect recovery",
+      required_checks: CHECKS,
+    });
+    expect((await engine.advance(id)).phase).toBe("opus_execution");
+    expect((await engine.advance(id)).phase).toBe("codex_post_opus");
+    expect((await engine.advance(id)).phase).toBe("verification");
+    return id;
+  }
+});
+
+class Fakes
+  implements CodexRolePort, FableRolePort, OpusRolePort, WorkflowGitPort
+{
+  decisions: CodexDecisionV2[] = [dispatch(), accept()];
+  failFable = false;
+  checksPass = true;
+  staleDiff = false;
+  staleCommit = false;
+  moveCommitDuringFinalChecks = false;
+  merged = false;
+  mergeFails = false;
+  codexCalls = 0;
+  fableCalls = 0;
+  opusCalls = 0;
+  merges = 0;
+  checkCalls = 0;
+  commitIndex = 1;
+  current = "abcdef1";
+  sequence: string[] = [];
+  opusPrompts: string[] = [];
+  codexEvidence: CodexDecisionEvidence[] = [];
   constructor(private root: string) {}
   availableCalls = 0;
-  async available() { this.availableCalls++; return { available: true, detail: 'fake' }; }
-  async validateChecks(commands: string[]) { return commands; }
-  async decide(p: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence) { this.codexCalls++; this.sequence.push(`codex:${stage}`); this.codexEvidence.push(evidence); const value = this.decisions.shift() ?? accept(); const fableOutcome = stage.startsWith('after_fable') ? { fable_advice_disposition: 'accepted' as const, fable_error: null, fable_iteration_effect: 'unchanged' as const } : {}; return { value: { ...value, ...fableOutcome, job_id: p.job_id, ...(value.reviewed_commit === 'CURRENT' ? { reviewed_commit: evidence.evidence?.commit ?? null } : {}) }, session_id: 'codex-thread' }; }
-  async consult(_job: string, consultationId: string, _query: unknown, _options: FableCallOptions) { this.fableCalls++; this.sequence.push('fable'); if (this.failFable) throw new Error('fable unavailable'); return { value: { schema_version: 1, consultation_id: consultationId, answer: 'option A', alternatives: ['option B'], uncertainties: [] } as FableAdviceV1 }; }
-  async prepare(id: string) { const worktree = path.join(this.root, 'worktree', id); await fs.mkdir(worktree, { recursive: true }); return { branch: `orchestry/workflow/${id}`, worktree, target_branch: 'main', base_commit: 'abcdef1' }; }
-  async execute(p: WorkflowPassportV2, prompt: string) { this.opusCalls++; this.sequence.push('opus'); this.opusPrompts.push(prompt); this.current = `abcdef${++this.commitIndex}`; return { value: { job_id: p.job_id, status: 'completed', files_changed: ['src/x.ts'], commands_run: ['npm test'], tests_reported: ['pass'], deviations: [], unresolved: [], summary: 'done' } as OpusResult, session_id: 'opus-session' }; }
-  async inspect(branch: string, worktree: string): Promise<GitEvidence> { const changed = this.staleDiff && this.sequence.at(-1) === 'codex:post_opus'; return { branch, worktree, commit: this.current, diff: changed ? 'changed' : 'diff', diff_hash: changed ? 'b'.repeat(64) : hashCanonical('diff'), files_changed: ['src/x.ts'], insertions: 1, deletions: 0, risk_signals: [] }; }
-  async runChecks(worktree: string, commit: string, commands: string[]): Promise<CheckResults> { this.checkCalls++; if (this.moveCommitDuringFinalChecks && this.checkCalls === 3) this.current = '9999999'; return { job_id: path.basename(worktree), commit, passed: this.checksPass, checks: commands.map((command) => ({ command, passed: this.checksPass, output: 'ok' })) }; }
-  async currentCommit() { return this.staleCommit ? 'fffffff' : this.current; }
-  async isMerged() { return this.merged; }
-  async merge() { this.merges++; return this.mergeFails ? { success: false, detail: 'conflict' } : { success: true, detail: 'merged' }; }
+  async available() {
+    this.availableCalls++;
+    return { available: true, detail: "fake" };
+  }
+  async validateChecks(commands: string[]) {
+    return commands;
+  }
+  async decide(
+    p: WorkflowPassportV2,
+    stage: CodexDecisionStage,
+    evidence: CodexDecisionEvidence,
+  ) {
+    this.codexCalls++;
+    this.sequence.push(`codex:${stage}`);
+    this.codexEvidence.push(evidence);
+    const value = this.decisions.shift() ?? accept();
+    const fableOutcome = stage.startsWith("after_fable")
+      ? {
+          fable_advice_disposition: "accepted" as const,
+          fable_error: null,
+          fable_iteration_effect: "unchanged" as const,
+        }
+      : {};
+    return {
+      value: {
+        ...value,
+        ...fableOutcome,
+        job_id: p.job_id,
+        ...(value.reviewed_commit === "CURRENT"
+          ? { reviewed_commit: evidence.evidence?.commit ?? null }
+          : {}),
+      },
+      session_id: "codex-thread",
+    };
+  }
+  async consult(
+    _job: string,
+    consultationId: string,
+    _query: unknown,
+    _options: FableCallOptions,
+  ) {
+    this.fableCalls++;
+    this.sequence.push("fable");
+    if (this.failFable) throw new Error("fable unavailable");
+    return {
+      value: {
+        schema_version: 1,
+        consultation_id: consultationId,
+        answer: "option A",
+        alternatives: ["option B"],
+        uncertainties: [],
+      } as FableAdviceV1,
+    };
+  }
+  async prepare(id: string) {
+    const worktree = path.join(this.root, "worktree", id);
+    await fs.mkdir(worktree, { recursive: true });
+    return {
+      branch: `orchestry/workflow/${id}`,
+      worktree,
+      target_branch: "main",
+      base_commit: "abcdef1",
+    };
+  }
+  async execute(p: WorkflowPassportV2, prompt: string) {
+    this.opusCalls++;
+    this.sequence.push("opus");
+    this.opusPrompts.push(prompt);
+    this.current = `abcdef${++this.commitIndex}`;
+    return {
+      value: {
+        job_id: p.job_id,
+        status: "completed",
+        files_changed: ["src/x.ts"],
+        commands_run: ["npm test"],
+        tests_reported: ["pass"],
+        deviations: [],
+        unresolved: [],
+        summary: "done",
+      } as OpusResult,
+      session_id: "opus-session",
+    };
+  }
+  async inspect(branch: string, worktree: string): Promise<GitEvidence> {
+    const changed =
+      this.staleDiff && this.sequence.at(-1) === "codex:post_opus";
+    return {
+      branch,
+      worktree,
+      commit: this.current,
+      diff: changed ? "changed" : "diff",
+      diff_hash: changed ? "b".repeat(64) : hashCanonical("diff"),
+      files_changed: ["src/x.ts"],
+      insertions: 1,
+      deletions: 0,
+      risk_signals: [],
+    };
+  }
+  async runChecks(
+    worktree: string,
+    commit: string,
+    commands: string[],
+  ): Promise<CheckResults> {
+    this.checkCalls++;
+    if (this.moveCommitDuringFinalChecks && this.checkCalls === 3)
+      this.current = "9999999";
+    return {
+      job_id: path.basename(worktree),
+      commit,
+      passed: this.checksPass,
+      checks: commands.map((command) => ({
+        command,
+        passed: this.checksPass,
+        output: "ok",
+      })),
+    };
+  }
+  async currentCommit() {
+    return this.staleCommit ? "fffffff" : this.current;
+  }
+  async isMerged() {
+    return this.merged;
+  }
+  async merge() {
+    this.merges++;
+    return this.mergeFails
+      ? { success: false, detail: "conflict" }
+      : { success: true, detail: "merged" };
+  }
 }
 
 class SemanticFakes implements WorkflowRoleResolver {
   calls: Array<{ role: SemanticRole; binding: RosterAgent }> = [];
   constructor(private readonly fakes: Fakes) {}
-  async availability(binding: RosterAgent, role: SemanticRole) { const adapter = binding.adapter === 'fable' ? 'claude-adviser' : binding.adapter; const supported = role === 'supervisor' || role === 'reviewer' ? adapter === 'codex' : role === 'implementer' ? adapter === 'claude' : adapter === 'claude-adviser'; return supported ? { available: true, detail: 'fake' } : { available: false, detail: `Unsupported ${role} binding: ${binding.adapter}` }; }
-  decide(binding: RosterAgent, passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null) { const role = stage === 'post_opus' || stage === 'after_fable_post' ? 'reviewer' : 'supervisor'; this.calls.push({ role, binding }); return this.fakes.decide(passport, stage, evidence, threadId); }
-  execute(binding: RosterAgent, passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: 'new' | 'native_resume' | 'passport_handoff') { this.calls.push({ role: 'implementer', binding }); return this.fakes.execute(passport, prompt, workspace, sessionId, mode); }
-  consult(binding: RosterAgent, jobId: string, consultationId: string, query: Parameters<FableRolePort['consult']>[2], options: FableCallOptions) { this.calls.push({ role: 'adviser', binding }); return this.fakes.consult(jobId, consultationId, query, options); }
+  async availability(binding: RosterAgent, role: SemanticRole) {
+    const adapter =
+      binding.adapter === "fable" ? "claude-adviser" : binding.adapter;
+    const supported =
+      role === "supervisor" || role === "reviewer"
+        ? adapter === "codex"
+        : role === "implementer"
+          ? adapter === "claude"
+          : adapter === "claude-adviser";
+    return supported
+      ? { available: true, detail: "fake" }
+      : {
+          available: false,
+          detail: `Unsupported ${role} binding: ${binding.adapter}`,
+        };
+  }
+  decide(
+    binding: RosterAgent,
+    passport: WorkflowPassportV2,
+    stage: CodexDecisionStage,
+    evidence: CodexDecisionEvidence,
+    threadId: string | null,
+  ) {
+    const role =
+      stage === "post_opus" || stage === "after_fable_post"
+        ? "reviewer"
+        : "supervisor";
+    this.calls.push({ role, binding });
+    return this.fakes.decide(passport, stage, evidence, threadId);
+  }
+  execute(
+    binding: RosterAgent,
+    passport: WorkflowPassportV2,
+    prompt: string,
+    workspace: string,
+    sessionId: string | null,
+    mode: "new" | "native_resume" | "passport_handoff",
+  ) {
+    this.calls.push({ role: "implementer", binding });
+    return this.fakes.execute(passport, prompt, workspace, sessionId, mode);
+  }
+  consult(
+    binding: RosterAgent,
+    jobId: string,
+    consultationId: string,
+    query: Parameters<FableRolePort["consult"]>[2],
+    options: FableCallOptions,
+  ) {
+    this.calls.push({ role: "adviser", binding });
+    return this.fakes.consult(jobId, consultationId, query, options);
+  }
 }
 
-function semanticRoster(): WorkflowRosterSnapshot { const profile = (name: string, model: string) => ({ name, model, effort: 'medium' as const, max_turns: 1, timeout_ms: 1000 }); return { schema_version: 1, supervisor: { adapter: 'codex', profile: profile('supervisor-profile', 'codex-supervisor') }, implementer: { adapter: 'claude', profile: { ...profile('implementer-profile', 'claude-implementer'), effort: 'high', max_turns: 50 } }, adviser: null, reviewer: { adapter: 'codex', profile: profile('reviewer-profile', 'codex-reviewer') } }; }
+function semanticRoster(): WorkflowRosterSnapshot {
+  const profile = (name: string, model: string) => ({
+    name,
+    model,
+    effort: "medium" as const,
+    max_turns: 1,
+    timeout_ms: 1000,
+  });
+  return {
+    schema_version: 1,
+    supervisor: {
+      adapter: "codex",
+      profile: profile("supervisor-profile", "codex-supervisor"),
+    },
+    implementer: {
+      adapter: "claude",
+      profile: {
+        ...profile("implementer-profile", "claude-implementer"),
+        effort: "high",
+        max_turns: 50,
+      },
+    },
+    adviser: null,
+    reviewer: {
+      adapter: "codex",
+      profile: profile("reviewer-profile", "codex-reviewer"),
+    },
+  };
+}
 
-function outcome() { return { fable_advice_disposition: null, fable_error: null, fable_iteration_effect: null } as const; }
-function dispatch(brief = 'implement directly'): CodexDecisionV2 { return { schema_version: 2, job_id: 'wf_placeholder', action: 'DISPATCH_OPUS', summary: 'dispatch', implementation_brief: brief, required_changes: [], risk_level: 'low', fable_query: null, reviewed_commit: null, ...outcome() }; }
-function accept(): CodexDecisionV2 { return { schema_version: 2, job_id: 'wf_placeholder', action: 'ACCEPT', summary: 'accept', implementation_brief: null, required_changes: [], risk_level: 'low', fable_query: null, reviewed_commit: 'CURRENT', ...outcome() }; }
-function correct(change: string): CodexDecisionV2 { return { schema_version: 2, job_id: 'wf_placeholder', action: 'CORRECT_OPUS', summary: 'correct', implementation_brief: null, required_changes: [change], risk_level: 'medium', fable_query: null, reviewed_commit: 'CURRENT', ...outcome() }; }
-function consult(fallback: 'DISPATCH_OPUS' | 'CORRECT_OPUS'): CodexDecisionV2 { return { schema_version: 2, job_id: 'wf_placeholder', action: 'CONSULT_FABLE', summary: 'consult', implementation_brief: null, required_changes: [], risk_level: 'low', fable_query: { purpose: 'COMPARE_BOUNDED_OPTIONS', question: 'A or B?', verification_method: 'compare deterministic tests', fallback_if_skipped: { action: fallback, instructions: 'safe fallback' } }, reviewed_commit: fallback === 'CORRECT_OPUS' ? 'CURRENT' : null, ...outcome() }; }
-function queryValue() { return { purpose: 'COMPARE_BOUNDED_OPTIONS' as const, question: 'A or B?', verification_method: 'compare deterministic tests', fallback_if_skipped: { action: 'DISPATCH_OPUS' as const, instructions: 'safe fallback' } }; }
-function checkResult(worktree: string, commit: string): CheckResults { return { job_id: path.basename(worktree), commit, passed: true, checks: CHECKS.map((command) => ({ command, passed: true, output: 'persisted' })) }; }
+function outcome() {
+  return {
+    fable_advice_disposition: null,
+    fable_error: null,
+    fable_iteration_effect: null,
+  } as const;
+}
+function dispatch(brief = "implement directly"): CodexDecisionV2 {
+  return {
+    schema_version: 2,
+    job_id: "wf_placeholder",
+    action: "DISPATCH_OPUS",
+    summary: "dispatch",
+    implementation_brief: brief,
+    required_changes: [],
+    risk_level: "low",
+    fable_query: null,
+    reviewed_commit: null,
+    ...outcome(),
+  };
+}
+function accept(): CodexDecisionV2 {
+  return {
+    schema_version: 2,
+    job_id: "wf_placeholder",
+    action: "ACCEPT",
+    summary: "accept",
+    implementation_brief: null,
+    required_changes: [],
+    risk_level: "low",
+    fable_query: null,
+    reviewed_commit: "CURRENT",
+    ...outcome(),
+  };
+}
+function correct(change: string): CodexDecisionV2 {
+  return {
+    schema_version: 2,
+    job_id: "wf_placeholder",
+    action: "CORRECT_OPUS",
+    summary: "correct",
+    implementation_brief: null,
+    required_changes: [change],
+    risk_level: "medium",
+    fable_query: null,
+    reviewed_commit: "CURRENT",
+    ...outcome(),
+  };
+}
+function consult(fallback: "DISPATCH_OPUS" | "CORRECT_OPUS"): CodexDecisionV2 {
+  return {
+    schema_version: 2,
+    job_id: "wf_placeholder",
+    action: "CONSULT_FABLE",
+    summary: "consult",
+    implementation_brief: null,
+    required_changes: [],
+    risk_level: "low",
+    fable_query: {
+      purpose: "COMPARE_BOUNDED_OPTIONS",
+      question: "A or B?",
+      verification_method: "compare deterministic tests",
+      fallback_if_skipped: { action: fallback, instructions: "safe fallback" },
+    },
+    reviewed_commit: fallback === "CORRECT_OPUS" ? "CURRENT" : null,
+    ...outcome(),
+  };
+}
+function queryValue() {
+  return {
+    purpose: "COMPARE_BOUNDED_OPTIONS" as const,
+    question: "A or B?",
+    verification_method: "compare deterministic tests",
+    fallback_if_skipped: {
+      action: "DISPATCH_OPUS" as const,
+      instructions: "safe fallback",
+    },
+  };
+}
+function checkResult(worktree: string, commit: string): CheckResults {
+  return {
+    job_id: path.basename(worktree),
+    commit,
+    passed: true,
+    checks: CHECKS.map((command) => ({
+      command,
+      passed: true,
+      output: "persisted",
+    })),
+  };
+}

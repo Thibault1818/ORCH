@@ -29,6 +29,10 @@ export interface AdapterCapabilityDescriptor {
   tools: { configurable: boolean; mode: 'enabled' | 'disabled' | 'unknown' };
   resume: { advertised: boolean; enabled: boolean };
   role_compatibility: Record<WorkflowCapabilityRole, { compatible: boolean; reasons: string[] }>;
+  models: {
+    cli_default: boolean;
+    verified: Array<{ id: string; source: 'trusted_catalog' | 'local_detection' }>;
+  };
   supported_options: string[];
   unsupported_options: string[];
   detail: string;

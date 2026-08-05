@@ -552,6 +552,34 @@ interface WorkflowInvocationReceiptV2 {
     timestamp: string;
     result: unknown;
 }
+interface WorkflowLlmAttemptV1 {
+    schema_version: 1;
+    job_id: string;
+    attempt_id: string;
+    invocation_id: string;
+    phase: WorkflowPhase;
+    semantic_role: SemanticRole;
+    provider_role: 'codex' | 'fable' | 'opus';
+    adapter: string;
+    binding_hash: string;
+    roster_revision: number;
+    status: 'started' | 'succeeded' | 'failed';
+    usage_status: 'known' | 'estimated' | 'unknown';
+    usage: {
+        input_chars?: number;
+        output_chars?: number;
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_read?: number;
+        cache_write?: number;
+        duration_ms: number;
+        compactions?: number;
+    } | null;
+    error_category: string | null;
+    error_message: string | null;
+    started_at: string;
+    completed_at: string | null;
+}
 interface WorkflowEffectReceiptV2 {
     schema_version: 2;
     job_id: string;
@@ -1938,13 +1966,13 @@ declare class WorkflowArtifactStore {
     constructor(projectRoot: string);
     createJob(job: WorkflowJobV1, passport: WorkflowPassportV1, sessions: WorkflowSessionsV1): Promise<void>;
     writeArtifact<T>(input: ArtifactWrite<T>): Promise<StoredArtifact<T>>;
-    writeTextArtifact(input: Omit<ArtifactWrite<string>, 'validate'>): Promise<StoredArtifact<string>>;
+    writeTextArtifact(input: Omit<ArtifactWrite<string>, "validate">): Promise<StoredArtifact<string>>;
     readArtifact<T>(jobId: string, name: ArtifactName, workflowRevision?: number): Promise<StoredArtifact<T> | null>;
     readTextArtifact(jobId: string, name: ArtifactName, workflowRevision?: number): Promise<StoredArtifact<string> | null>;
     transition(jobId: string, next: WorkflowPhase, patch?: Partial<WorkflowJobV1>): Promise<WorkflowJobV1>;
     commitTransition(jobId: string, next: WorkflowPhase, patch: Partial<WorkflowJobV1>, passportPatch: Partial<WorkflowPassportV1>): Promise<WorkflowJobV1>;
     patchJob(jobId: string, patch: Partial<WorkflowJobV1>): Promise<WorkflowJobV1>;
-    reserveOperation(jobId: string, phase: WorkflowPhase, operation: NonNullable<WorkflowJobV1['current_operation']>): Promise<boolean>;
+    reserveOperation(jobId: string, phase: WorkflowPhase, operation: NonNullable<WorkflowJobV1["current_operation"]>): Promise<boolean>;
     readJob(jobId: string): Promise<WorkflowJobV1 | null>;
     readPassport(jobId: string): Promise<WorkflowPassportV1 | null>;
     writePassport(value: WorkflowPassportV1): Promise<void>;
@@ -1957,7 +1985,9 @@ declare class WorkflowArtifactStore {
     writeInvocationReceipt(value: WorkflowInvocationReceiptV1): Promise<void>;
     readInvocationReceipt(jobId: string, invocationId: string): Promise<WorkflowInvocationReceiptV1 | null>;
     readInvocationReceipts(jobId: string): Promise<WorkflowInvocationReceiptV1[]>;
-    readEffectReceipt(jobId: string, invocationId: string, kind: WorkflowEffectReceiptV2['kind']): Promise<WorkflowEffectReceiptV2 | null>;
+    writeLlmAttempt(value: WorkflowLlmAttemptV1): Promise<void>;
+    readLlmAttempts(jobId: string): Promise<WorkflowLlmAttemptV1[]>;
+    readEffectReceipt(jobId: string, invocationId: string, kind: WorkflowEffectReceiptV2["kind"]): Promise<WorkflowEffectReceiptV2 | null>;
     writeEffectReceipt(value: WorkflowEffectReceiptV2): Promise<void>;
     listJobs(): Promise<WorkflowJobV1[]>;
     artifactPath(jobId: string, name: ArtifactName, revision: number): string;
@@ -1990,10 +2020,16 @@ interface RoleUsage {
     duration_ms?: number;
     compactions?: number;
 }
+interface RoleAttemptEvent {
+    attempt_key: string;
+    status: "started" | "failed";
+    usage?: RoleUsage;
+    error?: unknown;
+}
 interface RoleResult<T> {
     value: T;
     session_id?: string;
-    session_mode?: 'new' | 'native_resume' | 'passport_handoff' | 'none';
+    session_mode?: "new" | "native_resume" | "passport_handoff" | "none";
     resumed?: boolean;
     resume_failed?: boolean;
     usage?: RoleUsage;
@@ -2002,7 +2038,7 @@ interface FableCallOptions {
     workspace: string;
     model: string;
     max_turns: 1;
-    effort: 'low';
+    effort: "low";
     timeout_ms: number;
     max_input_bytes: number;
     max_output_bytes: number;
@@ -2028,7 +2064,7 @@ interface FableRolePort {
     }>;
 }
 interface OpusRolePort {
-    execute(passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: 'new' | 'native_resume' | 'passport_handoff'): Promise<RoleResult<OpusResult>>;
+    execute(passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: "new" | "native_resume" | "passport_handoff"): Promise<RoleResult<OpusResult>>;
     available(): Promise<{
         available: boolean;
         detail: string;
@@ -2039,9 +2075,9 @@ interface WorkflowRoleResolver {
         available: boolean;
         detail: string;
     }>;
-    decide(binding: RosterAgent, passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null): Promise<RoleResult<CodexDecisionV2>>;
-    execute(binding: RosterAgent, passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: 'new' | 'native_resume' | 'passport_handoff'): Promise<RoleResult<OpusResult>>;
-    consult(binding: RosterAgent, jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions): Promise<RoleResult<FableAdviceV1>>;
+    decide(binding: RosterAgent, passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<CodexDecisionV2>>;
+    execute(binding: RosterAgent, passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: "new" | "native_resume" | "passport_handoff", observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<OpusResult>>;
+    consult(binding: RosterAgent, jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<FableAdviceV1>>;
 }
 interface GitEvidence {
     branch: string;
@@ -2083,13 +2119,13 @@ interface WorkflowRuntimePorts {
 }
 declare class LegacyWorkflowRoleResolver implements WorkflowRoleResolver {
     private readonly ports;
-    constructor(ports: Pick<WorkflowRolePorts, 'codex' | 'fable' | 'opus'>);
+    constructor(ports: Pick<WorkflowRolePorts, "codex" | "fable" | "opus">);
     availability(binding: RosterAgent, role: SemanticRole): Promise<{
         available: boolean;
         detail: string;
     }>;
     decide(_binding: RosterAgent, passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null): Promise<RoleResult<CodexDecisionV2>>;
-    execute(_binding: RosterAgent, passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: 'new' | 'native_resume' | 'passport_handoff'): Promise<RoleResult<OpusResult>>;
+    execute(_binding: RosterAgent, passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: "new" | "native_resume" | "passport_handoff"): Promise<RoleResult<OpusResult>>;
     consult(_binding: RosterAgent, jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions): Promise<RoleResult<FableAdviceV1>>;
 }
 
@@ -2102,6 +2138,7 @@ interface StartWorkflowInput {
     config?: WorkflowConfigOverrides;
     roster?: WorkflowRosterSnapshot;
     job_id?: string;
+    allow_unverified_model?: boolean;
 }
 declare class WorkflowEngine {
     private readonly store;
@@ -2138,8 +2175,8 @@ declare class WorkflowEngine {
     private addArtifact;
     private recordDecision;
     private updatePassport;
-    rotateSession(jobId: string, role: 'codex' | 'opus', reason: string): Promise<void>;
-    rotateBinding(jobId: string, role: SemanticRole, binding: RosterAgent, reason: string): Promise<void>;
+    rotateSession(jobId: string, role: "codex" | "opus", reason: string): Promise<void>;
+    rotateBinding(jobId: string, role: SemanticRole, binding: RosterAgent, reason: string, allowUnverifiedModel?: boolean): Promise<void>;
     private recordRole;
     private syncPassportSessions;
     private fableOptions;
@@ -2150,6 +2187,7 @@ declare class WorkflowEngine {
     private mergeOnce;
     private effect;
     private recordFailedRoleCall;
+    private ensureInterruptedAttempt;
     private invocation;
     private assertAllowedScope;
     private assertJob;
@@ -2416,4 +2454,4 @@ declare function buildFullContainer(context: CliContext): Promise<Container>;
  */
 declare function buildContainer(context: CliContext): Promise<Container>;
 
-export { AGENT_SHOP_TEMPLATES, ARTIFACT_FILES, type AdapterErrorHint, AdapterErrorKind, type AdapterKind, AdapterRegistry, type AdapterTestResult, type Agent, type AgentConfig, type AgentEvent, type AgentLastError, AgentNotFoundError, AgentService, type AgentShopTemplate, type AgentStats, type AgentStatus, type AgentUsage, type ApprovalPolicy, type ArtifactReference, type BindingRotation, type CheckResults, type ClipboardContentType, type ClipboardImage, type CodexAction, type CodexDecisionStage, type CodexDecisionV2, type CodexRolePort, type ConsultationOrigin, type ConsultationStatus, type Container, type CreateAgentInput, type CreateGoalInput, type CreateTaskInput, DEFAULT_WORKFLOW_CONFIG, ERROR_HINTS, EventBus, type EventPayload, type ExecuteParams, type FableAdviceV1, type FableFallbackReason, type FableFallbackRecordV1, type FableFallbackV1, type FablePurpose, type FableQueryV1, type FableRolePort, type FailurePhase, type Goal, GoalHasPendingTasksError, type GoalOrchestrationPhase, type GoalOrchestrationState, type GoalStatus, type GoalTaskRole, type IAgentAdapter, type ISkillLoader, LegacyWorkflowRoleResolver, type LightContainer, MODEL_TIER_MAP, type ModelTier, NotInitializedError, type OpusResult, type OpusRolePort, Orchestrator, type OrchestratorConfig, type OrchestratorEvent, type OrchestratorEventType, type OrchestratorState, OrchestryError, type PersistedFailure, type ProducingRole, type ProjectConfig, ROLE_PERMISSIONS, type ReasoningEffort, type RetryEntry, type RolePermissions, type RoleProfile, type RosterAgent, type RosterInput, type RosterProfileSnapshot, type Run, type RunEvent, type RunEventType, RunService, type RunStatus, type RunningEntry, SEMANTIC_ROLES, SUPPORTED_ADAPTERS, type SameAsSupervisor, type SchedulingConfig, type SemanticRole, type SessionMode, type SessionRotation, SkillLoader, type StartWorkflowInput, type Task, TaskNotFoundError, type TaskProof, TaskService, type TaskStatus, type TokenUsage, type ValidatedWorkflowPassportV2, WORKFLOW_PHASE_TRANSITIONS, WORKFLOW_SCHEMA_VERSION, type WorkflowArtifactMetadataV1, type WorkflowArtifactMetadataV2, WorkflowArtifactStore, type WorkflowConfig, type WorkflowConfigOverrides, type WorkflowDecision, type WorkflowEffectReceiptV2, WorkflowEngine, type WorkflowEventV1, type WorkflowEventV2, type WorkflowGitPort, type WorkflowInvocationReceiptV1, type WorkflowInvocationReceiptV2, type WorkflowJobV1, type WorkflowJobV2, type WorkflowMode, type WorkflowPassportV1, type WorkflowPassportV2, type WorkflowPhase, type WorkflowRolePorts, type WorkflowRoleResolver, type WorkflowRosterSnapshot, type WorkflowRuntimePorts, type WorkflowSessionsV1, type WorkflowSessionsV2, WorkspaceError, type WorkspaceMode, buildContainer, buildFullContainer, buildLightContainer, canTransition, canTransitionWorkflow, classifyAdapterError, createRosterSnapshot, createTokenUsage, defaultModelForAdapter, detectClipboardType, discoverDeterministicChecks, getClipboardImage, getShopTemplateByKey, hashCanonical, hashRosterAgent, hashRosterSnapshot, isAdapterKind, isBlocked, isClipboardToolAvailable, isDispatchable, isMcpSkill, isModelTier, isTerminal, isTerminalWorkflowPhase, legacyRosterSnapshot, resolveFailureStatus, resolveModel, templateToAgentInput, transitionWorkflow, validateCheckResults, validateCodexDecision, validateDeterministicCheckCommands, validateExplicitChecks, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult, validateRosterAgent, validateRosterSnapshot };
+export { AGENT_SHOP_TEMPLATES, ARTIFACT_FILES, type AdapterErrorHint, AdapterErrorKind, type AdapterKind, AdapterRegistry, type AdapterTestResult, type Agent, type AgentConfig, type AgentEvent, type AgentLastError, AgentNotFoundError, AgentService, type AgentShopTemplate, type AgentStats, type AgentStatus, type AgentUsage, type ApprovalPolicy, type ArtifactReference, type BindingRotation, type CheckResults, type ClipboardContentType, type ClipboardImage, type CodexAction, type CodexDecisionStage, type CodexDecisionV2, type CodexRolePort, type ConsultationOrigin, type ConsultationStatus, type Container, type CreateAgentInput, type CreateGoalInput, type CreateTaskInput, DEFAULT_WORKFLOW_CONFIG, ERROR_HINTS, EventBus, type EventPayload, type ExecuteParams, type FableAdviceV1, type FableFallbackReason, type FableFallbackRecordV1, type FableFallbackV1, type FablePurpose, type FableQueryV1, type FableRolePort, type FailurePhase, type Goal, GoalHasPendingTasksError, type GoalOrchestrationPhase, type GoalOrchestrationState, type GoalStatus, type GoalTaskRole, type IAgentAdapter, type ISkillLoader, LegacyWorkflowRoleResolver, type LightContainer, MODEL_TIER_MAP, type ModelTier, NotInitializedError, type OpusResult, type OpusRolePort, Orchestrator, type OrchestratorConfig, type OrchestratorEvent, type OrchestratorEventType, type OrchestratorState, OrchestryError, type PersistedFailure, type ProducingRole, type ProjectConfig, ROLE_PERMISSIONS, type ReasoningEffort, type RetryEntry, type RolePermissions, type RoleProfile, type RosterAgent, type RosterInput, type RosterProfileSnapshot, type Run, type RunEvent, type RunEventType, RunService, type RunStatus, type RunningEntry, SEMANTIC_ROLES, SUPPORTED_ADAPTERS, type SameAsSupervisor, type SchedulingConfig, type SemanticRole, type SessionMode, type SessionRotation, SkillLoader, type StartWorkflowInput, type Task, TaskNotFoundError, type TaskProof, TaskService, type TaskStatus, type TokenUsage, type ValidatedWorkflowPassportV2, WORKFLOW_PHASE_TRANSITIONS, WORKFLOW_SCHEMA_VERSION, type WorkflowArtifactMetadataV1, type WorkflowArtifactMetadataV2, WorkflowArtifactStore, type WorkflowConfig, type WorkflowConfigOverrides, type WorkflowDecision, type WorkflowEffectReceiptV2, WorkflowEngine, type WorkflowEventV1, type WorkflowEventV2, type WorkflowGitPort, type WorkflowInvocationReceiptV1, type WorkflowInvocationReceiptV2, type WorkflowJobV1, type WorkflowJobV2, type WorkflowLlmAttemptV1, type WorkflowMode, type WorkflowPassportV1, type WorkflowPassportV2, type WorkflowPhase, type WorkflowRolePorts, type WorkflowRoleResolver, type WorkflowRosterSnapshot, type WorkflowRuntimePorts, type WorkflowSessionsV1, type WorkflowSessionsV2, WorkspaceError, type WorkspaceMode, buildContainer, buildFullContainer, buildLightContainer, canTransition, canTransitionWorkflow, classifyAdapterError, createRosterSnapshot, createTokenUsage, defaultModelForAdapter, detectClipboardType, discoverDeterministicChecks, getClipboardImage, getShopTemplateByKey, hashCanonical, hashRosterAgent, hashRosterSnapshot, isAdapterKind, isBlocked, isClipboardToolAvailable, isDispatchable, isMcpSkill, isModelTier, isTerminal, isTerminalWorkflowPhase, legacyRosterSnapshot, resolveFailureStatus, resolveModel, templateToAgentInput, transitionWorkflow, validateCheckResults, validateCodexDecision, validateDeterministicCheckCommands, validateExplicitChecks, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult, validateRosterAgent, validateRosterSnapshot };

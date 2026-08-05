@@ -57,11 +57,16 @@ The dedicated workflow is organized by semantic role: the **Supervisor** plans a
 orch workflow doctor
 
 # Run only inside a project whose discovered scripts you have reviewed and trust.
-# In a TTY, start performs check discovery, then opens the configuration wizard.
-orch workflow start "Describe the change you want"
+# In a TTY, start asks for the objective through stdin, opens the wizard,
+# prints the exact roster/check summary, then asks Start this workflow? [y/N].
+orch workflow start
 
-# Exact noninteractive launch with an explicitly trusted check.
-orch workflow start "Describe the change you want" --yes --check "npm run test"
+# Exact noninteractive launch from stdin or a reviewed regular file.
+printf '%s\n' "Describe the change you want" | orch workflow start --yes --check "npm run test"
+orch workflow start --objective-file ./objective.txt --yes --check "npm run test"
+
+# Validate and print the summary without confirmation, job creation, or model call.
+printf '%s\n' "Describe the change you want" | orch workflow start --dry-run
 
 # Every noninteractive launch that is not a dry-run requires --yes.
 
@@ -74,7 +79,7 @@ orch workflow artifacts <job-id>
 orch workflow cancel <job-id>
 ```
 
-The TTY wizard selects a preset, mode, semantic-role bindings, Adviser budget, and trusted checks, then prints the resolved launch summary before execution. The roster snapshot is immutable after launch; to change a binding, pause at a safe boundary and run `orch workflow binding-rotate <job-id> <role> --adapter <cli> --model <model> --effort <level> --reason "..."`. Status reports the initial and active roster and hashes, roster revision, rotation history, phase/current role, per-role usage and tokens, remaining Adviser budget, checks, and blockers. Canonical artifacts and session references live under `.orchestry/workflows/<job-id>/` with restrictive permissions and secret redaction.
+The TTY wizard selects a preset, mode, semantic-role bindings, Adviser budget, and trusted checks. The standard path offers only locally verified/trusted-catalog profiles or `CLI default`; CLI default omits `--model`. Custom values require `--allow-unverified-model`, are marked `UNVERIFIED`, and still require final confirmation unless `--yes` was explicit. A negative or empty confirmation creates no job or worktree and makes no model call. The roster snapshot is immutable after launch; to change a binding, pause at a safe boundary and run `orch workflow binding-rotate <job-id> <role> --adapter <cli> --model <model> --effort <level> --reason "..."`. Status reports exact attempts, successes, failures, durations, and known/estimated/unknown tokens by semantic role and adapter; legacy provider aggregates are shown separately and never added to modern receipts. Canonical artifacts and session references live under `.orchestry/workflows/<job-id>/` with restrictive permissions and secret redaction. Grok and Antigravity workflow transports remain disabled because safe stdin behavior has not been empirically proven; fake CLI tests do not establish provider compatibility.
 
 <br/>
 
@@ -166,7 +171,7 @@ $ orch run --all --watch
 
 ## Start coordinating agents in 30 seconds
 
-Install the fork from the pinned Git commit shown above. ORCH auto-initializes and opens the TUI dashboard.
+Install the fork from the pinned Git commit shown above, then run `orch init` in the intended project. Installation does not initialize a project or open the TUI; run `orch tui` explicitly when wanted.
 
 ### Claude Code integration
 
@@ -176,7 +181,7 @@ Installation never changes user configuration. To deliberately register the opti
 
 ```bash
 orch workflow doctor
-orch workflow start "Describe the implementation" --mode direct --yes --check "npm run test"
+printf '%s\n' "Describe the implementation" | orch workflow start --mode direct --yes --check "npm run test"
 orch workflow status <job-id>
 ```
 
@@ -187,7 +192,7 @@ workflow_launch:
   default_preset: direct-review
   presets:
     direct-review:
-      supervisor: { adapter: codex, model: codex, effort: high }
+      supervisor: { adapter: codex, model: "", effort: high } # CLI default; omit --model
       implementer: { adapter: claude, model: opus, effort: high }
       adviser: null
       reviewer: supervisor

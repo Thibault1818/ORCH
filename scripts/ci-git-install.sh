@@ -117,7 +117,7 @@ git -C "$PROJECT" commit -m "Initialize deterministic fixture"
 (
   cd "$PROJECT"
   if ! orch workflow doctor > "$DOCTOR_FILE"; then cat "$DOCTOR_FILE" >&2; exit 1; fi
-  orch workflow start "PROMPT_SENTINEL_PLAN3" --yes --mode direct --adviser none --max-adviser-calls 0 > "$SANDBOX/start.txt"
+  printf '%s\n' "PROMPT_SENTINEL_PLAN3" | orch workflow start --yes --mode direct --adviser none --max-adviser-calls 0 > "$SANDBOX/start.txt"
   if ! orch workflow status > "$STATUS_FILE"; then cat "$STATUS_FILE" >&2; exit 1; fi
 )
 
@@ -128,9 +128,9 @@ const calls = fs.readFileSync(process.env.ORCH_FAKE_LOG, 'utf8').trim().split('\
 const invocations = calls.filter((call) => !call.argv.includes('--version') && !call.argv.includes('--help'));
 if (invocations.length !== 3) throw new Error(`Expected three workflow model-boundary calls, got ${invocations.length}`);
 const expected = [
-  { command: 'codex', argv: ['exec', '--json', '--sandbox', 'read-only', '--model', 'codex', '-c', 'model_reasoning_effort=high', '-'] },
+  { command: 'codex', argv: ['exec', '--json', '--sandbox', 'read-only', '-c', 'model_reasoning_effort=high', '-'] },
   { command: 'claude', argv: ['--print', '--output-format', 'stream-json', '--max-turns', '50', '--verbose', '--model', 'opus', '--effort', 'high'] },
-  { command: 'codex', argv: ['exec', '--json', '--sandbox', 'read-only', '--model', 'codex', '-c', 'model_reasoning_effort=high', '-'] },
+  { command: 'codex', argv: ['exec', '--json', '--sandbox', 'read-only', '-c', 'model_reasoning_effort=high', '-'] },
 ];
 for (let index = 0; index < expected.length; index++) {
   if (invocations[index].command !== expected[index].command || JSON.stringify(invocations[index].argv) !== JSON.stringify(expected[index].argv)) throw new Error(`Unexpected ${['Supervisor', 'Implementer', 'Reviewer'][index]} invocation: ${JSON.stringify(invocations[index])}`);

@@ -5,9 +5,9 @@ export { createTokenUsage } from './chunk-UG72A2JI.js';
 import { InvalidArgumentsError, TaskNotFoundError, InvalidTransitionError, AgentNotFoundError, OrchestryError, TeamNotFoundError, GoalNotFoundError, GoalHasPendingTasksError } from './chunk-Z7JNYNWE.js';
 export { AdapterErrorKind, AgentNotFoundError, ERROR_HINTS, GoalHasPendingTasksError, NotInitializedError, OrchestryError, TaskNotFoundError, WorkspaceError, classifyAdapterError } from './chunk-Z7JNYNWE.js';
 import { GOAL_LEAD_LABEL, GOAL_REVIEW_LABEL, AUTONOMOUS_LABEL } from './chunk-YNPZFT75.js';
-export { DEFAULT_WORKFLOW_CONFIG, LegacyWorkflowRoleResolver, WORKFLOW_SCHEMA_VERSION, WorkflowEngine, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult } from './chunk-HB4X2WT2.js';
+export { DEFAULT_WORKFLOW_CONFIG, LegacyWorkflowRoleResolver, WORKFLOW_SCHEMA_VERSION, WorkflowEngine, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult } from './chunk-AVTBJRUZ.js';
 export { discoverDeterministicChecks, validateDeterministicCheckCommands, validateExplicitChecks } from './chunk-D6YHC656.js';
-export { ARTIFACT_FILES, ROLE_PERMISSIONS, SEMANTIC_ROLES, WORKFLOW_PHASE_TRANSITIONS, WorkflowArtifactStore, canTransitionWorkflow, createRosterSnapshot, hashCanonical, hashRosterAgent, hashRosterSnapshot, isTerminalWorkflowPhase, legacyRosterSnapshot, transitionWorkflow, validateRosterAgent, validateRosterSnapshot } from './chunk-TN5K7UDO.js';
+export { ARTIFACT_FILES, ROLE_PERMISSIONS, SEMANTIC_ROLES, WORKFLOW_PHASE_TRANSITIONS, WorkflowArtifactStore, canTransitionWorkflow, createRosterSnapshot, hashCanonical, hashRosterAgent, hashRosterSnapshot, isTerminalWorkflowPhase, legacyRosterSnapshot, transitionWorkflow, validateRosterAgent, validateRosterSnapshot } from './chunk-3R3KVGGX.js';
 export { AdapterRegistry } from './chunk-6DWHQPTE.js';
 export { SkillLoader } from './chunk-Y5P4NXTL.js';
 import { ensureDir, readYaml, writeYaml, readJson, writeJson, listFiles, appendJsonl, readJsonl, readJsonlTail, closeAppendHandle, pathExists } from './chunk-54K3JU53.js';
@@ -2816,9 +2816,9 @@ async function buildFullContainer(context) {
     import('./skill-loader-4GSQSW7Q.js'),
     import('./orchestrator-OTG2FJWD.js'),
     import('./doctor-service-WPXAUB6S.js'),
-    import('./artifact-store-FH2I5WP2.js'),
-    import('./engine-UU4ZT7LM.js'),
-    import('./native-adapters-22NLSRIR.js')
+    import('./artifact-store-WCXCFJG2.js'),
+    import('./engine-5YIGC72H.js'),
+    import('./native-adapters-CN3U5NJP.js')
   ]);
   const processManager = new ProcessManager();
   const templateEngine = new LiquidTemplateEngine();

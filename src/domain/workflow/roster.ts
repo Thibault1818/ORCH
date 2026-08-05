@@ -108,7 +108,7 @@ function agent(value: unknown, label: string): RosterAgent {
   if (!['low', 'medium', 'high'].includes(profile.effort as string)) throw new Error(`${label}.profile.effort is invalid`);
   if (!Number.isSafeInteger(profile.max_turns) || (profile.max_turns as number) < 1) throw new Error(`${label}.profile.max_turns is invalid`);
   if (!Number.isSafeInteger(profile.timeout_ms) || (profile.timeout_ms as number) < 1) throw new Error(`${label}.profile.timeout_ms is invalid`);
-  return { adapter: identifier(item.adapter, `${label}.adapter`), profile: { name: identifier(profile.name, `${label}.profile.name`), model: identifier(profile.model, `${label}.profile.model`), effort: profile.effort as RosterProfileSnapshot['effort'], max_turns: profile.max_turns as number, timeout_ms: profile.timeout_ms as number } };
+  return { adapter: identifier(item.adapter, `${label}.adapter`), profile: { name: identifier(profile.name, `${label}.profile.name`), model: model(profile.model, `${label}.profile.model`), effort: profile.effort as RosterProfileSnapshot['effort'], max_turns: profile.max_turns as number, timeout_ms: profile.timeout_ms as number } };
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
@@ -125,6 +125,11 @@ function exact(value: Record<string, unknown>, keys: string[], label: string): v
 function identifier(value: unknown, label: string): string {
   if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(value)) throw new Error(`${label} is invalid`);
   return value;
+}
+
+function model(value: unknown, label: string): string {
+  if (value === '') return value;
+  return identifier(value, label);
 }
 
 function canonicalJson(value: unknown): string {

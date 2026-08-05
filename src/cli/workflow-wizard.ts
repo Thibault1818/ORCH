@@ -12,6 +12,7 @@ export interface WorkflowWizardInput {
   presets?: Record<string, WorkflowLaunchPreset>;
   capabilities: WorkflowCapabilities;
   discovered_checks: string[];
+  allow_unverified_model?: boolean;
 }
 
 export interface WorkflowWizardResult {
@@ -29,16 +30,16 @@ export async function runWorkflowWizard(input: WorkflowWizardInput, prompt: Work
   const preset = await chooseText(prompt, 'Preset', input.preset_names, input.preset.name);
   const defaults = input.presets?.[preset] ?? input.preset;
   const mode = await chooseText(prompt, 'Mode', ['adaptive', 'direct'] as const, defaults.mode);
-  const supervisor = await chooseAgent(prompt, 'Supervisor', 'supervisor', input.capabilities, defaults.supervisor);
-  const implementer = await chooseAgent(prompt, 'Implementer', 'implementer', input.capabilities, defaults.implementer);
+  const supervisor = await chooseAgent(prompt, 'Supervisor', 'supervisor', input.capabilities, defaults.supervisor, input.allow_unverified_model);
+  const implementer = await chooseAgent(prompt, 'Implementer', 'implementer', input.capabilities, defaults.implementer, input.allow_unverified_model);
   const adviser = mode === 'direct'
     ? null
-    : await chooseOptionalAgent(prompt, 'Adviser', 'adviser', input.capabilities, defaults.adviser);
+    : await chooseOptionalAgent(prompt, 'Adviser', 'adviser', input.capabilities, defaults.adviser, input.allow_unverified_model);
   const reviewerDefault = defaults.reviewer === 'supervisor' ? 'supervisor' : defaults.reviewer.adapter;
   const reviewerChoice = await chooseText(prompt, 'Reviewer', ['supervisor', ...compatibleAdapters('reviewer', input.capabilities)] as const, reviewerDefault);
   const reviewer = reviewerChoice === 'supervisor'
     ? 'supervisor' as const
-    : await configureAgent(prompt, 'Reviewer', reviewerChoice, defaults.reviewer === 'supervisor' ? defaults.supervisor : defaults.reviewer);
+    : await configureAgent(prompt, 'Reviewer', reviewerChoice, input.capabilities, defaults.reviewer === 'supervisor' ? defaults.supervisor : defaults.reviewer, input.allow_unverified_model);
   const maxDefault: 0 | 1 = adviser ? defaults.max_adviser_calls || 1 : 0;
   const max = adviser ? await chooseText(prompt, 'Maximum adviser calls', ['0', '1'] as const, String(maxDefault)) : '0';
   const checks = await chooseChecks(prompt, input.discovered_checks);
@@ -59,23 +60,30 @@ function capabilityHelp(role: WorkflowCapabilityRole, capabilities: WorkflowCapa
     .map((item) => `${item.adapter}: ${item.role_compatibility[role].reasons[0] ?? 'incompatible'}`).join('; ');
 }
 
-async function chooseAgent(prompt: WorkflowPrompt, label: string, role: WorkflowCapabilityRole, capabilities: WorkflowCapabilities, fallback: WorkflowPresetAgent): Promise<WorkflowPresetAgent> {
+async function chooseAgent(prompt: WorkflowPrompt, label: string, role: WorkflowCapabilityRole, capabilities: WorkflowCapabilities, fallback: WorkflowPresetAgent, allowUnverified = false): Promise<WorkflowPresetAgent> {
   const choices = compatibleAdapters(role, capabilities);
   if (choices.length === 0) throw new Error(`No compatible CLI is available for ${label}`);
   const help = capabilityHelp(role, capabilities);
   const adapter = await chooseText(prompt, `${label} CLI${help ? ` (unavailable: ${help})` : ''}`, choices, choices.includes(fallback.adapter) ? fallback.adapter : choices[0]!);
-  return configureAgent(prompt, label, adapter, fallback);
+  return configureAgent(prompt, label, adapter, capabilities, fallback, allowUnverified);
 }
 
-async function chooseOptionalAgent(prompt: WorkflowPrompt, label: string, role: WorkflowCapabilityRole, capabilities: WorkflowCapabilities, fallback: WorkflowPresetAgent | null): Promise<WorkflowPresetAgent | null> {
+async function chooseOptionalAgent(prompt: WorkflowPrompt, label: string, role: WorkflowCapabilityRole, capabilities: WorkflowCapabilities, fallback: WorkflowPresetAgent | null, allowUnverified = false): Promise<WorkflowPresetAgent | null> {
   const compatible = compatibleAdapters(role, capabilities);
   const help = capabilityHelp(role, capabilities);
   const adapter = await chooseText(prompt, `${label} CLI${help ? ` (unavailable: ${help})` : ''}`, ['none', ...compatible], fallback?.adapter ?? 'none');
-  return adapter === 'none' ? null : configureAgent(prompt, label, adapter, fallback ?? { adapter, model: adapter, effort: 'low' });
+  return adapter === 'none' ? null : configureAgent(prompt, label, adapter, capabilities, fallback ?? { adapter, model: '', effort: 'low' }, allowUnverified);
 }
 
-async function configureAgent(prompt: WorkflowPrompt, label: string, adapter: string, fallback: WorkflowPresetAgent): Promise<WorkflowPresetAgent> {
-  const model = await boundedValue(prompt, `${label} model/profile [${fallback.model}]: `, fallback.model);
+async function configureAgent(prompt: WorkflowPrompt, label: string, adapter: string, capabilities: WorkflowCapabilities, fallback: WorkflowPresetAgent, allowUnverified = false): Promise<WorkflowPresetAgent> {
+  const descriptor = Object.values(capabilities).find((item) => item.adapter === adapter);
+  if (!descriptor) throw new Error(`No capability descriptor exists for ${adapter}`);
+  const known = descriptor.models.verified.map((item) => item.id);
+  const choices = [...(descriptor.models.cli_default ? ['CLI default'] : []), ...known];
+  if (allowUnverified) choices.push('Custom (UNVERIFIED)');
+  const fallbackChoice = fallback.model ? (known.includes(fallback.model) ? fallback.model : allowUnverified ? 'Custom (UNVERIFIED)' : choices[0]!) : 'CLI default';
+  const selected = await chooseText(prompt, `${label} model/profile`, choices, fallbackChoice);
+  const model = selected === 'CLI default' ? '' : selected === 'Custom (UNVERIFIED)' ? await boundedValue(prompt, `${label} custom model/profile: `, fallback.model) : selected;
   const effort = await chooseText(prompt, `${label} effort`, ['low', 'medium', 'high'] as const, fallback.effort);
   return { adapter, model, effort: effort as WorkflowPresetEffort };
 }

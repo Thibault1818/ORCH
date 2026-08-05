@@ -94,7 +94,7 @@ function agent(value, label) {
   if (!["low", "medium", "high"].includes(profile2.effort)) throw new Error(`${label}.profile.effort is invalid`);
   if (!Number.isSafeInteger(profile2.max_turns) || profile2.max_turns < 1) throw new Error(`${label}.profile.max_turns is invalid`);
   if (!Number.isSafeInteger(profile2.timeout_ms) || profile2.timeout_ms < 1) throw new Error(`${label}.profile.timeout_ms is invalid`);
-  return { adapter: identifier(item.adapter, `${label}.adapter`), profile: { name: identifier(profile2.name, `${label}.profile.name`), model: identifier(profile2.model, `${label}.profile.model`), effort: profile2.effort, max_turns: profile2.max_turns, timeout_ms: profile2.timeout_ms } };
+  return { adapter: identifier(item.adapter, `${label}.adapter`), profile: { name: identifier(profile2.name, `${label}.profile.name`), model: model(profile2.model, `${label}.profile.model`), effort: profile2.effort, max_turns: profile2.max_turns, timeout_ms: profile2.timeout_ms } };
 }
 function object(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
@@ -108,6 +108,10 @@ function exact(value, keys, label) {
 function identifier(value, label) {
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(value)) throw new Error(`${label} is invalid`);
   return value;
+}
+function model(value, label) {
+  if (value === "") return value;
+  return identifier(value, label);
 }
 function canonicalJson(value) {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -167,7 +171,7 @@ function config(value) {
 function profile(value, label) {
   const o = record(value, label);
   exact2(o, ["model", "effort", "max_turns", "timeout_ms", "permission_mode"], label);
-  return { model: nonEmpty(o.model, `${label}.model`), effort: enumeration(o.effort, ["low", "medium", "high"], `${label}.effort`), max_turns: integer(o.max_turns, `${label}.max_turns`, 1), timeout_ms: integer(o.timeout_ms, `${label}.timeout_ms`, 1), permission_mode: enumeration(o.permission_mode, ["read_only", "worktree"], `${label}.permission_mode`) };
+  return { model: model2(o.model, `${label}.model`), effort: enumeration(o.effort, ["low", "medium", "high"], `${label}.effort`), max_turns: integer(o.max_turns, `${label}.max_turns`, 1), timeout_ms: integer(o.timeout_ms, `${label}.timeout_ms`, 1), permission_mode: enumeration(o.permission_mode, ["read_only", "worktree"], `${label}.permission_mode`) };
 }
 function artifact(value, label) {
   const o = record(value, label);
@@ -245,6 +249,12 @@ function string(value, label) {
 function nonEmpty(value, label) {
   const result = string(value, label);
   if (!result.trim()) throw new Error(`${label} must not be empty`);
+  return result;
+}
+function model2(value, label) {
+  const result = string(value, label);
+  if (result === "") return result;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(result)) throw new Error(`${label} is invalid`);
   return result;
 }
 function nullableString(value, label) {
@@ -337,61 +347,136 @@ var WorkflowArtifactStore = class {
     const validatedPassport = validateWorkflowPassport(passport);
     const validatedSessions = validateWorkflowSessions(sessions);
     const id2 = safeId(validatedJob.job_id);
-    if (validatedPassport.job_id !== id2 || validatedSessions.job_id !== id2) throw new Error("Workflow job_id mismatch");
-    if (validatedPassport.roster_revision !== 1 || validatedPassport.binding_rotation_history.length !== 0 || validatedPassport.active_roster_hash !== validatedPassport.roster_hash || canonicalJson2(validatedPassport.active_roster) !== canonicalJson2(validatedPassport.roster)) throw new Error("New workflow must begin with the immutable initial roster as active revision 1");
-    if (Buffer.byteLength(JSON.stringify(validatedPassport)) > validatedPassport.config.passport_max_bytes) throw new Error("Workflow passport exceeded configured maximum");
+    if (validatedPassport.job_id !== id2 || validatedSessions.job_id !== id2)
+      throw new Error("Workflow job_id mismatch");
+    if (validatedPassport.roster_revision !== 1 || validatedPassport.binding_rotation_history.length !== 0 || validatedPassport.active_roster_hash !== validatedPassport.roster_hash || canonicalJson2(validatedPassport.active_roster) !== canonicalJson2(validatedPassport.roster))
+      throw new Error(
+        "New workflow must begin with the immutable initial roster as active revision 1"
+      );
+    if (Buffer.byteLength(JSON.stringify(validatedPassport)) > validatedPassport.config.passport_max_bytes)
+      throw new Error("Workflow passport exceeded configured maximum");
     await this.secureDir(id2);
-    if (await this.readJob(id2)) throw new Error(`Workflow job already exists: ${id2}`);
-    await Promise.all([this.write(this.file(id2, "job.json"), validatedJob), this.write(this.file(id2, "passport.json"), validatedPassport), this.write(this.file(id2, `passports/passport-${String(validatedPassport.passport_revision).padStart(6, "0")}.json`), validatedPassport), this.write(this.file(id2, "sessions.json"), validatedSessions)]);
+    if (await this.readJob(id2))
+      throw new Error(`Workflow job already exists: ${id2}`);
+    await Promise.all([
+      this.write(this.file(id2, "job.json"), validatedJob),
+      this.write(this.file(id2, "passport.json"), validatedPassport),
+      this.write(
+        this.file(
+          id2,
+          `passports/passport-${String(validatedPassport.passport_revision).padStart(6, "0")}.json`
+        ),
+        validatedPassport
+      ),
+      this.write(this.file(id2, "sessions.json"), validatedSessions)
+    ]);
   }
   async writeArtifact(input) {
     const id2 = safeId(input.job_id);
     return this.lock(id2, async () => {
       const job = await this.requiredJob(id2);
-      if (!input.invocation_id) throw new Error("Artifact invocation_id is required");
-      const prior = await this.artifactForInvocation(id2, input.name, input.invocation_id);
+      if (!input.invocation_id)
+        throw new Error("Artifact invocation_id is required");
+      const prior = await this.artifactForInvocation(
+        id2,
+        input.name,
+        input.invocation_id
+      );
       if (prior) {
-        if (job.artifact_revision < prior.metadata.revision) await this.write(this.file(id2, "job.json"), { ...job, artifact_revision: prior.metadata.revision, latest_artifact_hash: prior.metadata.artifact_hash, updated_at: prior.metadata.timestamp });
+        if (job.artifact_revision < prior.metadata.revision)
+          await this.write(this.file(id2, "job.json"), {
+            ...job,
+            artifact_revision: prior.metadata.revision,
+            latest_artifact_hash: prior.metadata.artifact_hash,
+            updated_at: prior.metadata.timestamp
+          });
         return prior;
       }
-      if (input.revision !== job.artifact_revision + 1) throw new Error(`Stale artifact revision: expected ${job.artifact_revision + 1}, received ${input.revision}`);
-      if (input.parent_artifact_hash !== job.latest_artifact_hash) throw new Error("Stale parent_artifact_hash");
-      if (input.parent_artifact_hash !== null && !SHA256.test(input.parent_artifact_hash)) throw new Error("Invalid parent_artifact_hash");
-      if (job.phase !== input.phase) throw new Error(`Artifact phase ${input.phase} does not match job phase ${job.phase}`);
+      if (input.revision !== job.artifact_revision + 1)
+        throw new Error(
+          `Stale artifact revision: expected ${job.artifact_revision + 1}, received ${input.revision}`
+        );
+      if (input.parent_artifact_hash !== job.latest_artifact_hash)
+        throw new Error("Stale parent_artifact_hash");
+      if (input.parent_artifact_hash !== null && !SHA256.test(input.parent_artifact_hash))
+        throw new Error("Invalid parent_artifact_hash");
+      if (job.phase !== input.phase)
+        throw new Error(
+          `Artifact phase ${input.phase} does not match job phase ${job.phase}`
+        );
       const payload = input.validate(removeForbidden(input.payload));
       const timestamp2 = iso(input.timestamp ?? (/* @__PURE__ */ new Date()).toISOString());
       const artifactHash = hashCanonical(payload);
-      const filename = artifactFilename(input.name, job.revision, job.opus_iteration, input.revision);
-      const stored = { metadata: { schema_version: 2, job_id: id2, artifact_name: input.name, filename, phase: input.phase, workflow_revision: job.revision, iteration: job.opus_iteration, revision: input.revision, invocation_id: input.invocation_id, producing_role: input.producing_role, parent_artifact_hash: input.parent_artifact_hash, timestamp: timestamp2, artifact_hash: artifactHash }, payload };
+      const filename = artifactFilename(
+        input.name,
+        job.revision,
+        job.opus_iteration,
+        input.revision
+      );
+      const stored = {
+        metadata: {
+          schema_version: 2,
+          job_id: id2,
+          artifact_name: input.name,
+          filename,
+          phase: input.phase,
+          workflow_revision: job.revision,
+          iteration: job.opus_iteration,
+          revision: input.revision,
+          invocation_id: input.invocation_id,
+          producing_role: input.producing_role,
+          parent_artifact_hash: input.parent_artifact_hash,
+          timestamp: timestamp2,
+          artifact_hash: artifactHash
+        },
+        payload
+      };
       const file = path.join(this.root, id2, "artifacts", filename);
       try {
         await fs.access(file);
-        throw new Error(`Refusing to overwrite immutable artifact: ${filename}`);
+        throw new Error(
+          `Refusing to overwrite immutable artifact: ${filename}`
+        );
       } catch (error) {
         if (error.code !== "ENOENT") throw error;
       }
       await this.write(file, stored);
-      await this.write(this.file(id2, "job.json"), { ...job, artifact_revision: input.revision, latest_artifact_hash: artifactHash, updated_at: timestamp2 });
+      await this.write(this.file(id2, "job.json"), {
+        ...job,
+        artifact_revision: input.revision,
+        latest_artifact_hash: artifactHash,
+        updated_at: timestamp2
+      });
       return stored;
     });
   }
   async writeTextArtifact(input) {
-    return this.writeArtifact({ ...input, validate: (value) => {
-      if (typeof value !== "string" || !value.trim()) throw new Error(`${input.name} must be non-empty text`);
-      return sanitizeText(value);
-    } });
+    return this.writeArtifact({
+      ...input,
+      validate: (value) => {
+        if (typeof value !== "string" || !value.trim())
+          throw new Error(`${input.name} must be non-empty text`);
+        return sanitizeText(value);
+      }
+    });
   }
   async readArtifact(jobId, name, workflowRevision) {
     const id2 = safeId(jobId);
     await this.requiredJob(id2);
     const value = await this.latestArtifact(id2, name, workflowRevision);
     if (!value) return null;
-    if (value.metadata.job_id !== id2 || hashCanonical(value.payload) !== value.metadata.artifact_hash) throw new Error("Workflow artifact integrity check failed");
+    if (value.metadata.job_id !== id2 || hashCanonical(value.payload) !== value.metadata.artifact_hash)
+      throw new Error("Workflow artifact integrity check failed");
     return value;
   }
   async readTextArtifact(jobId, name, workflowRevision) {
-    const value = await this.readArtifact(jobId, name, workflowRevision);
-    if (value && typeof value.payload !== "string") throw new Error("Workflow text artifact is not text");
+    const value = await this.readArtifact(
+      jobId,
+      name,
+      workflowRevision
+    );
+    if (value && typeof value.payload !== "string")
+      throw new Error("Workflow text artifact is not text");
     return value;
   }
   async transition(jobId, next, patch = {}) {
@@ -406,14 +491,50 @@ var WorkflowArtifactStore = class {
       const job = await this.requiredJob(id2);
       const passport = await this.readPassport(id2);
       if (!passport) throw new Error(`Workflow passport not found: ${id2}`);
-      if (!canTransitionWorkflow(job.phase, next)) throw new Error(`Invalid workflow phase transition: ${job.phase} -> ${next}`);
+      if (!canTransitionWorkflow(job.phase, next))
+        throw new Error(
+          `Invalid workflow phase transition: ${job.phase} -> ${next}`
+        );
       const now = (/* @__PURE__ */ new Date()).toISOString();
-      const updatedJob = validateWorkflowJob({ ...job, ...patch, schema_version: 2, job_id: id2, phase: next, revision: job.revision + 1, updated_at: now });
-      const updatedPassport = validateWorkflowPassport({ ...passport, ...passportPatch, schema_version: 2, job_id: id2, passport_revision: passport.passport_revision + 1, current_phase: next, current_revision: updatedJob.revision, next_action: updatedJob.next_action, current_blockers: updatedJob.blocker ? [updatedJob.blocker] : [] });
+      const updatedJob = validateWorkflowJob({
+        ...job,
+        ...patch,
+        schema_version: 2,
+        job_id: id2,
+        phase: next,
+        revision: job.revision + 1,
+        updated_at: now
+      });
+      const updatedPassport = validateWorkflowPassport({
+        ...passport,
+        ...passportPatch,
+        schema_version: 2,
+        job_id: id2,
+        passport_revision: passport.passport_revision + 1,
+        current_phase: next,
+        current_revision: updatedJob.revision,
+        next_action: updatedJob.next_action,
+        current_blockers: updatedJob.blocker ? [updatedJob.blocker] : []
+      });
       assertSameRoster(passport, updatedPassport);
-      if (Buffer.byteLength(JSON.stringify(updatedPassport)) > updatedPassport.config.passport_max_bytes) throw new Error("Workflow passport exceeded configured maximum");
-      const event = { schema_version: 2, job_id: id2, type: "phase_changed", timestamp: now, data: { transition_id: `transition-${updatedJob.revision}`, from: job.phase, to: next } };
-      const journal = { job: updatedJob, passport: updatedPassport, event };
+      if (Buffer.byteLength(JSON.stringify(updatedPassport)) > updatedPassport.config.passport_max_bytes)
+        throw new Error("Workflow passport exceeded configured maximum");
+      const event = {
+        schema_version: 2,
+        job_id: id2,
+        type: "phase_changed",
+        timestamp: now,
+        data: {
+          transition_id: `transition-${updatedJob.revision}`,
+          from: job.phase,
+          to: next
+        }
+      };
+      const journal = {
+        job: updatedJob,
+        passport: updatedPassport,
+        event
+      };
       await this.write(this.file(id2, "transition.pending.json"), journal);
       await this.applyTransition(id2, journal);
       return updatedJob;
@@ -423,7 +544,14 @@ var WorkflowArtifactStore = class {
     const id2 = safeId(jobId);
     return this.lock(id2, async () => {
       const job = await this.requiredJob(id2);
-      const updated = validateWorkflowJob({ ...job, ...patch, schema_version: 2, job_id: id2, phase: job.phase, updated_at: (/* @__PURE__ */ new Date()).toISOString() });
+      const updated = validateWorkflowJob({
+        ...job,
+        ...patch,
+        schema_version: 2,
+        job_id: id2,
+        phase: job.phase,
+        updated_at: (/* @__PURE__ */ new Date()).toISOString()
+      });
       await this.write(this.file(id2, "job.json"), updated);
       return updated;
     });
@@ -433,7 +561,11 @@ var WorkflowArtifactStore = class {
     return this.lock(id2, async () => {
       const job = await this.requiredJob(id2);
       if (job.phase !== phase2 || job.current_operation !== null) return false;
-      const updated = validateWorkflowJob({ ...job, current_operation: operation, updated_at: (/* @__PURE__ */ new Date()).toISOString() });
+      const updated = validateWorkflowJob({
+        ...job,
+        current_operation: operation,
+        updated_at: (/* @__PURE__ */ new Date()).toISOString()
+      });
       await this.write(this.file(id2, "job.json"), updated);
       return true;
     });
@@ -456,12 +588,16 @@ var WorkflowArtifactStore = class {
   async writePassport(value) {
     const validated = validateWorkflowPassport(value);
     const id2 = safeId(validated.job_id);
-    if (Buffer.byteLength(JSON.stringify(validated)) > validated.config.passport_max_bytes) throw new Error("Workflow passport exceeded configured maximum");
+    if (Buffer.byteLength(JSON.stringify(validated)) > validated.config.passport_max_bytes)
+      throw new Error("Workflow passport exceeded configured maximum");
     await this.lock(id2, async () => {
       await this.recoverPassport(id2);
       const current = await this.readPassport(id2);
       if (current) assertSameRoster(current, validated);
-      if (current && validated.passport_revision !== current.passport_revision + 1) throw new Error(`Stale passport revision: expected ${current.passport_revision + 1}, received ${validated.passport_revision}`);
+      if (current && validated.passport_revision !== current.passport_revision + 1)
+        throw new Error(
+          `Stale passport revision: expected ${current.passport_revision + 1}, received ${validated.passport_revision}`
+        );
       const journal = { passport: validated };
       await this.write(this.file(id2, "passport.pending.json"), journal);
       await this.applyPassport(id2, journal);
@@ -480,8 +616,12 @@ var WorkflowArtifactStore = class {
     await this.lock(id2, async () => {
       await this.recoverSessions(id2);
       const current = await readJson(this.file(id2, "sessions.json"));
-      if (current && validated.sessions_revision !== validateWorkflowSessions(current).sessions_revision + 1) throw new Error("Stale sessions revision");
-      const journal = { kind: "sessions", sessions: validated };
+      if (current && validated.sessions_revision !== validateWorkflowSessions(current).sessions_revision + 1)
+        throw new Error("Stale sessions revision");
+      const journal = {
+        kind: "sessions",
+        sessions: validated
+      };
       await this.write(this.file(id2, "sessions.pending.json"), journal);
       await this.applySessions(id2, journal);
     });
@@ -495,7 +635,10 @@ var WorkflowArtifactStore = class {
   async appendEvent(event) {
     const id2 = safeId(event.job_id);
     await this.requiredJob(id2);
-    await appendJsonl(this.file(id2, "events.jsonl"), { ...event, data: removeForbidden(event.data) });
+    await appendJsonl(this.file(id2, "events.jsonl"), {
+      ...event,
+      data: removeForbidden(event.data)
+    });
     await fs.chmod(this.file(id2, "events.jsonl"), 384).catch(() => {
     });
   }
@@ -504,23 +647,36 @@ var WorkflowArtifactStore = class {
   }
   async writeInvocationReceipt(value) {
     const id2 = safeId(value.job_id);
-    const file = this.file(id2, `invocations/${safeId(value.invocation_id)}.json`);
+    const file = this.file(
+      id2,
+      `invocations/${safeId(value.invocation_id)}.json`
+    );
     const request = removeForbidden(value.request);
     const result = removeForbidden(value.result);
-    const normalized = { ...value, request, result, request_hash: hashCanonical(request), result_hash: hashCanonical(result) };
+    const normalized = {
+      ...value,
+      request,
+      result,
+      request_hash: hashCanonical(request),
+      result_hash: hashCanonical(result)
+    };
     await this.lock(id2, async () => {
       const prior = await readJson(file);
       if (prior) {
-        if (canonicalJson2(prior) !== canonicalJson2(normalized)) throw new Error("Conflicting invocation receipt already exists");
+        if (canonicalJson2(prior) !== canonicalJson2(normalized))
+          throw new Error("Conflicting invocation receipt already exists");
         return;
       }
       await this.write(file, normalized);
     });
   }
   async readInvocationReceipt(jobId, invocationId) {
-    const value = await readJson(this.file(safeId(jobId), `invocations/${safeId(invocationId)}.json`));
+    const value = await readJson(
+      this.file(safeId(jobId), `invocations/${safeId(invocationId)}.json`)
+    );
     if (!value) return null;
-    if (value.schema_version !== 2 || value.job_id !== jobId || value.invocation_id !== invocationId || !SHA256.test(value.request_hash) || value.request_hash !== hashCanonical(value.request) || !SHA256.test(value.result_hash) || value.result_hash !== hashCanonical(value.result) || !Number.isSafeInteger(value.workflow_revision) || value.roster_revision !== void 0 && (!Number.isSafeInteger(value.roster_revision) || value.roster_revision < 1)) throw new Error("Invalid invocation receipt");
+    if (value.schema_version !== 2 || value.job_id !== jobId || value.invocation_id !== invocationId || !SHA256.test(value.request_hash) || value.request_hash !== hashCanonical(value.request) || !SHA256.test(value.result_hash) || value.result_hash !== hashCanonical(value.result) || !Number.isSafeInteger(value.workflow_revision) || value.roster_revision !== void 0 && (!Number.isSafeInteger(value.roster_revision) || value.roster_revision < 1))
+      throw new Error("Invalid invocation receipt");
     return value;
   }
   async readInvocationReceipts(jobId) {
@@ -533,33 +689,105 @@ var WorkflowArtifactStore = class {
       if (error.code === "ENOENT") return [];
       throw error;
     }
-    const receipts = await Promise.all(entries.filter((entry) => entry.endsWith(".json")).map((entry) => this.readInvocationReceipt(id2, entry.slice(0, -5))));
+    const receipts = await Promise.all(
+      entries.filter((entry) => entry.endsWith(".json")).map((entry) => this.readInvocationReceipt(id2, entry.slice(0, -5)))
+    );
     return receipts.filter((value) => value !== null).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  }
+  async writeLlmAttempt(value) {
+    const attempt = validateAttempt(value);
+    const id2 = safeId(attempt.job_id);
+    const file = this.file(
+      id2,
+      `attempts/${safeId(attempt.attempt_id)}-${attempt.status === "started" ? "started" : "terminal"}.json`
+    );
+    await this.lock(id2, async () => {
+      const prior = await readJson(file);
+      if (prior) {
+        if (canonicalJson2(prior) !== canonicalJson2(attempt))
+          throw new Error("Conflicting LLM attempt receipt already exists");
+        return;
+      }
+      if (attempt.status !== "started") {
+        const started = await readJson(
+          this.file(id2, `attempts/${safeId(attempt.attempt_id)}-started.json`)
+        );
+        if (!started || started.status !== "started" || started.binding_hash !== attempt.binding_hash || started.semantic_role !== attempt.semantic_role || started.adapter !== attempt.adapter)
+          throw new Error(
+            "LLM attempt terminal receipt does not match its start"
+          );
+      }
+      await this.write(file, attempt);
+    });
+  }
+  async readLlmAttempts(jobId) {
+    const id2 = safeId(jobId);
+    const dir = this.file(id2, "attempts");
+    let entries;
+    try {
+      entries = await fs.readdir(dir);
+    } catch (error) {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    }
+    const grouped = /* @__PURE__ */ new Map();
+    for (const entry of entries.filter((item) => item.endsWith(".json")).sort()) {
+      const raw = await readJson(path.join(dir, entry));
+      if (!raw) continue;
+      const attempt = validateAttempt(raw);
+      if (attempt.job_id !== id2) throw new Error("Invalid LLM attempt receipt");
+      const current = grouped.get(attempt.attempt_id);
+      if (!current || attempt.status !== "started")
+        grouped.set(attempt.attempt_id, attempt);
+    }
+    return [...grouped.values()].sort(
+      (a, b) => a.started_at.localeCompare(b.started_at)
+    );
   }
   async readEffectReceipt(jobId, invocationId, kind) {
     const id2 = safeId(jobId);
     const invocation = safeId(invocationId);
-    const completed = await readJson(this.file(id2, `effects/${invocation}-${kind}-completed.json`));
-    const value = completed ?? await readJson(this.file(id2, `effects/${invocation}-${kind}-started.json`));
+    const completed = await readJson(
+      this.file(id2, `effects/${invocation}-${kind}-completed.json`)
+    );
+    const value = completed ?? await readJson(
+      this.file(id2, `effects/${invocation}-${kind}-started.json`)
+    );
     if (!value) return null;
     const validResult = value.status === "started" ? value.result === null && value.result_hash === null : value.result !== null && typeof value.result_hash === "string" && SHA256.test(value.result_hash) && value.result_hash === hashCanonical(value.result);
-    if (value.schema_version !== 2 || value.job_id !== jobId || value.invocation_id !== invocationId || value.kind !== kind || !SHA256.test(value.request_hash) || value.request_hash !== hashCanonical(value.request) || !Number.isSafeInteger(value.workflow_revision) || !["started", "completed"].includes(value.status) || !validResult) throw new Error("Invalid workflow effect receipt");
+    if (value.schema_version !== 2 || value.job_id !== jobId || value.invocation_id !== invocationId || value.kind !== kind || !SHA256.test(value.request_hash) || value.request_hash !== hashCanonical(value.request) || !Number.isSafeInteger(value.workflow_revision) || !["started", "completed"].includes(value.status) || !validResult)
+      throw new Error("Invalid workflow effect receipt");
     return value;
   }
   async writeEffectReceipt(value) {
     const id2 = safeId(value.job_id);
-    const file = this.file(id2, `effects/${safeId(value.invocation_id)}-${value.kind}-${value.status}.json`);
+    const file = this.file(
+      id2,
+      `effects/${safeId(value.invocation_id)}-${value.kind}-${value.status}.json`
+    );
     const request = removeForbidden(value.request);
     const result = removeForbidden(value.result);
-    const normalized = { ...value, request, request_hash: hashCanonical(request), result, result_hash: value.status === "completed" ? hashCanonical(result) : null };
+    const normalized = {
+      ...value,
+      request,
+      request_hash: hashCanonical(request),
+      result,
+      result_hash: value.status === "completed" ? hashCanonical(result) : null
+    };
     await this.lock(id2, async () => {
       const prior = await readJson(file);
       if (prior) {
-        if (canonicalJson2(prior) !== canonicalJson2(normalized)) throw new Error("Conflicting workflow effect receipt already exists");
+        if (canonicalJson2(prior) !== canonicalJson2(normalized))
+          throw new Error("Conflicting workflow effect receipt already exists");
         return;
       }
-      const other = await this.readEffectReceipt(id2, value.invocation_id, value.kind);
-      if (other && (other.request_hash !== normalized.request_hash || other.workflow_revision !== normalized.workflow_revision)) throw new Error("Conflicting workflow effect receipt already exists");
+      const other = await this.readEffectReceipt(
+        id2,
+        value.invocation_id,
+        value.kind
+      );
+      if (other && (other.request_hash !== normalized.request_hash || other.workflow_revision !== normalized.workflow_revision))
+        throw new Error("Conflicting workflow effect receipt already exists");
       await this.write(file, normalized);
     });
   }
@@ -571,11 +799,18 @@ var WorkflowArtifactStore = class {
       if (error.code === "ENOENT") return [];
       throw error;
     }
-    const jobs = (await Promise.all(entries.map((id2) => SAFE_ID.test(id2) ? this.readJob(id2) : null))).filter((job) => job !== null);
+    const jobs = (await Promise.all(
+      entries.map((id2) => SAFE_ID.test(id2) ? this.readJob(id2) : null)
+    )).filter((job) => job !== null);
     return jobs.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   }
   artifactPath(jobId, name, revision) {
-    return path.join(this.root, safeId(jobId), "artifacts", artifactFilename(name, revision, 0, 0));
+    return path.join(
+      this.root,
+      safeId(jobId),
+      "artifacts",
+      artifactFilename(name, revision, 0, 0)
+    );
   }
   async requiredJob(id2) {
     const job = await this.readJob(id2);
@@ -586,20 +821,38 @@ var WorkflowArtifactStore = class {
     const sessions = validateWorkflowSessions(sessionsValue);
     const passport = validateWorkflowPassport(passportValue);
     const id2 = safeId(sessions.job_id);
-    if (passport.job_id !== id2) throw new Error("Session/passport job_id mismatch");
+    if (passport.job_id !== id2)
+      throw new Error("Session/passport job_id mismatch");
     await this.lock(id2, async () => {
       await this.recoverSessions(id2);
-      const currentSessionsRaw = await readJson(this.file(id2, "sessions.json"));
-      const currentPassportRaw = await readJson(this.file(id2, "passport.json"));
-      if (!currentSessionsRaw || !currentPassportRaw) throw new Error("Session/passport state is missing");
+      const currentSessionsRaw = await readJson(
+        this.file(id2, "sessions.json")
+      );
+      const currentPassportRaw = await readJson(
+        this.file(id2, "passport.json")
+      );
+      if (!currentSessionsRaw || !currentPassportRaw)
+        throw new Error("Session/passport state is missing");
       const currentSessions = validateWorkflowSessions(currentSessionsRaw);
       const currentPassport = validateWorkflowPassport(currentPassportRaw);
-      if (bindingRotation2) await this.assertRecoverableBindingRotation(id2, currentPassport, passport);
+      if (bindingRotation2)
+        await this.assertRecoverableBindingRotation(
+          id2,
+          currentPassport,
+          passport
+        );
       else assertSameRoster(currentPassport, passport);
-      if (sessions.sessions_revision !== currentSessions.sessions_revision + 1) throw new Error("Stale sessions revision");
-      if (passport.passport_revision !== currentPassport.passport_revision + 1) throw new Error("Stale passport revision");
-      if (Buffer.byteLength(JSON.stringify(passport)) > passport.config.passport_max_bytes) throw new Error("Workflow passport exceeded configured maximum");
-      const journal = { kind: bindingRotation2 ? "binding_rotation" : "sessions_passport", sessions, passport };
+      if (sessions.sessions_revision !== currentSessions.sessions_revision + 1)
+        throw new Error("Stale sessions revision");
+      if (passport.passport_revision !== currentPassport.passport_revision + 1)
+        throw new Error("Stale passport revision");
+      if (Buffer.byteLength(JSON.stringify(passport)) > passport.config.passport_max_bytes)
+        throw new Error("Workflow passport exceeded configured maximum");
+      const journal = {
+        kind: bindingRotation2 ? "binding_rotation" : "sessions_passport",
+        sessions,
+        passport
+      };
       await this.write(this.file(id2, "sessions.pending.json"), journal);
       await this.applySessions(id2, journal);
     });
@@ -619,7 +872,8 @@ var WorkflowArtifactStore = class {
     let latest = null;
     for (const entry of entries) {
       const value = await readJson(path.join(dir, entry));
-      if (value?.metadata.artifact_name === name && (workflowRevision === void 0 || value.metadata.workflow_revision === workflowRevision) && (!latest || value.metadata.revision > latest.metadata.revision)) latest = value;
+      if (value?.metadata.artifact_name === name && (workflowRevision === void 0 || value.metadata.workflow_revision === workflowRevision) && (!latest || value.metadata.revision > latest.metadata.revision))
+        latest = value;
     }
     return latest;
   }
@@ -634,7 +888,8 @@ var WorkflowArtifactStore = class {
     }
     for (const entry of entries) {
       const value = await readJson(path.join(dir, entry));
-      if (value?.metadata.artifact_name === name && value.metadata.invocation_id === invocationId) return value;
+      if (value?.metadata.artifact_name === name && value.metadata.invocation_id === invocationId)
+        return value;
     }
     return null;
   }
@@ -642,16 +897,23 @@ var WorkflowArtifactStore = class {
     await atomicWrite(file, canonicalJson2(removeForbidden(value)) + "\n");
   }
   async recoverTransition(id2) {
-    const journal = await readJson(this.file(id2, "transition.pending.json"));
+    const journal = await readJson(
+      this.file(id2, "transition.pending.json")
+    );
     if (journal) {
-      journal.passport = await this.normalizePendingPassport(id2, journal.passport);
+      journal.passport = await this.normalizePendingPassport(
+        id2,
+        journal.passport
+      );
       await this.applyTransition(id2, journal);
     }
   }
   async applyTransition(id2, journal) {
     const pending = this.file(id2, "transition.pending.json");
     const currentJobRaw = await readJson(this.file(id2, "job.json"));
-    const currentPassportRaw = await readJson(this.file(id2, "passport.json"));
+    const currentPassportRaw = await readJson(
+      this.file(id2, "passport.json")
+    );
     const currentJob = currentJobRaw ? validateWorkflowJob(currentJobRaw) : null;
     const currentPassport = currentPassportRaw ? validateWorkflowPassport(currentPassportRaw) : null;
     if (currentJob && currentPassport && (currentJob.revision > journal.job.revision || currentPassport.passport_revision > journal.passport.passport_revision)) {
@@ -659,25 +921,45 @@ var WorkflowArtifactStore = class {
         await fs.rm(pending, { force: true });
         return;
       }
-      throw new Error("Transition journal is inconsistent with newer canonical state");
+      throw new Error(
+        "Transition journal is inconsistent with newer canonical state"
+      );
     }
-    if (currentJob?.revision === journal.job.revision && canonicalJson2(currentJob) !== canonicalJson2(journal.job)) throw new Error("Transition journal conflicts with canonical job");
-    if (currentPassport?.passport_revision === journal.passport.passport_revision && canonicalJson2(currentPassport) !== canonicalJson2(journal.passport)) throw new Error("Transition journal conflicts with canonical passport");
-    const snapshot = this.file(id2, `passports/passport-${String(journal.passport.passport_revision).padStart(6, "0")}.json`);
+    if (currentJob?.revision === journal.job.revision && canonicalJson2(currentJob) !== canonicalJson2(journal.job))
+      throw new Error("Transition journal conflicts with canonical job");
+    if (currentPassport?.passport_revision === journal.passport.passport_revision && canonicalJson2(currentPassport) !== canonicalJson2(journal.passport))
+      throw new Error("Transition journal conflicts with canonical passport");
+    const snapshot = this.file(
+      id2,
+      `passports/passport-${String(journal.passport.passport_revision).padStart(6, "0")}.json`
+    );
     const existing = await readJson(snapshot);
-    if (existing && canonicalJson2(existing) !== canonicalJson2(journal.passport)) throw new Error("Transition journal conflicts with immutable passport snapshot");
+    if (existing && canonicalJson2(existing) !== canonicalJson2(journal.passport))
+      throw new Error(
+        "Transition journal conflicts with immutable passport snapshot"
+      );
     if (!existing) await this.write(snapshot, journal.passport);
     await this.write(this.file(id2, "passport.json"), journal.passport);
     await this.write(this.file(id2, "job.json"), journal.job);
-    const events = await readJsonl(this.file(id2, "events.jsonl"));
+    const events = await readJsonl(
+      this.file(id2, "events.jsonl")
+    );
     const transitionId = journal.event.data.transition_id;
-    if (!events.some((event) => event.data?.transition_id === transitionId)) await appendJsonl(this.file(id2, "events.jsonl"), journal.event);
+    if (!events.some(
+      (event) => event.data?.transition_id === transitionId
+    ))
+      await appendJsonl(this.file(id2, "events.jsonl"), journal.event);
     await fs.rm(pending, { force: true });
   }
   async recoverPassport(id2) {
-    const journal = await readJson(this.file(id2, "passport.pending.json"));
+    const journal = await readJson(
+      this.file(id2, "passport.pending.json")
+    );
     if (journal) {
-      journal.passport = await this.normalizePendingPassport(id2, journal.passport);
+      journal.passport = await this.normalizePendingPassport(
+        id2,
+        journal.passport
+      );
       await this.applyPassport(id2, journal);
     }
   }
@@ -689,29 +971,46 @@ var WorkflowArtifactStore = class {
       await fs.rm(pending, { force: true });
       return;
     }
-    if (current?.passport_revision === journal.passport.passport_revision && canonicalJson2(current) !== canonicalJson2(journal.passport)) throw new Error("Passport journal conflicts with canonical passport");
-    const snapshot = this.file(id2, `passports/passport-${String(journal.passport.passport_revision).padStart(6, "0")}.json`);
+    if (current?.passport_revision === journal.passport.passport_revision && canonicalJson2(current) !== canonicalJson2(journal.passport))
+      throw new Error("Passport journal conflicts with canonical passport");
+    const snapshot = this.file(
+      id2,
+      `passports/passport-${String(journal.passport.passport_revision).padStart(6, "0")}.json`
+    );
     const existing = await readJson(snapshot);
-    if (existing && canonicalJson2(existing) !== canonicalJson2(journal.passport)) throw new Error("Passport journal conflicts with immutable snapshot");
+    if (existing && canonicalJson2(existing) !== canonicalJson2(journal.passport))
+      throw new Error("Passport journal conflicts with immutable snapshot");
     if (!existing) await this.write(snapshot, journal.passport);
     await this.write(this.file(id2, "passport.json"), journal.passport);
     await fs.rm(pending, { force: true });
   }
   async recoverSessions(id2) {
-    const journal = await readJson(this.file(id2, "sessions.pending.json"));
+    const journal = await readJson(
+      this.file(id2, "sessions.pending.json")
+    );
     if (journal) {
       journal.kind ??= journal.passport ? "sessions_passport" : "sessions";
-      if (journal.passport) journal.passport = await this.normalizePendingPassport(id2, journal.passport);
+      if (journal.passport)
+        journal.passport = await this.normalizePendingPassport(
+          id2,
+          journal.passport
+        );
       await this.applySessions(id2, journal);
     }
   }
   async applySessions(id2, journal) {
     const pending = this.file(id2, "sessions.pending.json");
-    if (!["sessions", "sessions_passport", "binding_rotation"].includes(journal.kind)) throw new Error("Sessions journal kind is invalid");
+    if (!["sessions", "sessions_passport", "binding_rotation"].includes(
+      journal.kind
+    ))
+      throw new Error("Sessions journal kind is invalid");
     const sessions = validateWorkflowSessions(journal.sessions);
     const passport = journal.passport ? validateWorkflowPassport(journal.passport) : null;
-    if (journal.kind === "sessions" !== (passport === null)) throw new Error("Sessions journal kind does not match its payload");
-    const currentSessionsRaw = await readJson(this.file(id2, "sessions.json"));
+    if (journal.kind === "sessions" !== (passport === null))
+      throw new Error("Sessions journal kind does not match its payload");
+    const currentSessionsRaw = await readJson(
+      this.file(id2, "sessions.json")
+    );
     const currentPassportRaw = passport ? await readJson(this.file(id2, "passport.json")) : null;
     const currentSessions = currentSessionsRaw ? validateWorkflowSessions(currentSessionsRaw) : null;
     const currentPassport = currentPassportRaw ? validateWorkflowPassport(currentPassportRaw) : null;
@@ -720,23 +1019,39 @@ var WorkflowArtifactStore = class {
         await fs.rm(pending, { force: true });
         return;
       }
-      throw new Error("Sessions journal is inconsistent with newer canonical state");
+      throw new Error(
+        "Sessions journal is inconsistent with newer canonical state"
+      );
     }
-    if (currentSessions?.sessions_revision === sessions.sessions_revision && canonicalJson2(currentSessions) !== canonicalJson2(sessions)) throw new Error("Sessions journal conflicts with canonical sessions");
-    if (passport && currentPassport?.passport_revision === passport.passport_revision && canonicalJson2(currentPassport) !== canonicalJson2(passport)) throw new Error("Sessions journal conflicts with canonical passport");
+    if (currentSessions?.sessions_revision === sessions.sessions_revision && canonicalJson2(currentSessions) !== canonicalJson2(sessions))
+      throw new Error("Sessions journal conflicts with canonical sessions");
+    if (passport && currentPassport?.passport_revision === passport.passport_revision && canonicalJson2(currentPassport) !== canonicalJson2(passport))
+      throw new Error("Sessions journal conflicts with canonical passport");
     if (passport && currentPassport && currentPassport.passport_revision < passport.passport_revision) {
-      if (journal.kind === "binding_rotation") await this.assertRecoverableBindingRotation(id2, currentPassport, passport);
+      if (journal.kind === "binding_rotation")
+        await this.assertRecoverableBindingRotation(
+          id2,
+          currentPassport,
+          passport
+        );
       else assertSameRoster(currentPassport, passport);
     }
     const revision = String(sessions.sessions_revision).padStart(6, "0");
     const snapshot = this.file(id2, `sessions/sessions-${revision}.json`);
     const existing = await readJson(snapshot);
-    if (existing && canonicalJson2(existing) !== canonicalJson2(sessions)) throw new Error("Sessions journal conflicts with immutable snapshot");
+    if (existing && canonicalJson2(existing) !== canonicalJson2(sessions))
+      throw new Error("Sessions journal conflicts with immutable snapshot");
     if (!existing) await this.write(snapshot, sessions);
     if (passport) {
-      const passportSnapshot = this.file(id2, `passports/passport-${String(passport.passport_revision).padStart(6, "0")}.json`);
+      const passportSnapshot = this.file(
+        id2,
+        `passports/passport-${String(passport.passport_revision).padStart(6, "0")}.json`
+      );
       const existingPassport = await readJson(passportSnapshot);
-      if (existingPassport && canonicalJson2(existingPassport) !== canonicalJson2(passport)) throw new Error("Sessions journal conflicts with immutable passport snapshot");
+      if (existingPassport && canonicalJson2(existingPassport) !== canonicalJson2(passport))
+        throw new Error(
+          "Sessions journal conflicts with immutable passport snapshot"
+        );
       if (!existingPassport) await this.write(passportSnapshot, passport);
       await this.write(this.file(id2, "passport.json"), passport);
     }
@@ -747,7 +1062,8 @@ var WorkflowArtifactStore = class {
     const jobRaw = await readJson(this.file(id2, "job.json"));
     if (!jobRaw) throw new Error("Workflow job state is missing");
     const job = validateWorkflowJob(jobRaw);
-    if (job.phase !== "paused" && job.phase !== "blocked" || job.current_operation !== null || !job.resume_phase || job.resume_phase === "verification" || job.resume_phase === "merge_ready" || ["done", "cancelled", "failed"].includes(job.resume_phase) || next.current_revision !== job.revision || next.current_phase !== job.phase || current.current_revision !== job.revision || current.current_phase !== job.phase) throw new Error("Binding rotation became stale before commit");
+    if (job.phase !== "paused" && job.phase !== "blocked" || job.current_operation !== null || !job.resume_phase || job.resume_phase === "verification" || job.resume_phase === "merge_ready" || ["done", "cancelled", "failed"].includes(job.resume_phase) || next.current_revision !== job.revision || next.current_phase !== job.phase || current.current_revision !== job.revision || current.current_phase !== job.phase)
+      throw new Error("Binding rotation became stale before commit");
     assertBindingRotation(current, next);
   }
   async normalizePendingPassport(id2, value) {
@@ -756,14 +1072,40 @@ var WorkflowArtifactStore = class {
     if (!currentRaw) return validateWorkflowPassport(raw);
     const current = validateWorkflowPassport(currentRaw);
     const initial = "roster" in raw || "roster_hash" in raw ? {} : { roster: current.roster, roster_hash: current.roster_hash };
-    const active = ["active_roster", "active_roster_hash", "roster_revision", "binding_rotation_history"].some((key) => key in raw) ? {} : { active_roster: current.active_roster, active_roster_hash: current.active_roster_hash, roster_revision: current.roster_revision, binding_rotation_history: current.binding_rotation_history };
+    const active = [
+      "active_roster",
+      "active_roster_hash",
+      "roster_revision",
+      "binding_rotation_history"
+    ].some((key) => key in raw) ? {} : {
+      active_roster: current.active_roster,
+      active_roster_hash: current.active_roster_hash,
+      roster_revision: current.roster_revision,
+      binding_rotation_history: current.binding_rotation_history
+    };
     return validateWorkflowPassport({ ...raw, ...initial, ...active });
   }
   async secureDir(id2) {
     const dir = this.file(id2, "");
-    await Promise.all([ensureDir(path.join(dir, "artifacts")), ensureDir(path.join(dir, "passports")), ensureDir(path.join(dir, "sessions")), ensureDir(path.join(dir, "invocations")), ensureDir(path.join(dir, "effects"))]);
-    await Promise.all([fs.chmod(this.root, 448).catch(() => {
-    }), fs.chmod(dir, 448), fs.chmod(path.join(dir, "artifacts"), 448), fs.chmod(path.join(dir, "passports"), 448), fs.chmod(path.join(dir, "sessions"), 448), fs.chmod(path.join(dir, "invocations"), 448), fs.chmod(path.join(dir, "effects"), 448)]);
+    await Promise.all([
+      ensureDir(path.join(dir, "artifacts")),
+      ensureDir(path.join(dir, "passports")),
+      ensureDir(path.join(dir, "sessions")),
+      ensureDir(path.join(dir, "invocations")),
+      ensureDir(path.join(dir, "attempts")),
+      ensureDir(path.join(dir, "effects"))
+    ]);
+    await Promise.all([
+      fs.chmod(this.root, 448).catch(() => {
+      }),
+      fs.chmod(dir, 448),
+      fs.chmod(path.join(dir, "artifacts"), 448),
+      fs.chmod(path.join(dir, "passports"), 448),
+      fs.chmod(path.join(dir, "sessions"), 448),
+      fs.chmod(path.join(dir, "invocations"), 448),
+      fs.chmod(path.join(dir, "attempts"), 448),
+      fs.chmod(path.join(dir, "effects"), 448)
+    ]);
   }
   async lock(id2, fn) {
     await this.secureDir(id2);
@@ -780,7 +1122,8 @@ var WorkflowArtifactStore = class {
           await fs.rm(lock, { recursive: true, force: true });
           continue;
         }
-        if (Date.now() > deadline) throw new Error(`Workflow lock is active: ${id2}`);
+        if (Date.now() > deadline)
+          throw new Error(`Workflow lock is active: ${id2}`);
         await new Promise((r) => setTimeout(r, 10));
       }
     }
@@ -792,7 +1135,14 @@ var WorkflowArtifactStore = class {
   }
 };
 function artifactReference(_name, stored) {
-  return { filename: stored.metadata.filename, hash: stored.metadata.artifact_hash, phase: stored.metadata.phase, revision: stored.metadata.revision, iteration: stored.metadata.iteration, role: stored.metadata.producing_role };
+  return {
+    filename: stored.metadata.filename,
+    hash: stored.metadata.artifact_hash,
+    phase: stored.metadata.phase,
+    revision: stored.metadata.revision,
+    iteration: stored.metadata.iteration,
+    role: stored.metadata.producing_role
+  };
 }
 function hashCanonical(value) {
   return createHash("sha256").update(canonicalJson2(value)).digest("hex");
@@ -811,43 +1161,79 @@ function removeForbidden(value) {
   if (Array.isArray(safe)) return safe.map(removeForbidden);
   if (safe && typeof safe === "object") {
     const out = {};
-    for (const [key, nested] of Object.entries(safe)) if (!FORBIDDEN_FIELD.test(key)) out[key] = removeForbidden(nested);
+    for (const [key, nested] of Object.entries(safe))
+      if (!FORBIDDEN_FIELD.test(key)) out[key] = removeForbidden(nested);
     return out;
   }
   return safe;
 }
 function safeId(value) {
-  if (!SAFE_ID.test(value) || value === "." || value === "..") throw new Error(`Invalid workflow job id: ${value}`);
+  if (!SAFE_ID.test(value) || value === "." || value === "..")
+    throw new Error(`Invalid workflow job id: ${value}`);
   return value;
 }
 function iso(value) {
   if (!Number.isFinite(Date.parse(value))) throw new Error("Invalid timestamp");
   return value;
 }
+function validateAttempt(value) {
+  if (value.schema_version !== 1 || !SAFE_ID.test(value.job_id) || !SAFE_ID.test(value.attempt_id) || !SAFE_ID.test(value.invocation_id) || !["supervisor", "implementer", "adviser", "reviewer"].includes(
+    value.semantic_role
+  ) || !["codex", "fable", "opus"].includes(value.provider_role) || !SAFE_ID.test(value.adapter) || !SHA256.test(value.binding_hash) || !Number.isSafeInteger(value.roster_revision) || value.roster_revision < 1 || !["started", "succeeded", "failed"].includes(value.status) || !["known", "estimated", "unknown"].includes(value.usage_status) || !Number.isFinite(Date.parse(value.started_at)) || value.completed_at !== null && !Number.isFinite(Date.parse(value.completed_at)))
+    throw new Error("Invalid LLM attempt receipt");
+  if (value.status === "started" && (value.completed_at !== null || value.usage !== null || value.error_category !== null || value.error_message !== null || value.usage_status !== "unknown"))
+    throw new Error("Invalid started LLM attempt receipt");
+  if (value.status !== "started" && value.completed_at === null)
+    throw new Error("Invalid terminal LLM attempt receipt");
+  if (value.status === "failed" && !value.error_category)
+    throw new Error("Failed LLM attempt requires an error category");
+  if (value.usage && (!Number.isSafeInteger(value.usage.duration_ms) || value.usage.duration_ms < 0))
+    throw new Error("Invalid LLM attempt usage");
+  if (value.usage_status === "known" && (!value.usage || !Number.isSafeInteger(value.usage.input_tokens) || !Number.isSafeInteger(value.usage.output_tokens)))
+    throw new Error(
+      "Known LLM attempt usage requires exact input and output tokens"
+    );
+  if (value.usage_status === "estimated" && (!value.usage || !Number.isSafeInteger(value.usage.input_chars) && !Number.isSafeInteger(value.usage.output_chars)))
+    throw new Error("Estimated LLM attempt usage requires character metrics");
+  return value;
+}
 function artifactFilename(name, workflowRevision, iteration, sequence) {
   return ARTIFACT_FILES[name].replace("%REV%", String(workflowRevision).padStart(3, "0")).replace("%ITER%", String(iteration).padStart(3, "0")).replace("%SEQ%", String(sequence).padStart(6, "0"));
 }
 function assertSameRoster(current, next) {
-  if (current.roster_hash !== next.roster_hash || canonicalJson2(current.roster) !== canonicalJson2(next.roster)) throw new Error("Workflow initial roster is immutable after job creation");
-  if (current.active_roster_hash !== next.active_roster_hash || canonicalJson2(current.active_roster) !== canonicalJson2(next.active_roster) || current.roster_revision !== next.roster_revision || canonicalJson2(current.binding_rotation_history) !== canonicalJson2(next.binding_rotation_history)) throw new Error("Workflow active roster may only change through binding rotation");
+  if (current.roster_hash !== next.roster_hash || canonicalJson2(current.roster) !== canonicalJson2(next.roster))
+    throw new Error("Workflow initial roster is immutable after job creation");
+  if (current.active_roster_hash !== next.active_roster_hash || canonicalJson2(current.active_roster) !== canonicalJson2(next.active_roster) || current.roster_revision !== next.roster_revision || canonicalJson2(current.binding_rotation_history) !== canonicalJson2(next.binding_rotation_history))
+    throw new Error(
+      "Workflow active roster may only change through binding rotation"
+    );
 }
 function assertBindingRotation(current, next) {
-  if (current.roster_hash !== next.roster_hash || canonicalJson2(current.roster) !== canonicalJson2(next.roster)) throw new Error("Workflow initial roster is immutable after job creation");
-  if (next.roster_revision !== current.roster_revision + 1 || next.binding_rotation_history.length !== current.binding_rotation_history.length + 1 || canonicalJson2(next.binding_rotation_history.slice(0, -1)) !== canonicalJson2(current.binding_rotation_history) || next.binding_rotation_history.at(-1)?.revision !== next.roster_revision) throw new Error("Invalid binding rotation history");
+  if (current.roster_hash !== next.roster_hash || canonicalJson2(current.roster) !== canonicalJson2(next.roster))
+    throw new Error("Workflow initial roster is immutable after job creation");
+  if (next.roster_revision !== current.roster_revision + 1 || next.binding_rotation_history.length !== current.binding_rotation_history.length + 1 || canonicalJson2(next.binding_rotation_history.slice(0, -1)) !== canonicalJson2(current.binding_rotation_history) || next.binding_rotation_history.at(-1)?.revision !== next.roster_revision)
+    throw new Error("Invalid binding rotation history");
   const rotation2 = next.binding_rotation_history.at(-1);
   const currentRoster = current.active_roster;
   const nextRoster = next.active_roster;
   const before = effectiveBinding(currentRoster, rotation2.role);
   const after = effectiveBinding(nextRoster, rotation2.role);
-  if (canonicalJson2(before) !== canonicalJson2(rotation2.previous_binding) || canonicalJson2(after) !== canonicalJson2(rotation2.new_binding)) throw new Error("Binding rotation history does not describe the active roster change");
+  if (canonicalJson2(before) !== canonicalJson2(rotation2.previous_binding) || canonicalJson2(after) !== canonicalJson2(rotation2.new_binding))
+    throw new Error(
+      "Binding rotation history does not describe the active roster change"
+    );
   const unchanged = ["supervisor", "implementer", "adviser", "reviewer"].filter((role) => role !== rotation2.role);
-  if (unchanged.some((role) => canonicalJson2(currentRoster[role]) !== canonicalJson2(nextRoster[role]))) throw new Error("Binding rotation may change only one semantic role");
+  if (unchanged.some(
+    (role) => canonicalJson2(currentRoster[role]) !== canonicalJson2(nextRoster[role])
+  ))
+    throw new Error("Binding rotation may change only one semantic role");
 }
 function effectiveBinding(roster, role) {
-  if (role === "reviewer") return "same_as" in roster.reviewer ? roster.supervisor : roster.reviewer;
+  if (role === "reviewer")
+    return "same_as" in roster.reviewer ? roster.supervisor : roster.reviewer;
   return roster[role];
 }
 
 export { ARTIFACT_FILES, ROLE_PERMISSIONS, SEMANTIC_ROLES, WORKFLOW_PHASE_TRANSITIONS, WorkflowArtifactStore, artifactReference, canTransitionWorkflow, createRosterSnapshot, hashCanonical, hashPersisted, hashRosterAgent, hashRosterSnapshot, isTerminalWorkflowPhase, legacyRosterSnapshot, transitionWorkflow, validateRosterAgent, validateRosterSnapshot };
-//# sourceMappingURL=chunk-TN5K7UDO.js.map
-//# sourceMappingURL=chunk-TN5K7UDO.js.map
+//# sourceMappingURL=chunk-3R3KVGGX.js.map
+//# sourceMappingURL=chunk-3R3KVGGX.js.map
