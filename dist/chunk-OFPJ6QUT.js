@@ -127,20 +127,33 @@ var LegacyWorkflowRoleResolver = class {
       };
     return role === "supervisor" || role === "reviewer" ? this.ports.codex.available() : role === "implementer" ? this.ports.opus.available() : this.ports.fable.available();
   }
-  decide(_binding, passport, stage, evidence, threadId) {
-    return this.ports.codex.decide(passport, stage, evidence, threadId);
+  decide(_binding, passport, stage, evidence, threadId, observer) {
+    return this.ports.codex.decide(
+      passport,
+      stage,
+      evidence,
+      threadId,
+      observer
+    );
   }
-  execute(_binding, passport, prompt, workspace, sessionId, mode) {
+  execute(_binding, passport, prompt, workspace, sessionId, mode, observer) {
     return this.ports.opus.execute(
       passport,
       prompt,
       workspace,
       sessionId,
-      mode
+      mode,
+      observer
     );
   }
-  consult(_binding, jobId, consultationId, query, options) {
-    return this.ports.fable.consult(jobId, consultationId, query, options);
+  consult(_binding, jobId, consultationId, query, options, observer) {
+    return this.ports.fable.consult(
+      jobId,
+      consultationId,
+      query,
+      options,
+      observer
+    );
   }
 };
 
@@ -355,10 +368,7 @@ var WorkflowEngine = class {
       updated_at: now
     };
     await this.store.createJob(job, passport, sessions);
-    await this.event(id2, "workflow_started", {
-      objective: input.objective,
-      mode
-    });
+    await this.event(id2, "workflow_started", { mode });
     return id2;
   }
   async run(jobId) {
@@ -417,12 +427,16 @@ var WorkflowEngine = class {
       await this.step({ ...job, current_operation: operation });
       return this.requiredJob(jobId);
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      if (reason.startsWith("AMBIGUOUS_EFFECT:")) {
-        await this.block(await this.requiredJob(jobId), reason);
+      const rawReason = error instanceof Error ? error.message : String(error);
+      if (rawReason.startsWith("AMBIGUOUS_EFFECT:")) {
+        await this.block(await this.requiredJob(jobId), rawReason);
         return this.requiredJob(jobId);
       }
-      await this.event(jobId, "workflow_failed", { reason });
+      const reason = safeErrorMessage(error);
+      await this.event(jobId, "workflow_failed", {
+        category: errorCategory(error),
+        reason
+      });
       return this.store.transition(jobId, "failed", {
         blocker: reason,
         next_action: "Inspect workflow logs and artifacts"
@@ -734,7 +748,8 @@ var WorkflowEngine = class {
       );
     } catch (error) {
       await this.event(job.job_id, "fable_consultation_failed", {
-        reason: error instanceof Error ? error.message : String(error)
+        category: errorCategory(error),
+        reason: safeErrorMessage(error)
       });
       await this.executeConsultationFallback(
         await this.requiredJob(job.job_id),
@@ -1401,6 +1416,7 @@ var WorkflowEngine = class {
     const started = Date.now();
     let index = 0;
     const open = /* @__PURE__ */ new Map();
+    const completed = /* @__PURE__ */ new Map();
     const observer = async (event) => {
       if (event.status === "started") {
         const base2 = attemptBase(
@@ -1420,6 +1436,10 @@ var WorkflowEngine = class {
         throw new Error(
           "Adapter attempt observer emitted a terminal event without a start"
         );
+      if (event.status === "succeeded") {
+        completed.set(event.attempt_key, event);
+        return;
+      }
       await this.store.writeLlmAttempt(
         terminalAttempt(base, "failed", event.usage, event.error)
       );
@@ -1451,10 +1471,12 @@ var WorkflowEngine = class {
         );
       } else if (open.size === 1) {
         const [key, base] = [...open.entries()][0];
+        const event = completed.get(key);
         await this.store.writeLlmAttempt(
-          terminalAttempt(base, "succeeded", result.usage)
+          terminalAttempt(base, "succeeded", event?.usage ?? result.usage)
         );
         open.delete(key);
+        completed.delete(key);
       }
       const receipt = {
         schema_version: 2,
@@ -1773,6 +1795,10 @@ function usageFromError(error) {
 }
 function errorCategory(error) {
   const message = error instanceof Error ? error.message : "";
+  if (/Unsafe|meaningful deterministic check|invalid during|mismatch|stale|requires|cannot include|outside approved scope/i.test(
+    message
+  ))
+    return "validation_error";
   if (/timed out/i.test(message)) return "timeout";
   if (/exited\s+\d+/i.test(message)) return "process_exit";
   if (/output exceeded/i.test(message)) return "output_limit";
@@ -1782,7 +1808,12 @@ function errorCategory(error) {
 }
 function safeErrorMessage(error) {
   const category = errorCategory(error);
+  if (category === "validation_error")
+    return error instanceof Error ? sanitizeValidationMessage(error.message) : "Workflow validation failed";
   return category === "timeout" ? "Adapter call timed out" : category === "process_exit" ? "Adapter process exited unsuccessfully" : category === "output_limit" ? "Adapter output exceeded the configured limit" : category === "invalid_response" ? "Adapter returned an invalid response" : "Adapter call failed";
+}
+function sanitizeValidationMessage(message) {
+  return message.replace(/[\r\n\t]+/g, " ").replace(/(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+/g, "[REDACTED]").slice(0, 512);
 }
 function resultValidationError(error, value) {
   const result = error instanceof Error ? error : new Error(String(error));
@@ -1877,5 +1908,5 @@ function validateMergeResult(value) {
 }
 
 export { DEFAULT_WORKFLOW_CONFIG, LegacyWorkflowRoleResolver, WORKFLOW_SCHEMA_VERSION, WorkflowEngine, hasMeaningfulChecks, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult };
-//# sourceMappingURL=chunk-AVTBJRUZ.js.map
-//# sourceMappingURL=chunk-AVTBJRUZ.js.map
+//# sourceMappingURL=chunk-OFPJ6QUT.js.map
+//# sourceMappingURL=chunk-OFPJ6QUT.js.map

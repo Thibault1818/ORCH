@@ -24,7 +24,7 @@ export interface RoleUsage {
 }
 export interface RoleAttemptEvent {
   attempt_key: string;
-  status: "started" | "failed";
+  status: "started" | "succeeded" | "failed";
   usage?: RoleUsage;
   error?: unknown;
 }
@@ -58,6 +58,7 @@ export interface CodexRolePort {
     stage: CodexDecisionStage,
     evidence: CodexDecisionEvidence,
     threadId: string | null,
+    observer?: (event: RoleAttemptEvent) => Promise<void>,
   ): Promise<RoleResult<CodexDecisionV2>>;
   available(): Promise<{ available: boolean; detail: string }>;
 }
@@ -67,6 +68,7 @@ export interface FableRolePort {
     consultationId: string,
     query: FableQueryV1,
     options: FableCallOptions,
+    observer?: (event: RoleAttemptEvent) => Promise<void>,
   ): Promise<RoleResult<FableAdviceV1>>;
   available(): Promise<{ available: boolean; detail: string }>;
 }
@@ -77,6 +79,7 @@ export interface OpusRolePort {
     workspace: string,
     sessionId: string | null,
     mode: "new" | "native_resume" | "passport_handoff",
+    observer?: (event: RoleAttemptEvent) => Promise<void>,
   ): Promise<RoleResult<OpusResult>>;
   available(): Promise<{ available: boolean; detail: string }>;
 }
@@ -193,8 +196,15 @@ export class LegacyWorkflowRoleResolver implements WorkflowRoleResolver {
     stage: CodexDecisionStage,
     evidence: CodexDecisionEvidence,
     threadId: string | null,
+    observer?: (event: RoleAttemptEvent) => Promise<void>,
   ) {
-    return this.ports.codex.decide(passport, stage, evidence, threadId);
+    return this.ports.codex.decide(
+      passport,
+      stage,
+      evidence,
+      threadId,
+      observer,
+    );
   }
   execute(
     _binding: RosterAgent,
@@ -203,6 +213,7 @@ export class LegacyWorkflowRoleResolver implements WorkflowRoleResolver {
     workspace: string,
     sessionId: string | null,
     mode: "new" | "native_resume" | "passport_handoff",
+    observer?: (event: RoleAttemptEvent) => Promise<void>,
   ) {
     return this.ports.opus.execute(
       passport,
@@ -210,6 +221,7 @@ export class LegacyWorkflowRoleResolver implements WorkflowRoleResolver {
       workspace,
       sessionId,
       mode,
+      observer,
     );
   }
   consult(
@@ -218,7 +230,14 @@ export class LegacyWorkflowRoleResolver implements WorkflowRoleResolver {
     consultationId: string,
     query: FableQueryV1,
     options: FableCallOptions,
+    observer?: (event: RoleAttemptEvent) => Promise<void>,
   ) {
-    return this.ports.fable.consult(jobId, consultationId, query, options);
+    return this.ports.fable.consult(
+      jobId,
+      consultationId,
+      query,
+      options,
+      observer,
+    );
   }
 }

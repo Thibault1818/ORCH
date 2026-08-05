@@ -5,7 +5,7 @@ export { createTokenUsage } from './chunk-UG72A2JI.js';
 import { InvalidArgumentsError, TaskNotFoundError, InvalidTransitionError, AgentNotFoundError, OrchestryError, TeamNotFoundError, GoalNotFoundError, GoalHasPendingTasksError } from './chunk-Z7JNYNWE.js';
 export { AdapterErrorKind, AgentNotFoundError, ERROR_HINTS, GoalHasPendingTasksError, NotInitializedError, OrchestryError, TaskNotFoundError, WorkspaceError, classifyAdapterError } from './chunk-Z7JNYNWE.js';
 import { GOAL_LEAD_LABEL, GOAL_REVIEW_LABEL, AUTONOMOUS_LABEL } from './chunk-YNPZFT75.js';
-export { DEFAULT_WORKFLOW_CONFIG, LegacyWorkflowRoleResolver, WORKFLOW_SCHEMA_VERSION, WorkflowEngine, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult } from './chunk-AVTBJRUZ.js';
+export { DEFAULT_WORKFLOW_CONFIG, LegacyWorkflowRoleResolver, WORKFLOW_SCHEMA_VERSION, WorkflowEngine, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult } from './chunk-OFPJ6QUT.js';
 export { discoverDeterministicChecks, validateDeterministicCheckCommands, validateExplicitChecks } from './chunk-D6YHC656.js';
 export { ARTIFACT_FILES, ROLE_PERMISSIONS, SEMANTIC_ROLES, WORKFLOW_PHASE_TRANSITIONS, WorkflowArtifactStore, canTransitionWorkflow, createRosterSnapshot, hashCanonical, hashRosterAgent, hashRosterSnapshot, isTerminalWorkflowPhase, legacyRosterSnapshot, transitionWorkflow, validateRosterAgent, validateRosterSnapshot } from './chunk-3R3KVGGX.js';
 export { AdapterRegistry } from './chunk-6DWHQPTE.js';
@@ -2817,8 +2817,8 @@ async function buildFullContainer(context) {
     import('./orchestrator-OTG2FJWD.js'),
     import('./doctor-service-WPXAUB6S.js'),
     import('./artifact-store-WCXCFJG2.js'),
-    import('./engine-5YIGC72H.js'),
-    import('./native-adapters-CN3U5NJP.js')
+    import('./engine-FEFY2KX6.js'),
+    import('./native-adapters-B34254ZQ.js')
   ]);
   const processManager = new ProcessManager();
   const templateEngine = new LiquidTemplateEngine();

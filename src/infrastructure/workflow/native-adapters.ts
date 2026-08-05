@@ -769,15 +769,29 @@ async function observedCall<T extends { usage?: RoleResult<unknown>["usage"] }>(
   call: () => Promise<T>,
 ): Promise<T> {
   const attemptKey = randomUUID();
+  const started = Date.now();
   await observe({ attempt_key: attemptKey, status: "started" });
   try {
-    return await call();
+    const result = await call();
+    result.usage = {
+      ...result.usage,
+      duration_ms: result.usage?.duration_ms ?? Date.now() - started,
+    };
+    await observe({
+      attempt_key: attemptKey,
+      status: "succeeded",
+      usage: result.usage,
+    });
+    return result;
   } catch (error) {
     await observe({
       attempt_key: attemptKey,
       status: "failed",
       error,
-      usage: usageFromError(error),
+      usage: {
+        ...usageFromError(error),
+        duration_ms: usageFromError(error)?.duration_ms ?? Date.now() - started,
+      },
     });
     throw error;
   }

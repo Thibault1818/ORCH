@@ -2022,7 +2022,7 @@ interface RoleUsage {
 }
 interface RoleAttemptEvent {
     attempt_key: string;
-    status: "started" | "failed";
+    status: "started" | "succeeded" | "failed";
     usage?: RoleUsage;
     error?: unknown;
 }
@@ -2050,21 +2050,21 @@ interface CodexDecisionEvidence {
     fable_advice: FableAdviceV1 | null;
 }
 interface CodexRolePort {
-    decide(passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null): Promise<RoleResult<CodexDecisionV2>>;
+    decide(passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<CodexDecisionV2>>;
     available(): Promise<{
         available: boolean;
         detail: string;
     }>;
 }
 interface FableRolePort {
-    consult(jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions): Promise<RoleResult<FableAdviceV1>>;
+    consult(jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<FableAdviceV1>>;
     available(): Promise<{
         available: boolean;
         detail: string;
     }>;
 }
 interface OpusRolePort {
-    execute(passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: "new" | "native_resume" | "passport_handoff"): Promise<RoleResult<OpusResult>>;
+    execute(passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: "new" | "native_resume" | "passport_handoff", observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<OpusResult>>;
     available(): Promise<{
         available: boolean;
         detail: string;
@@ -2124,9 +2124,9 @@ declare class LegacyWorkflowRoleResolver implements WorkflowRoleResolver {
         available: boolean;
         detail: string;
     }>;
-    decide(_binding: RosterAgent, passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null): Promise<RoleResult<CodexDecisionV2>>;
-    execute(_binding: RosterAgent, passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: "new" | "native_resume" | "passport_handoff"): Promise<RoleResult<OpusResult>>;
-    consult(_binding: RosterAgent, jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions): Promise<RoleResult<FableAdviceV1>>;
+    decide(_binding: RosterAgent, passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<CodexDecisionV2>>;
+    execute(_binding: RosterAgent, passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: "new" | "native_resume" | "passport_handoff", observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<OpusResult>>;
+    consult(_binding: RosterAgent, jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<FableAdviceV1>>;
 }
 
 declare const DEFAULT_WORKFLOW_CONFIG: WorkflowConfig;

@@ -620,15 +620,29 @@ async function spawnCapture(pm, command, args, cwd, input, maxBytes, timeoutMs) 
 }
 async function observedCall(observe, call) {
   const attemptKey = randomUUID();
+  const started = Date.now();
   await observe({ attempt_key: attemptKey, status: "started" });
   try {
-    return await call();
+    const result = await call();
+    result.usage = {
+      ...result.usage,
+      duration_ms: result.usage?.duration_ms ?? Date.now() - started
+    };
+    await observe({
+      attempt_key: attemptKey,
+      status: "succeeded",
+      usage: result.usage
+    });
+    return result;
   } catch (error) {
     await observe({
       attempt_key: attemptKey,
       status: "failed",
       error,
-      usage: usageFromError(error)
+      usage: {
+        ...usageFromError(error),
+        duration_ms: usageFromError(error)?.duration_ms ?? Date.now() - started
+      }
     });
     throw error;
   }
@@ -858,5 +872,5 @@ function withProfile(passport, key, binding) {
 }
 
 export { NativeCodexWorkflowAdapter, NativeFableWorkflowAdapter, NativeOpusWorkflowAdapter, NativeWorkflowGitGateway, NativeWorkflowRoleResolver, detectWorkflowCapabilities };
-//# sourceMappingURL=native-adapters-CN3U5NJP.js.map
-//# sourceMappingURL=native-adapters-CN3U5NJP.js.map
+//# sourceMappingURL=native-adapters-B34254ZQ.js.map
+//# sourceMappingURL=native-adapters-B34254ZQ.js.map

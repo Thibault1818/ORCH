@@ -314,10 +314,7 @@ export class WorkflowEngine {
       updated_at: now,
     };
     await this.store.createJob(job, passport, sessions);
-    await this.event(id, "workflow_started", {
-      objective: input.objective,
-      mode,
-    });
+    await this.event(id, "workflow_started", { mode });
     return id;
   }
 
@@ -393,12 +390,16 @@ export class WorkflowEngine {
       await this.step({ ...job, current_operation: operation });
       return this.requiredJob(jobId);
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      if (reason.startsWith("AMBIGUOUS_EFFECT:")) {
-        await this.block(await this.requiredJob(jobId), reason);
+      const rawReason = error instanceof Error ? error.message : String(error);
+      if (rawReason.startsWith("AMBIGUOUS_EFFECT:")) {
+        await this.block(await this.requiredJob(jobId), rawReason);
         return this.requiredJob(jobId);
       }
-      await this.event(jobId, "workflow_failed", { reason });
+      const reason = safeErrorMessage(error);
+      await this.event(jobId, "workflow_failed", {
+        category: errorCategory(error),
+        reason,
+      });
       return this.store.transition(jobId, "failed", {
         blocker: reason,
         next_action: "Inspect workflow logs and artifacts",
@@ -763,7 +764,8 @@ export class WorkflowEngine {
       );
     } catch (error) {
       await this.event(job.job_id, "fable_consultation_failed", {
-        reason: error instanceof Error ? error.message : String(error),
+        category: errorCategory(error),
+        reason: safeErrorMessage(error),
       });
       await this.executeConsultationFallback(
         await this.requiredJob(job.job_id),
@@ -1664,6 +1666,7 @@ export class WorkflowEngine {
     const started = Date.now();
     let index = 0;
     const open = new Map<string, ReturnType<typeof attemptBase>>();
+    const completed = new Map<string, RoleAttemptEvent>();
     const observer = async (event: RoleAttemptEvent) => {
       if (event.status === "started") {
         const base = attemptBase(
@@ -1683,6 +1686,10 @@ export class WorkflowEngine {
         throw new Error(
           "Adapter attempt observer emitted a terminal event without a start",
         );
+      if (event.status === "succeeded") {
+        completed.set(event.attempt_key, event);
+        return;
+      }
       await this.store.writeLlmAttempt(
         terminalAttempt(base, "failed", event.usage, event.error),
       );
@@ -1714,10 +1721,12 @@ export class WorkflowEngine {
         );
       } else if (open.size === 1) {
         const [key, base] = [...open.entries()][0]!;
+        const event = completed.get(key);
         await this.store.writeLlmAttempt(
-          terminalAttempt(base, "succeeded", result.usage),
+          terminalAttempt(base, "succeeded", event?.usage ?? result.usage),
         );
         open.delete(key);
+        completed.delete(key);
       }
       const receipt: WorkflowInvocationReceiptV2 = {
         schema_version: 2,
@@ -2113,6 +2122,12 @@ function usageFromError(
 }
 function errorCategory(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
+  if (
+    /Unsafe|meaningful deterministic check|invalid during|mismatch|stale|requires|cannot include|outside approved scope/i.test(
+      message,
+    )
+  )
+    return "validation_error";
   if (/timed out/i.test(message)) return "timeout";
   if (/exited\s+\d+/i.test(message)) return "process_exit";
   if (/output exceeded/i.test(message)) return "output_limit";
@@ -2122,6 +2137,10 @@ function errorCategory(error: unknown): string {
 }
 function safeErrorMessage(error: unknown): string {
   const category = errorCategory(error);
+  if (category === "validation_error")
+    return error instanceof Error
+      ? sanitizeValidationMessage(error.message)
+      : "Workflow validation failed";
   return category === "timeout"
     ? "Adapter call timed out"
     : category === "process_exit"
@@ -2131,6 +2150,12 @@ function safeErrorMessage(error: unknown): string {
         : category === "invalid_response"
           ? "Adapter returned an invalid response"
           : "Adapter call failed";
+}
+function sanitizeValidationMessage(message: string): string {
+  return message
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/(?:sk-|ghp_|github_pat_)[A-Za-z0-9_-]+/g, "[REDACTED]")
+    .slice(0, 512);
 }
 function resultValidationError(error: unknown, value: unknown): Error {
   const result = error instanceof Error ? error : new Error(String(error));

@@ -33,6 +33,7 @@ export XDG_CACHE_HOME="$SANDBOX/xdg-cache"
 export NPM_CONFIG_CACHE="$SANDBOX/npm-cache"
 export NPM_CONFIG_USERCONFIG="$SANDBOX/npmrc"
 export ORCH_FAKE_LOG="$HOME/fake-calls.jsonl"
+export ORCH_PARENT_ARGV_LOG="$HOME/orch-parent-argv.json"
 export DOCTOR_FILE="$SANDBOX/doctor.json"
 export STATUS_FILE="$SANDBOX/status.json"
 TEMP_PREFIX="$SANDBOX/prefix"
@@ -54,7 +55,15 @@ for alias in orch orchestry ao; do
   "$alias" --help >/dev/null
 done
 
-PACKAGE_ROOT="$(node --input-type=module -e 'import fs from "node:fs"; import path from "node:path"; process.stdout.write(path.dirname(path.dirname(fs.realpathSync(process.argv[1]))));' "$TEMP_PREFIX/bin/orch")"
+REAL_ORCH="$TEMP_PREFIX/bin/orch-real"
+mv "$TEMP_PREFIX/bin/orch" "$REAL_ORCH"
+cat > "$TEMP_PREFIX/bin/orch" <<'SH'
+#!/usr/bin/env bash
+node -e 'require("fs").writeFileSync(process.env.ORCH_PARENT_ARGV_LOG, JSON.stringify(process.argv.slice(1)))' "$@"
+exec "$(dirname "$0")/orch-real" "$@"
+SH
+chmod +x "$TEMP_PREFIX/bin/orch"
+PACKAGE_ROOT="$(node --input-type=module -e 'import fs from "node:fs"; import path from "node:path"; process.stdout.write(path.dirname(path.dirname(fs.realpathSync(process.argv[1]))));' "$REAL_ORCH")"
 export PACKAGE_ROOT
 node --input-type=module <<'NODE'
 import fs from 'node:fs';
@@ -125,6 +134,8 @@ node --input-type=module <<'NODE'
 import fs from 'node:fs';
 
 const calls = fs.readFileSync(process.env.ORCH_FAKE_LOG, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+const parentArgv = JSON.parse(fs.readFileSync(process.env.ORCH_PARENT_ARGV_LOG, 'utf8'));
+if (parentArgv.join(' ').includes('PROMPT_SENTINEL_PLAN3')) throw new Error('ORCH parent argv leaked the objective sentinel');
 const invocations = calls.filter((call) => !call.argv.includes('--version') && !call.argv.includes('--help'));
 if (invocations.length !== 3) throw new Error(`Expected three workflow model-boundary calls, got ${invocations.length}`);
 const expected = [
