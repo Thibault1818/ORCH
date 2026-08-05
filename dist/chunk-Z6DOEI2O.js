@@ -1,4 +1,4 @@
-import { isTerminalWorkflowPhase, hashCanonical, artifactReference, ARTIFACT_FILES } from './chunk-VBS3B32E.js';
+import { isTerminalWorkflowPhase, hashCanonical, artifactReference, ARTIFACT_FILES, hashPersisted } from './chunk-UTG567T3.js';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -7,7 +7,7 @@ import { nanoid } from 'nanoid';
 // src/domain/workflow/contracts.ts
 var WORKFLOW_SCHEMA_VERSION = 2;
 function validateCodexDecision(value, stage) {
-  const o = exact(value, ["schema_version", "job_id", "action", "summary", "implementation_brief", "required_changes", "risk_level", "fable_query", "reviewed_commit"], "Codex decision");
+  const o = exact(value, ["schema_version", "job_id", "action", "summary", "implementation_brief", "required_changes", "risk_level", "fable_query", "reviewed_commit", "fable_advice_disposition", "fable_error", "fable_iteration_effect"], "Codex decision");
   if (o.schema_version !== 2) throw new Error("Unsupported Codex decision schema version");
   const action = enumeration(o.action, ["DISPATCH_OPUS", "ACCEPT", "CORRECT_OPUS", "CONSULT_FABLE", "PAUSE", "STOP"], "action");
   const allowed = stage === "pre_opus" ? ["DISPATCH_OPUS", "CONSULT_FABLE", "PAUSE", "STOP"] : stage === "post_opus" ? ["ACCEPT", "CORRECT_OPUS", "CONSULT_FABLE", "PAUSE", "STOP"] : stage === "after_fable_pre" ? ["DISPATCH_OPUS", "PAUSE", "STOP"] : ["ACCEPT", "CORRECT_OPUS", "PAUSE", "STOP"];
@@ -16,18 +16,23 @@ function validateCodexDecision(value, stage) {
   const requiredChanges = strings(o.required_changes, "required_changes");
   const fableQuery = o.fable_query === null ? null : validateFableQuery(o.fable_query);
   const reviewedCommit = o.reviewed_commit === null ? null : commit(o.reviewed_commit);
+  const disposition = o.fable_advice_disposition === null ? null : enumeration(o.fable_advice_disposition, ["accepted", "rejected"], "fable_advice_disposition");
+  const fableError = o.fable_error === null ? null : nonEmpty(o.fable_error, "fable_error");
+  const iterationEffect = o.fable_iteration_effect === null ? null : enumeration(o.fable_iteration_effect, ["avoided", "added", "unchanged"], "fable_iteration_effect");
+  const afterFable = stage === "after_fable_pre" || stage === "after_fable_post";
   if (action === "DISPATCH_OPUS" && !implementationBrief) throw new Error("DISPATCH_OPUS requires implementation_brief");
   if (action !== "DISPATCH_OPUS" && implementationBrief !== null) throw new Error(`${action} cannot include implementation_brief`);
   if (action === "CORRECT_OPUS" && requiredChanges.length === 0) throw new Error("CORRECT_OPUS requires required_changes");
   if (action !== "CORRECT_OPUS" && requiredChanges.length > 0) throw new Error(`${action} cannot include required_changes`);
   if (action === "CONSULT_FABLE" && !fableQuery) throw new Error("CONSULT_FABLE requires fable_query");
   if (action !== "CONSULT_FABLE" && fableQuery !== null) throw new Error(`${action} requires fable_query null`);
-  if (action === "CONSULT_FABLE" && o.risk_level !== "low") throw new Error("CONSULT_FABLE requires low risk");
   if (fableQuery && (stage === "pre_opus" || stage === "after_fable_pre") && fableQuery.fallback_if_skipped.action === "CORRECT_OPUS") throw new Error("Pre-Opus consultation cannot use CORRECT_OPUS fallback");
   if (fableQuery && (stage === "post_opus" || stage === "after_fable_post") && fableQuery.fallback_if_skipped.action === "DISPATCH_OPUS") throw new Error("Post-Opus consultation cannot use DISPATCH_OPUS fallback");
   if ((stage === "post_opus" || stage === "after_fable_post") && reviewedCommit === null) throw new Error("Post-Opus decision requires reviewed_commit");
   if ((stage === "pre_opus" || stage === "after_fable_pre") && reviewedCommit !== null) throw new Error("Pre-Opus decision cannot include reviewed_commit");
-  return { schema_version: 2, job_id: id(o.job_id), action, summary: nonEmpty(o.summary, "summary"), implementation_brief: implementationBrief, required_changes: requiredChanges, risk_level: enumeration(o.risk_level, ["low", "medium", "high"], "risk_level"), fable_query: fableQuery, reviewed_commit: reviewedCommit };
+  if (afterFable && (disposition === null || iterationEffect === null)) throw new Error("After-Fable decision must record advice disposition and iteration effect");
+  if (!afterFable && (disposition !== null || fableError !== null || iterationEffect !== null)) throw new Error("Non-Fable decision cannot record Fable outcome");
+  return { schema_version: 2, job_id: id(o.job_id), action, summary: nonEmpty(o.summary, "summary"), implementation_brief: implementationBrief, required_changes: requiredChanges, risk_level: enumeration(o.risk_level, ["low", "medium", "high"], "risk_level"), fable_query: fableQuery, reviewed_commit: reviewedCommit, fable_advice_disposition: disposition, fable_error: fableError, fable_iteration_effect: iterationEffect };
 }
 function validateFableQuery(value) {
   const o = exact(value, ["purpose", "question", "verification_method", "fallback_if_skipped"], "Fable query");
@@ -43,6 +48,11 @@ function validateFableAdvice(value) {
   const o = exact(value, ["schema_version", "consultation_id", "answer", "alternatives", "uncertainties"], "Fable advice");
   if (o.schema_version !== 1) throw new Error("Unsupported Fable advice schema version");
   return { schema_version: 1, consultation_id: id(o.consultation_id), answer: nonEmpty(o.answer, "answer"), alternatives: strings(o.alternatives, "alternatives"), uncertainties: strings(o.uncertainties, "uncertainties") };
+}
+function validateFableFallbackRecord(value) {
+  const o = exact(value, ["schema_version", "reason", "action", "instructions", "origin"], "Fable fallback record");
+  if (o.schema_version !== 1) throw new Error("Unsupported Fable fallback record schema version");
+  return { schema_version: 1, reason: enumeration(o.reason, ["direct_mode", "workflow_cap_or_duplicate", "risk_not_low", "input_oversized", "fable_unavailable", "fable_failed", "malformed_request", "ambiguous_interruption", "resume_persisted_fallback"], "reason"), action: enumeration(o.action, ["DISPATCH_OPUS", "CORRECT_OPUS", "PAUSE"], "fallback action"), instructions: nonEmpty(o.instructions, "fallback instructions"), origin: enumeration(o.origin, ["pre_opus", "post_opus"], "origin") };
 }
 function validateOpusResult(value) {
   const o = exact(value, ["job_id", "status", "files_changed", "commands_run", "tests_reported", "deviations", "unresolved", "summary"], "Opus result");
@@ -140,7 +150,7 @@ var WorkflowEngine = class {
     const requiredChecks = (input.required_checks ?? []).map((command) => command.trim()).filter(Boolean);
     const passport = { schema_version: 2, passport_revision: 1, job_id: id2, mode, current_revision: 1, objective: input.objective, current_phase: "codex_pre_opus", accepted_brief_hash: null, latest_implementation_brief: null, hard_constraints: [], acceptance_criteria: [], decisions: [], allowed_file_scope: input.allowed_file_scope ?? [], required_checks: requiredChecks, current_blockers: [], next_action: job.next_action, artifacts: [], active_worktree: null, target_branch: null, base_commit: null, current_commit: null, session_references: { codex: null, opus: null }, session_modes: { codex: "none", opus: "none" }, rotation_history: [], config };
     if (Buffer.byteLength(JSON.stringify(passport)) > config.passport_max_bytes) throw new Error("Initial workflow passport exceeded configured maximum");
-    const sessions = { schema_version: 2, job_id: id2, codex_thread_id: null, opus_session_id: null, opus_brief_hash: null, modes: { codex: "none", opus: "none" }, rotation_history: [], recorded_invocations: [], usage: { codex: usage(), fable: usage(), opus: usage() }, updated_at: now };
+    const sessions = { schema_version: 2, sessions_revision: 1, job_id: id2, codex_thread_id: null, opus_session_id: null, opus_brief_hash: null, modes: { codex: "none", opus: "none" }, rotation_history: [], recorded_invocations: [], usage: { codex: usage(), fable: usage(), opus: usage() }, updated_at: now };
     await this.store.createJob(job, passport, sessions);
     await this.event(id2, "workflow_started", { objective: input.objective, mode });
     return id2;
@@ -157,7 +167,9 @@ var WorkflowEngine = class {
     try {
       if (job.current_operation) {
         const receipt = await this.store.readInvocationReceipt(job.job_id, job.current_operation.invocation_id);
-        if (job.phase === "merge_ready" || receipt) {
+        const checks = await this.store.readEffectReceipt(job.job_id, job.current_operation.invocation_id, "checks");
+        const merge = await this.store.readEffectReceipt(job.job_id, job.current_operation.invocation_id, "merge");
+        if (job.phase === "merge_ready" || receipt || checks || merge) {
           await this.step(job);
           return this.requiredJob(jobId);
         }
@@ -174,6 +186,10 @@ var WorkflowEngine = class {
       return this.requiredJob(jobId);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      if (reason.startsWith("AMBIGUOUS_EFFECT:")) {
+        await this.block(await this.requiredJob(jobId), reason);
+        return this.requiredJob(jobId);
+      }
       await this.event(jobId, "workflow_failed", { reason });
       return this.store.transition(jobId, "failed", { blocker: reason, next_action: "Inspect workflow logs and artifacts" });
     }
@@ -185,11 +201,16 @@ var WorkflowEngine = class {
   }
   async resume(jobId, options = {}) {
     const job = await this.requiredJob(jobId);
-    if (job.phase !== "paused" && job.phase !== "blocked") throw new Error(`Cannot resume workflow in ${job.phase}`);
-    if (!job.resume_phase) throw new Error("Workflow has no recoverable phase");
     const reason = options.reason?.trim();
     if (!reason) throw new Error("Resume requires --reason");
+    if (isTerminalWorkflowPhase(job.phase)) throw new Error(`Cannot resume workflow in ${job.phase}`);
+    if (job.phase !== "paused" && job.phase !== "blocked") {
+      await this.event(jobId, "workflow_resumed", { phase: job.phase, reason, mode: "active_reconciliation" });
+      return this.run(jobId);
+    }
+    if (!job.resume_phase) throw new Error("Workflow has no recoverable phase");
     if (job.blocker?.startsWith("LEGACY_SCHEMA:")) throw new Error("Legacy schema workflow cannot be resumed; start a new workflow");
+    if (job.blocker?.startsWith("AMBIGUOUS_EFFECT:")) throw new Error("Ambiguous external effect cannot be retried safely; inspect the receipt and start a new workflow");
     if (job.blocker?.startsWith("INTERRUPTED:") && (!options.retry_invocation || !reason)) throw new Error("Interrupted invocation requires --retry-invocation and --reason");
     const resumed = await this.transition(job, job.resume_phase, { blocker: null, resume_phase: null, current_operation: null });
     await this.event(jobId, "workflow_resumed", { phase: resumed.phase, reason });
@@ -224,7 +245,13 @@ var WorkflowEngine = class {
     const { passport, sessions } = await this.context(job.job_id);
     const evidence = await this.reviewEvidence(job, stage);
     const result = await this.invoke(job, "codex", { stage, evidence }, () => this.ports.codex.decide(passport, stage, evidence, sessions.codex_thread_id));
-    const decision = validateCodexDecision(result.value, stage);
+    let decision;
+    try {
+      decision = validateCodexDecision(result.value, stage);
+    } catch (error) {
+      if (await this.fallbackMalformedConsultation(job, result.value, stage, error)) return;
+      throw error;
+    }
     this.assertJob(job, decision.job_id);
     if (decision.reviewed_commit && decision.reviewed_commit !== evidence.evidence?.commit) throw new Error("Codex decision reviewed stale commit");
     await this.recordDecision(job, decision);
@@ -252,11 +279,30 @@ var WorkflowEngine = class {
     }
     await this.transition(await this.requiredJob(job.job_id), "fable_consultation", { consultation_status: "requested", consultation_origin: origin, last_action: "CONSULT_FABLE", next_action: "Run one bounded stateless Fable consultation" });
   }
+  async fallbackMalformedConsultation(job, value, stage, error) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const raw = value;
+    if (raw.action !== "CONSULT_FABLE" || raw.job_id !== job.job_id) return false;
+    let query;
+    try {
+      query = validateFableQuery(raw.fable_query);
+    } catch {
+      return false;
+    }
+    const origin = stage === "pre_opus" || stage === "after_fable_pre" ? "pre_opus" : "post_opus";
+    if (origin === "pre_opus" && query.fallback_if_skipped.action === "CORRECT_OPUS" || origin === "post_opus" && query.fallback_if_skipped.action === "DISPATCH_OPUS") return false;
+    const request = await this.artifact(job, "fable_request", "codex", query, validateFableQuery);
+    await this.addArtifact(job.job_id, request);
+    await this.store.patchJob(job.job_id, { consultation_status: "skipped", consultation_origin: origin });
+    await this.event(job.job_id, "fable_consultation_skipped", { reason: "malformed_request", detail: error instanceof Error ? error.message : String(error), origin });
+    await this.executeConsultationFallback(await this.requiredJob(job.job_id), "malformed_request", query);
+    return true;
+  }
   async fableConsultation(job) {
-    if (job.consultation_status === "attempt_started" || job.consultation_status === "fallback_executed") return this.executeConsultationFallback(job, job.consultation_status === "attempt_started" ? "ambiguous_interruption" : "resume_persisted_fallback");
     const query = await this.payload(job, "fable_request");
     const consultationId = `consult_${job.job_id}_${job.revision}`;
     const existing = await this.store.readInvocationReceipt(job.job_id, this.invocation(job));
+    if (!existing && (job.consultation_status === "attempt_started" || job.consultation_status === "fallback_executed")) return this.executeConsultationFallback(job, job.consultation_status === "attempt_started" ? "ambiguous_interruption" : "resume_persisted_fallback");
     if (!existing) await this.store.patchJob(job.job_id, { consultation_status: "attempt_started", fable_calls: job.fable_calls + 1 });
     const options = await this.fableOptions(await this.requiredPassport(job.job_id));
     try {
@@ -275,15 +321,17 @@ var WorkflowEngine = class {
   async executeConsultationFallback(job, reason, provided) {
     const query = provided ?? await this.payload(job, "fable_request");
     const fallback = query.fallback_if_skipped;
-    const routing = { reason, action: fallback.action, instructions: fallback.instructions, origin: job.consultation_origin };
-    const stored = await this.artifact(job, "routing_decision", "orchestrator", routing, (value) => value);
+    if (!job.consultation_origin) throw new Error("Consultation origin is missing");
+    const routing = validateFableFallbackRecord({ schema_version: 1, reason, action: fallback.action, instructions: fallback.instructions, origin: job.consultation_origin });
+    const stored = await this.artifact(job, "routing_decision", "orchestrator", routing, validateFableFallbackRecord);
     await this.addArtifact(job.job_id, stored);
+    const persisted = validateFableFallbackRecord(stored.payload);
     await this.store.patchJob(job.job_id, { consultation_status: "fallback_executed" });
-    if (fallback.action === "PAUSE") {
-      await this.transition(await this.requiredJob(job.job_id), "paused", { resume_phase: job.consultation_origin === "pre_opus" ? "codex_pre_opus" : "codex_post_opus", consultation_status: "fallback_executed", next_action: fallback.instructions });
+    if (persisted.action === "PAUSE") {
+      await this.transition(await this.requiredJob(job.job_id), "paused", { resume_phase: persisted.origin === "pre_opus" ? "codex_pre_opus" : "codex_post_opus", consultation_status: "fallback_executed", next_action: persisted.instructions });
       return;
     }
-    await this.dispatchOpus(await this.requiredJob(job.job_id), fallback.instructions, fallback.action === "CORRECT_OPUS");
+    await this.dispatchOpus(await this.requiredJob(job.job_id), persisted.instructions, persisted.action === "CORRECT_OPUS");
   }
   async dispatchOpus(job, instruction, correction = false) {
     if (!instruction.trim()) throw new Error("Opus instruction must not be empty");
@@ -313,7 +361,7 @@ var WorkflowEngine = class {
     const fresh = await this.requiredJob(job.job_id);
     const diffStored = await this.store.writeTextArtifact({ job_id: job.job_id, name: "opus_diff", phase: "opus_execution", revision: fresh.artifact_revision + 1, invocation_id: this.invocation(job), producing_role: "orchestrator", parent_artifact_hash: fresh.latest_artifact_hash, payload: evidence.diff || "(empty diff)" });
     await this.addArtifact(job.job_id, diffStored);
-    const checks = validateCheckResults(await this.ports.git.runChecks(job.worktree, evidence.commit, passport.required_checks));
+    const checks = await this.runChecksOnce(job, job.worktree, evidence.commit, passport.required_checks);
     const checkStored = await this.artifact(await this.requiredJob(job.job_id), "test_results", "orchestrator", checks, validateCheckResults);
     await this.addArtifact(job.job_id, checkStored);
     await this.updatePassport(job.job_id, { current_commit: evidence.commit });
@@ -324,7 +372,7 @@ var WorkflowEngine = class {
     const passport = await this.requiredPassport(job.job_id);
     const evidence = await this.ports.git.inspect(job.branch, job.worktree);
     const prior = await this.payload(job, "test_results");
-    const checks = validateCheckResults(await this.ports.git.runChecks(job.worktree, evidence.commit, passport.required_checks));
+    const checks = await this.runChecksOnce(job, job.worktree, evidence.commit, passport.required_checks);
     if (!prior.passed || !checks.passed || checks.checks.length === 0 || !hasMeaningfulChecks(checks.checks.map((check) => check.command)) || evidence.commit !== job.current_commit || evidence.diff_hash !== job.reviewed_diff_hash || prior.commit !== evidence.commit) return this.block(job, "Meaningful exact-revision verification is required before merge");
     const stored = await this.artifact(job, "test_results", "orchestrator", checks, validateCheckResults);
     await this.addArtifact(job.job_id, stored);
@@ -341,10 +389,10 @@ var WorkflowEngine = class {
     }
     const evidence = await this.ports.git.inspect(job.branch, job.worktree);
     const passport = await this.requiredPassport(job.job_id);
-    const checks = validateCheckResults(await this.ports.git.runChecks(job.worktree, evidence.commit, passport.required_checks));
+    const checks = await this.runChecksOnce(job, job.worktree, evidence.commit, passport.required_checks);
     const rechecked = await this.ports.git.inspect(job.branch, job.worktree);
     if (!checks.passed || !hasMeaningfulChecks(checks.checks.map((check) => check.command)) || evidence.commit !== job.current_commit || rechecked.commit !== job.current_commit || evidence.diff_hash !== job.reviewed_diff_hash || rechecked.diff_hash !== job.reviewed_diff_hash) throw new Error("Merge approval is stale or incomplete");
-    const merged = await this.ports.git.merge(job.branch, job.current_commit, job.target_branch, job.base_commit);
+    const merged = await this.mergeOnce(job, job.branch, job.current_commit, job.target_branch, job.base_commit);
     if (!merged.success) throw new Error(`Merge failed closed: ${merged.detail}`);
     await this.transition(job, "done", { next_action: "Workflow complete" });
     await this.event(job.job_id, "workflow_done", { commit: job.current_commit, diff_hash: evidence.diff_hash });
@@ -399,7 +447,7 @@ var WorkflowEngine = class {
     const passport = await this.requiredPassport(job.job_id);
     const invocationId = this.invocation(job);
     if (passport.decisions.some((item) => item.invocation_id === invocationId)) return;
-    await this.updatePassport(job.job_id, { decisions: [...passport.decisions, { invocation_id: invocationId, action: decision.action, summary: decision.summary, provenance: "codex", timestamp: (/* @__PURE__ */ new Date()).toISOString() }] });
+    await this.updatePassport(job.job_id, { decisions: [...passport.decisions, { invocation_id: invocationId, action: decision.action, summary: decision.summary, provenance: "codex", timestamp: (/* @__PURE__ */ new Date()).toISOString(), fable_advice_disposition: decision.fable_advice_disposition, fable_error: decision.fable_error, fable_iteration_effect: decision.fable_iteration_effect }] });
   }
   async updatePassport(jobId, patch) {
     const passport = await this.requiredPassport(jobId);
@@ -409,18 +457,22 @@ var WorkflowEngine = class {
   }
   async rotateSession(jobId, role, reason) {
     const sessions = await this.requiredSessions(jobId);
+    const passport = await this.requiredPassport(jobId);
     const key = role === "codex" ? "codex_thread_id" : "opus_session_id";
     const previous = sessions[key];
     const rotation = { role, previous_id: previous, next_id: null, reason: reason.trim() || "manual rotation", timestamp: (/* @__PURE__ */ new Date()).toISOString() };
-    const updated = { ...sessions, [key]: null, ...role === "opus" ? { opus_brief_hash: null } : {}, modes: { ...sessions.modes, [role]: "none" }, rotation_history: [...sessions.rotation_history, rotation], updated_at: rotation.timestamp };
-    await this.store.writeSessions(updated);
-    await this.updatePassport(jobId, { session_references: { codex: updated.codex_thread_id, opus: updated.opus_session_id }, session_modes: updated.modes, rotation_history: updated.rotation_history });
+    const updated = { ...sessions, sessions_revision: sessions.sessions_revision + 1, [key]: null, ...role === "opus" ? { opus_brief_hash: null } : {}, modes: { ...sessions.modes, [role]: "none" }, rotation_history: [...sessions.rotation_history, rotation], updated_at: rotation.timestamp };
+    const updatedPassport = { ...passport, passport_revision: passport.passport_revision + 1, session_references: { codex: updated.codex_thread_id, opus: updated.opus_session_id }, session_modes: updated.modes, rotation_history: updated.rotation_history };
+    await this.store.commitSessionsAndPassport(updated, updatedPassport);
     await this.event(jobId, "session_rotated", rotation);
   }
   async recordRole(job, role, result) {
     const sessions = await this.requiredSessions(job.job_id);
     const invocationId = this.invocation(job);
-    if (sessions.recorded_invocations.includes(invocationId)) return;
+    if (sessions.recorded_invocations.includes(invocationId)) {
+      await this.syncPassportSessions(job.job_id, sessions);
+      return;
+    }
     const u = sessions.usage[role];
     const inputChars = result.usage?.input_chars ?? 0;
     const outputChars = result.usage?.output_chars ?? Buffer.byteLength(typeof result.value === "string" ? result.value : JSON.stringify(result.value));
@@ -429,9 +481,16 @@ var WorkflowEngine = class {
     const previous = role === "codex" ? sessions.codex_thread_id : role === "opus" ? sessions.opus_session_id : null;
     const next = result.session_id ?? previous;
     const rotation = role !== "fable" && result.resume_failed ? { role, previous_id: previous, next_id: next, reason: "native continuation unavailable or invalid; passport handoff used", timestamp: (/* @__PURE__ */ new Date()).toISOString() } : null;
-    const updated = { ...sessions, codex_thread_id: role === "codex" ? next : sessions.codex_thread_id, opus_session_id: role === "opus" ? next : sessions.opus_session_id, opus_brief_hash: role === "opus" ? (await this.requiredJob(job.job_id)).accepted_brief_hash : sessions.opus_brief_hash, modes: role === "fable" ? sessions.modes : { ...sessions.modes, [role]: mode }, rotation_history: rotation ? [...sessions.rotation_history, rotation] : sessions.rotation_history, recorded_invocations: [...sessions.recorded_invocations, invocationId], usage: { ...sessions.usage, [role]: nextUsage }, updated_at: (/* @__PURE__ */ new Date()).toISOString() };
-    await this.store.writeSessions(updated);
-    await this.updatePassport(job.job_id, { session_references: { codex: updated.codex_thread_id, opus: updated.opus_session_id }, session_modes: updated.modes, rotation_history: updated.rotation_history });
+    const updated = { ...sessions, sessions_revision: sessions.sessions_revision + 1, codex_thread_id: role === "codex" ? next : sessions.codex_thread_id, opus_session_id: role === "opus" ? next : sessions.opus_session_id, opus_brief_hash: role === "opus" ? (await this.requiredJob(job.job_id)).accepted_brief_hash : sessions.opus_brief_hash, modes: role === "fable" ? sessions.modes : { ...sessions.modes, [role]: mode }, rotation_history: rotation ? [...sessions.rotation_history, rotation] : sessions.rotation_history, recorded_invocations: [...sessions.recorded_invocations, invocationId], usage: { ...sessions.usage, [role]: nextUsage }, updated_at: (/* @__PURE__ */ new Date()).toISOString() };
+    const passport = await this.requiredPassport(job.job_id);
+    const updatedPassport = { ...passport, passport_revision: passport.passport_revision + 1, session_references: { codex: updated.codex_thread_id, opus: updated.opus_session_id }, session_modes: updated.modes, rotation_history: updated.rotation_history };
+    await this.store.commitSessionsAndPassport(updated, updatedPassport);
+  }
+  async syncPassportSessions(jobId, sessions) {
+    const passport = await this.requiredPassport(jobId);
+    const references = { codex: sessions.codex_thread_id, opus: sessions.opus_session_id };
+    if (JSON.stringify(passport.session_references) === JSON.stringify(references) && JSON.stringify(passport.session_modes) === JSON.stringify(sessions.modes) && JSON.stringify(passport.rotation_history) === JSON.stringify(sessions.rotation_history)) return;
+    await this.updatePassport(jobId, { session_references: references, session_modes: sessions.modes, rotation_history: sessions.rotation_history });
   }
   async fableOptions(passport) {
     const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "orch-fable-empty-"));
@@ -446,10 +505,10 @@ var WorkflowEngine = class {
   }
   async invoke(job, role, request, call) {
     const invocationId = this.invocation(job);
-    const requestHash = hashCanonical(request);
+    const requestHash = hashPersisted(request);
     const prior = await this.store.readInvocationReceipt(job.job_id, invocationId);
     if (prior) {
-      if (prior.role !== role || prior.phase !== job.phase || prior.request_hash !== requestHash) throw new Error("Invocation receipt does not match workflow operation");
+      if (prior.role !== role || prior.phase !== job.phase || prior.request_hash !== requestHash || prior.workflow_revision !== job.revision) throw new Error("Invocation receipt does not match workflow operation");
       const result = prior.result;
       await this.recordRole(job, role, result);
       return result;
@@ -458,7 +517,7 @@ var WorkflowEngine = class {
     try {
       const result = await call();
       result.usage = { ...result.usage, duration_ms: result.usage?.duration_ms ?? Date.now() - started };
-      const receipt = { schema_version: 2, job_id: job.job_id, invocation_id: invocationId, phase: job.phase, role, request_hash: requestHash, workflow_revision: job.revision, timestamp: (/* @__PURE__ */ new Date()).toISOString(), result };
+      const receipt = { schema_version: 2, job_id: job.job_id, invocation_id: invocationId, phase: job.phase, role, request_hash: requestHash, request, result_hash: hashPersisted(result), workflow_revision: job.revision, timestamp: (/* @__PURE__ */ new Date()).toISOString(), result };
       await this.store.writeInvocationReceipt(receipt);
       await this.recordRole(job, role, result);
       return result;
@@ -467,12 +526,33 @@ var WorkflowEngine = class {
       throw error;
     }
   }
+  async runChecksOnce(job, worktree, commit2, commands) {
+    return this.effect(job, "checks", { worktree, commit: commit2, commands }, validateCheckResults, () => this.ports.git.runChecks(worktree, commit2, commands));
+  }
+  async mergeOnce(job, branch, commit2, targetBranch, baseCommit) {
+    return this.effect(job, "merge", { branch, commit: commit2, targetBranch, baseCommit }, validateMergeResult, () => this.ports.git.merge(branch, commit2, targetBranch, baseCommit));
+  }
+  async effect(job, kind, request, validate, call) {
+    const invocationId = this.invocation(job);
+    const requestHash = hashPersisted(request);
+    const prior = await this.store.readEffectReceipt(job.job_id, invocationId, kind);
+    if (prior) {
+      if (prior.request_hash !== requestHash || prior.workflow_revision !== job.revision || prior.phase !== job.phase) throw new Error("Workflow effect receipt does not match current operation");
+      if (prior.status === "started") throw new Error(`AMBIGUOUS_EFFECT: ${kind} may have run for ${invocationId}; automatic retry is prohibited`);
+      return validate(prior.result);
+    }
+    const started = { schema_version: 2, job_id: job.job_id, invocation_id: invocationId, phase: job.phase, kind, request_hash: requestHash, request, result_hash: null, workflow_revision: job.revision, status: "started", timestamp: (/* @__PURE__ */ new Date()).toISOString(), result: null };
+    await this.store.writeEffectReceipt(started);
+    const result = validate(await call());
+    await this.store.writeEffectReceipt({ ...started, status: "completed", result_hash: hashPersisted(result), timestamp: (/* @__PURE__ */ new Date()).toISOString(), result });
+    return result;
+  }
   async recordFailedRoleCall(job, role, durationMs) {
     const sessions = await this.requiredSessions(job.job_id);
     const invocationId = this.invocation(job);
     if (sessions.recorded_invocations.includes(invocationId)) return;
     const current = sessions.usage[role];
-    await this.store.writeSessions({ ...sessions, recorded_invocations: [...sessions.recorded_invocations, invocationId], usage: { ...sessions.usage, [role]: { ...current, calls: current.calls + 1, duration_ms: current.duration_ms + durationMs, failed_calls: current.failed_calls + 1 } }, updated_at: (/* @__PURE__ */ new Date()).toISOString() });
+    await this.store.writeSessions({ ...sessions, sessions_revision: sessions.sessions_revision + 1, recorded_invocations: [...sessions.recorded_invocations, invocationId], usage: { ...sessions.usage, [role]: { ...current, calls: current.calls + 1, duration_ms: current.duration_ms + durationMs, failed_calls: current.failed_calls + 1 } }, updated_at: (/* @__PURE__ */ new Date()).toISOString() });
   }
   invocation(job) {
     if (!job.current_operation || job.current_operation.phase !== job.phase) throw new Error(`Workflow phase ${job.phase} has no reserved invocation`);
@@ -514,7 +594,13 @@ function usage() {
 function hasMeaningfulChecks(commands) {
   return commands.some((command) => /^(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|typecheck|lint|check|build)|exec\s+(?:vitest|jest|eslint|tsc))\b|^(?:npx\s+)?(?:vitest|jest|eslint|tsc)\b|^(?:pytest|python(?:3)?\s+-m\s+(?:pytest|unittest|compileall)|go\s+test|cargo\s+(?:test|check|clippy)|dotnet\s+(?:test|build)|mvn\s+test|gradle\s+test|make\s+(?:test|check|lint|build))\b/i.test(command.trim().replace(/\s+/g, " ")));
 }
+function validateMergeResult(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Merge result must be an object");
+  const result = value;
+  if (Object.keys(result).some((key) => key !== "success" && key !== "detail") || typeof result.success !== "boolean" || typeof result.detail !== "string") throw new Error("Merge result is malformed");
+  return { success: result.success, detail: result.detail };
+}
 
-export { DEFAULT_WORKFLOW_CONFIG, WORKFLOW_SCHEMA_VERSION, WorkflowEngine, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableQuery, validateOpusResult };
-//# sourceMappingURL=chunk-DT7UFNKU.js.map
-//# sourceMappingURL=chunk-DT7UFNKU.js.map
+export { DEFAULT_WORKFLOW_CONFIG, WORKFLOW_SCHEMA_VERSION, WorkflowEngine, hasMeaningfulChecks, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult };
+//# sourceMappingURL=chunk-Z6DOEI2O.js.map
+//# sourceMappingURL=chunk-Z6DOEI2O.js.map

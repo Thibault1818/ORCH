@@ -263,6 +263,17 @@ interface CodexDecisionV2 {
     risk_level: 'low' | 'medium' | 'high';
     fable_query: FableQueryV1 | null;
     reviewed_commit: string | null;
+    fable_advice_disposition: 'accepted' | 'rejected' | null;
+    fable_error: string | null;
+    fable_iteration_effect: 'avoided' | 'added' | 'unchanged' | null;
+}
+type FableFallbackReason = 'direct_mode' | 'workflow_cap_or_duplicate' | 'risk_not_low' | 'input_oversized' | 'fable_unavailable' | 'fable_failed' | 'malformed_request' | 'ambiguous_interruption' | 'resume_persisted_fallback';
+interface FableFallbackRecordV1 {
+    schema_version: 1;
+    reason: FableFallbackReason;
+    action: FableFallbackV1['action'];
+    instructions: string;
+    origin: 'pre_opus' | 'post_opus';
 }
 interface FableAdviceV1 {
     schema_version: 1;
@@ -295,6 +306,7 @@ type CodexDecisionStage = 'pre_opus' | 'post_opus' | 'after_fable_pre' | 'after_
 declare function validateCodexDecision(value: unknown, stage: CodexDecisionStage): CodexDecisionV2;
 declare function validateFableQuery(value: unknown): FableQueryV1;
 declare function validateFableAdvice(value: unknown): FableAdviceV1;
+declare function validateFableFallbackRecord(value: unknown): FableFallbackRecordV1;
 declare function validateOpusResult(value: unknown): OpusResult;
 declare function validateCheckResults(value: unknown): CheckResults;
 
@@ -343,6 +355,9 @@ interface WorkflowDecision {
     summary: string;
     provenance: 'codex';
     timestamp: string;
+    fable_advice_disposition: 'accepted' | 'rejected' | null;
+    fable_error: string | null;
+    fable_iteration_effect: 'avoided' | 'added' | 'unchanged' | null;
 }
 interface WorkflowJobV2 {
     schema_version: 2;
@@ -434,6 +449,7 @@ interface AgentUsage {
 }
 interface WorkflowSessionsV2 {
     schema_version: 2;
+    sessions_revision: number;
     job_id: string;
     codex_thread_id: string | null;
     opus_session_id: string | null;
@@ -466,9 +482,25 @@ interface WorkflowInvocationReceiptV2 {
     phase: WorkflowPhase;
     role: 'codex' | 'fable' | 'opus';
     request_hash: string;
+    request: unknown;
+    result_hash: string;
     workflow_revision: number;
     timestamp: string;
     result: unknown;
+}
+interface WorkflowEffectReceiptV2 {
+    schema_version: 2;
+    job_id: string;
+    invocation_id: string;
+    phase: WorkflowPhase;
+    kind: 'checks' | 'merge';
+    request_hash: string;
+    request: unknown;
+    result_hash: string | null;
+    workflow_revision: number;
+    status: 'started' | 'completed';
+    timestamp: string;
+    result: unknown | null;
 }
 interface WorkflowEventV2 {
     schema_version: 2;
@@ -1833,10 +1865,13 @@ declare class WorkflowArtifactStore {
     writePassport(value: WorkflowPassportV1): Promise<void>;
     readSessions(jobId: string): Promise<WorkflowSessionsV1 | null>;
     writeSessions(value: WorkflowSessionsV1): Promise<void>;
+    commitSessionsAndPassport(sessionsValue: WorkflowSessionsV1, passportValue: WorkflowPassportV1): Promise<void>;
     appendEvent(event: WorkflowEventV1): Promise<void>;
     readEvents(jobId: string): Promise<WorkflowEventV1[]>;
     writeInvocationReceipt(value: WorkflowInvocationReceiptV1): Promise<void>;
     readInvocationReceipt(jobId: string, invocationId: string): Promise<WorkflowInvocationReceiptV1 | null>;
+    readEffectReceipt(jobId: string, invocationId: string, kind: WorkflowEffectReceiptV2['kind']): Promise<WorkflowEffectReceiptV2 | null>;
+    writeEffectReceipt(value: WorkflowEffectReceiptV2): Promise<void>;
     listJobs(): Promise<WorkflowJobV1[]>;
     artifactPath(jobId: string, name: ArtifactName, revision: number): string;
     private requiredJob;
@@ -1846,6 +1881,10 @@ declare class WorkflowArtifactStore {
     private write;
     private recoverTransition;
     private applyTransition;
+    private recoverPassport;
+    private applyPassport;
+    private recoverSessions;
+    private applySessions;
     private secureDir;
     private lock;
 }
@@ -1964,6 +2003,7 @@ declare class WorkflowEngine {
     private step;
     private codexDecision;
     private routeConsultation;
+    private fallbackMalformedConsultation;
     private fableConsultation;
     private executeConsultationFallback;
     private dispatchOpus;
@@ -1983,9 +2023,13 @@ declare class WorkflowEngine {
     private updatePassport;
     rotateSession(jobId: string, role: 'codex' | 'opus', reason: string): Promise<void>;
     private recordRole;
+    private syncPassportSessions;
     private fableOptions;
     private fableCall;
     private invoke;
+    private runChecksOnce;
+    private mergeOnce;
+    private effect;
     private recordFailedRoleCall;
     private invocation;
     private assertAllowedScope;
@@ -2238,4 +2282,4 @@ declare function buildFullContainer(context: CliContext): Promise<Container>;
  */
 declare function buildContainer(context: CliContext): Promise<Container>;
 
-export { AGENT_SHOP_TEMPLATES, ARTIFACT_FILES, type AdapterErrorHint, AdapterErrorKind, type AdapterKind, AdapterRegistry, type AdapterTestResult, type Agent, type AgentConfig, type AgentEvent, type AgentLastError, AgentNotFoundError, AgentService, type AgentShopTemplate, type AgentStats, type AgentStatus, type AgentUsage, type ApprovalPolicy, type ArtifactReference, type CheckResults, type ClipboardContentType, type ClipboardImage, type CodexAction, type CodexDecisionStage, type CodexDecisionV2, type CodexRolePort, type ConsultationOrigin, type ConsultationStatus, type Container, type CreateAgentInput, type CreateGoalInput, type CreateTaskInput, DEFAULT_WORKFLOW_CONFIG, ERROR_HINTS, EventBus, type EventPayload, type ExecuteParams, type FableAdviceV1, type FableFallbackV1, type FablePurpose, type FableQueryV1, type FableRolePort, type FailurePhase, type Goal, GoalHasPendingTasksError, type GoalOrchestrationPhase, type GoalOrchestrationState, type GoalStatus, type GoalTaskRole, type IAgentAdapter, type ISkillLoader, type LightContainer, MODEL_TIER_MAP, type ModelTier, NotInitializedError, type OpusResult, type OpusRolePort, Orchestrator, type OrchestratorConfig, type OrchestratorEvent, type OrchestratorEventType, type OrchestratorState, OrchestryError, type PersistedFailure, type ProducingRole, type ProjectConfig, type ReasoningEffort, type RetryEntry, type RoleProfile, type Run, type RunEvent, type RunEventType, RunService, type RunStatus, type RunningEntry, SUPPORTED_ADAPTERS, type SchedulingConfig, type SessionMode, type SessionRotation, SkillLoader, type StartWorkflowInput, type Task, TaskNotFoundError, type TaskProof, TaskService, type TaskStatus, type TokenUsage, WORKFLOW_PHASE_TRANSITIONS, WORKFLOW_SCHEMA_VERSION, type WorkflowArtifactMetadataV1, type WorkflowArtifactMetadataV2, WorkflowArtifactStore, type WorkflowConfig, type WorkflowConfigOverrides, type WorkflowDecision, WorkflowEngine, type WorkflowEventV1, type WorkflowEventV2, type WorkflowGitPort, type WorkflowInvocationReceiptV1, type WorkflowInvocationReceiptV2, type WorkflowJobV1, type WorkflowJobV2, type WorkflowMode, type WorkflowPassportV1, type WorkflowPassportV2, type WorkflowPhase, type WorkflowRolePorts, type WorkflowSessionsV1, type WorkflowSessionsV2, WorkspaceError, type WorkspaceMode, buildContainer, buildFullContainer, buildLightContainer, canTransition, canTransitionWorkflow, classifyAdapterError, createTokenUsage, defaultModelForAdapter, detectClipboardType, getClipboardImage, getShopTemplateByKey, hashCanonical, isAdapterKind, isBlocked, isClipboardToolAvailable, isDispatchable, isMcpSkill, isModelTier, isTerminal, isTerminalWorkflowPhase, resolveFailureStatus, resolveModel, templateToAgentInput, transitionWorkflow, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableQuery, validateOpusResult };
+export { AGENT_SHOP_TEMPLATES, ARTIFACT_FILES, type AdapterErrorHint, AdapterErrorKind, type AdapterKind, AdapterRegistry, type AdapterTestResult, type Agent, type AgentConfig, type AgentEvent, type AgentLastError, AgentNotFoundError, AgentService, type AgentShopTemplate, type AgentStats, type AgentStatus, type AgentUsage, type ApprovalPolicy, type ArtifactReference, type CheckResults, type ClipboardContentType, type ClipboardImage, type CodexAction, type CodexDecisionStage, type CodexDecisionV2, type CodexRolePort, type ConsultationOrigin, type ConsultationStatus, type Container, type CreateAgentInput, type CreateGoalInput, type CreateTaskInput, DEFAULT_WORKFLOW_CONFIG, ERROR_HINTS, EventBus, type EventPayload, type ExecuteParams, type FableAdviceV1, type FableFallbackReason, type FableFallbackRecordV1, type FableFallbackV1, type FablePurpose, type FableQueryV1, type FableRolePort, type FailurePhase, type Goal, GoalHasPendingTasksError, type GoalOrchestrationPhase, type GoalOrchestrationState, type GoalStatus, type GoalTaskRole, type IAgentAdapter, type ISkillLoader, type LightContainer, MODEL_TIER_MAP, type ModelTier, NotInitializedError, type OpusResult, type OpusRolePort, Orchestrator, type OrchestratorConfig, type OrchestratorEvent, type OrchestratorEventType, type OrchestratorState, OrchestryError, type PersistedFailure, type ProducingRole, type ProjectConfig, type ReasoningEffort, type RetryEntry, type RoleProfile, type Run, type RunEvent, type RunEventType, RunService, type RunStatus, type RunningEntry, SUPPORTED_ADAPTERS, type SchedulingConfig, type SessionMode, type SessionRotation, SkillLoader, type StartWorkflowInput, type Task, TaskNotFoundError, type TaskProof, TaskService, type TaskStatus, type TokenUsage, WORKFLOW_PHASE_TRANSITIONS, WORKFLOW_SCHEMA_VERSION, type WorkflowArtifactMetadataV1, type WorkflowArtifactMetadataV2, WorkflowArtifactStore, type WorkflowConfig, type WorkflowConfigOverrides, type WorkflowDecision, type WorkflowEffectReceiptV2, WorkflowEngine, type WorkflowEventV1, type WorkflowEventV2, type WorkflowGitPort, type WorkflowInvocationReceiptV1, type WorkflowInvocationReceiptV2, type WorkflowJobV1, type WorkflowJobV2, type WorkflowMode, type WorkflowPassportV1, type WorkflowPassportV2, type WorkflowPhase, type WorkflowRolePorts, type WorkflowSessionsV1, type WorkflowSessionsV2, WorkspaceError, type WorkspaceMode, buildContainer, buildFullContainer, buildLightContainer, canTransition, canTransitionWorkflow, classifyAdapterError, createTokenUsage, defaultModelForAdapter, detectClipboardType, getClipboardImage, getShopTemplateByKey, hashCanonical, isAdapterKind, isBlocked, isClipboardToolAvailable, isDispatchable, isMcpSkill, isModelTier, isTerminal, isTerminalWorkflowPhase, resolveFailureStatus, resolveModel, templateToAgentInput, transitionWorkflow, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult };

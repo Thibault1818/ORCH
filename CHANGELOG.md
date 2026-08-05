@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Adaptive and direct modes. Adaptive permits at most one stateless, low-authority Fable consultation; direct prohibits Fable completely.
 - Safe `orch setup`, workflow doctor/status/log/artifact commands, explicit session rotation, hard Fable call caps, role-specific execution profiles, and per-role usage accounting.
 - Fake Claude/Codex executable tests, restart reconciliation tests, real Git worktree and stale-evidence tests, and exact-SHA installation CI on macOS/Linux with Node 20/24.
+- Journaled passport updates, monotonic workflow revisions, idempotent worktree preparation, and durable check/merge receipts that prevent duplicate side effects after restart.
 
 ### Security
 

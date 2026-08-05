@@ -32,12 +32,18 @@
 </p>
 
 ```bash
-# Pin the secured fork; do not install the upstream npm package.
-TEMP_PREFIX="$(mktemp -d)"
-AUDITED_COMMIT_SHA="replace-with-the-reviewed-commit-sha"
+# Fully isolate npm, HOME, XDG state, and the install prefix.
+export ORCH_SANDBOX="$(mktemp -d)"
+export HOME="$ORCH_SANDBOX/home"
+export XDG_CONFIG_HOME="$ORCH_SANDBOX/xdg-config"
+export XDG_CACHE_HOME="$ORCH_SANDBOX/xdg-cache"
+export NPM_CONFIG_CACHE="$ORCH_SANDBOX/npm-cache"
+export NPM_CONFIG_USERCONFIG="$ORCH_SANDBOX/npmrc"
+export TEMP_PREFIX="$ORCH_SANDBOX/prefix"
+export AUDITED_COMMIT_SHA="<reviewed-commit-sha>"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$NPM_CONFIG_CACHE" "$TEMP_PREFIX"
 npm install -g "git+https://github.com/Thibault1818/ORCH.git#$AUDITED_COMMIT_SHA" --prefix "$TEMP_PREFIX"
 export PATH="$TEMP_PREFIX/bin:$PATH"
-cd ~/your-project && orch
 ```
 
 This repository is private/local package identity and is not published to npm. Review and update the pinned commit deliberately when adopting later fork changes.
@@ -159,7 +165,7 @@ Install the fork from the pinned Git commit shown above. ORCH auto-initializes a
 
 ### Claude Code integration
 
-Installation never changes user configuration. To deliberately register the optional `/orch` skill, run `orch setup claude-integration` and confirm the change. For an explicitly authorized persistent installation, use the same exact-SHA command with a dedicated prefix you control instead of the temporary prefix; do not install the unpinned upstream package.
+Installation never changes user configuration. To deliberately register the optional `/orch` skill, run `orch setup claude-integration` and confirm the change. For an explicitly authorized persistent installation, use `npm install -g "git+https://github.com/Thibault1818/ORCH.git#<reviewed-commit-sha>" --prefix "$HOME/.local"`; direct dependencies are pinned and a shrinkwrap is shipped, while npm/Git/platform behavior remains outside byte-for-byte reproducibility guarantees.
 
 ### Recoverable direct workflow
 
@@ -174,7 +180,7 @@ Codex returns strict phase-valid actions: `DISPATCH_OPUS`, `ACCEPT`, `CORRECT_OP
 
 After a terminal restart, use `orch workflow status` and then `orch workflow resume <job-id> --reason "terminal restarted"`. If status reports an interrupted invocation without a durable receipt, retry only after review with `--retry-invocation --reason "approved retry"`. Use `orch workflow session-rotate <job-id> opus --reason "expired session"` when a stored identity is invalid. ORCH defaults to an honest compact `passport_handoff`, even when help output advertises resume. Set `ORCHESTRY_ENABLE_NATIVE_RESUME=1` only after empirically verifying continuation for the installed CLI versions; invalid identities then rotate once through a handoff, while ambiguous timeouts fail closed without a second call.
 
-To remove a sandbox installation, run `rm -rf "$TEMP_PREFIX"` and remove that prefix from the current shell's `PATH`. ORCH does not alter shell profiles.
+To remove the complete sandbox installation, workflow state, and worktrees, run `git worktree list`, remove any listed `.orchestry/workspaces/<job-id>` with `git worktree remove`, delete corresponding `orchestry/workflow/<job-id>` branches, then run `rm -rf .orchestry "$ORCH_SANDBOX"`. If optional Claude integration was explicitly installed, remove `~/.claude/skills/orch` separately. ORCH does not alter shell profiles.
 
 ```
 /orch deploy a team to refactor the auth module and add tests

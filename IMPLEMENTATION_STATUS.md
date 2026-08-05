@@ -10,7 +10,7 @@ Dangerous permission bypass and shell execution are disabled by default and requ
 
 ## Verification
 
-The workflow uses a schema-v2 direct Codex -> Opus -> Codex state machine. Deterministic fake adapters cover adaptive zero-Fable execution, direct mode, one optional advisory consultation, safe consultation fallback, direct correction cycles, phase-valid actions, restart recovery, stale commit/diff rejection, deterministic checks, and fail-closed merging. Native-boundary tests verify role-specific argv and stdin-only prompt transport. Legacy schema-v1 jobs remain inspectable but are blocked from unsafe resume. CI runs exact-commit Git installation in isolated prefixes on macOS and Linux with Node 20 and 24.
+The workflow uses a schema-v2 direct Codex -> Opus -> Codex state machine. Deterministic fake adapters cover adaptive zero-Fable execution, direct mode, one optional advisory consultation, persisted fallback routing, direct correction cycles, phase-valid actions, monotonic revisions, journal recovery, completed-effect replay, ambiguous-effect blocking, stale commit/diff rejection, deterministic checks, and fail-closed merging. Native-boundary tests verify role-specific argv and stdin-only prompt transport. Legacy schema-v1 jobs remain inspectable but are blocked from unsafe resume. CI runs exact-commit Git installation in isolated prefixes on macOS and Linux with Node 20 and 24.
 
 ## Upstream Reconciliation
 
@@ -18,4 +18,4 @@ The fork and upstream were fetched and compared before implementation. Changes r
 
 ## Limitation
 
-Native resume remains disabled until an installed CLI passes a documented end-to-end continuation probe. `orch workflow doctor` reports detected versions/options and identifies `passport_handoff` honestly. A reserved but interrupted operation pauses for manual review rather than risking a duplicate paid call. `start` runs autonomously in the foreground after printing the recoverable job ID.
+Native resume remains disabled until an installed CLI passes a documented end-to-end continuation probe. `orch workflow doctor` reports detected versions/options and identifies `passport_handoff` honestly. Model invocations, checks, and merge attempts use durable receipts; ambiguous external effects block permanently rather than risk duplication. `start` runs autonomously in the foreground after printing the recoverable job ID.

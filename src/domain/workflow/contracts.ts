@@ -26,7 +26,13 @@ export interface CodexDecisionV2 {
   risk_level: 'low' | 'medium' | 'high';
   fable_query: FableQueryV1 | null;
   reviewed_commit: string | null;
+  fable_advice_disposition: 'accepted' | 'rejected' | null;
+  fable_error: string | null;
+  fable_iteration_effect: 'avoided' | 'added' | 'unchanged' | null;
 }
+
+export type FableFallbackReason = 'direct_mode' | 'workflow_cap_or_duplicate' | 'risk_not_low' | 'input_oversized' | 'fable_unavailable' | 'fable_failed' | 'malformed_request' | 'ambiguous_interruption' | 'resume_persisted_fallback';
+export interface FableFallbackRecordV1 { schema_version: 1; reason: FableFallbackReason; action: FableFallbackV1['action']; instructions: string; origin: 'pre_opus' | 'post_opus'; }
 
 export interface FableAdviceV1 {
   schema_version: 1;
@@ -57,7 +63,7 @@ export interface CheckResults {
 export type CodexDecisionStage = 'pre_opus' | 'post_opus' | 'after_fable_pre' | 'after_fable_post';
 
 export function validateCodexDecision(value: unknown, stage: CodexDecisionStage): CodexDecisionV2 {
-  const o = exact(value, ['schema_version', 'job_id', 'action', 'summary', 'implementation_brief', 'required_changes', 'risk_level', 'fable_query', 'reviewed_commit'], 'Codex decision');
+  const o = exact(value, ['schema_version', 'job_id', 'action', 'summary', 'implementation_brief', 'required_changes', 'risk_level', 'fable_query', 'reviewed_commit', 'fable_advice_disposition', 'fable_error', 'fable_iteration_effect'], 'Codex decision');
   if (o.schema_version !== 2) throw new Error('Unsupported Codex decision schema version');
   const action = enumeration(o.action, ['DISPATCH_OPUS', 'ACCEPT', 'CORRECT_OPUS', 'CONSULT_FABLE', 'PAUSE', 'STOP'] as const, 'action');
   const allowed = stage === 'pre_opus' ? ['DISPATCH_OPUS', 'CONSULT_FABLE', 'PAUSE', 'STOP'] : stage === 'post_opus' ? ['ACCEPT', 'CORRECT_OPUS', 'CONSULT_FABLE', 'PAUSE', 'STOP'] : stage === 'after_fable_pre' ? ['DISPATCH_OPUS', 'PAUSE', 'STOP'] : ['ACCEPT', 'CORRECT_OPUS', 'PAUSE', 'STOP'];
@@ -66,18 +72,23 @@ export function validateCodexDecision(value: unknown, stage: CodexDecisionStage)
   const requiredChanges = strings(o.required_changes, 'required_changes');
   const fableQuery = o.fable_query === null ? null : validateFableQuery(o.fable_query);
   const reviewedCommit = o.reviewed_commit === null ? null : commit(o.reviewed_commit);
+  const disposition = o.fable_advice_disposition === null ? null : enumeration(o.fable_advice_disposition, ['accepted', 'rejected'] as const, 'fable_advice_disposition');
+  const fableError = o.fable_error === null ? null : nonEmpty(o.fable_error, 'fable_error');
+  const iterationEffect = o.fable_iteration_effect === null ? null : enumeration(o.fable_iteration_effect, ['avoided', 'added', 'unchanged'] as const, 'fable_iteration_effect');
+  const afterFable = stage === 'after_fable_pre' || stage === 'after_fable_post';
   if (action === 'DISPATCH_OPUS' && !implementationBrief) throw new Error('DISPATCH_OPUS requires implementation_brief');
   if (action !== 'DISPATCH_OPUS' && implementationBrief !== null) throw new Error(`${action} cannot include implementation_brief`);
   if (action === 'CORRECT_OPUS' && requiredChanges.length === 0) throw new Error('CORRECT_OPUS requires required_changes');
   if (action !== 'CORRECT_OPUS' && requiredChanges.length > 0) throw new Error(`${action} cannot include required_changes`);
   if (action === 'CONSULT_FABLE' && !fableQuery) throw new Error('CONSULT_FABLE requires fable_query');
   if (action !== 'CONSULT_FABLE' && fableQuery !== null) throw new Error(`${action} requires fable_query null`);
-  if (action === 'CONSULT_FABLE' && o.risk_level !== 'low') throw new Error('CONSULT_FABLE requires low risk');
   if (fableQuery && (stage === 'pre_opus' || stage === 'after_fable_pre') && fableQuery.fallback_if_skipped.action === 'CORRECT_OPUS') throw new Error('Pre-Opus consultation cannot use CORRECT_OPUS fallback');
   if (fableQuery && (stage === 'post_opus' || stage === 'after_fable_post') && fableQuery.fallback_if_skipped.action === 'DISPATCH_OPUS') throw new Error('Post-Opus consultation cannot use DISPATCH_OPUS fallback');
   if ((stage === 'post_opus' || stage === 'after_fable_post') && reviewedCommit === null) throw new Error('Post-Opus decision requires reviewed_commit');
   if ((stage === 'pre_opus' || stage === 'after_fable_pre') && reviewedCommit !== null) throw new Error('Pre-Opus decision cannot include reviewed_commit');
-  return { schema_version: 2, job_id: id(o.job_id), action, summary: nonEmpty(o.summary, 'summary'), implementation_brief: implementationBrief, required_changes: requiredChanges, risk_level: enumeration(o.risk_level, ['low', 'medium', 'high'] as const, 'risk_level'), fable_query: fableQuery, reviewed_commit: reviewedCommit };
+  if (afterFable && (disposition === null || iterationEffect === null)) throw new Error('After-Fable decision must record advice disposition and iteration effect');
+  if (!afterFable && (disposition !== null || fableError !== null || iterationEffect !== null)) throw new Error('Non-Fable decision cannot record Fable outcome');
+  return { schema_version: 2, job_id: id(o.job_id), action, summary: nonEmpty(o.summary, 'summary'), implementation_brief: implementationBrief, required_changes: requiredChanges, risk_level: enumeration(o.risk_level, ['low', 'medium', 'high'] as const, 'risk_level'), fable_query: fableQuery, reviewed_commit: reviewedCommit, fable_advice_disposition: disposition, fable_error: fableError, fable_iteration_effect: iterationEffect };
 }
 
 export function validateFableQuery(value: unknown): FableQueryV1 {
@@ -95,6 +106,12 @@ export function validateFableAdvice(value: unknown): FableAdviceV1 {
   const o = exact(value, ['schema_version', 'consultation_id', 'answer', 'alternatives', 'uncertainties'], 'Fable advice');
   if (o.schema_version !== 1) throw new Error('Unsupported Fable advice schema version');
   return { schema_version: 1, consultation_id: id(o.consultation_id), answer: nonEmpty(o.answer, 'answer'), alternatives: strings(o.alternatives, 'alternatives'), uncertainties: strings(o.uncertainties, 'uncertainties') };
+}
+
+export function validateFableFallbackRecord(value: unknown): FableFallbackRecordV1 {
+  const o = exact(value, ['schema_version', 'reason', 'action', 'instructions', 'origin'], 'Fable fallback record');
+  if (o.schema_version !== 1) throw new Error('Unsupported Fable fallback record schema version');
+  return { schema_version: 1, reason: enumeration(o.reason, ['direct_mode', 'workflow_cap_or_duplicate', 'risk_not_low', 'input_oversized', 'fable_unavailable', 'fable_failed', 'malformed_request', 'ambiguous_interruption', 'resume_persisted_fallback'] as const, 'reason'), action: enumeration(o.action, ['DISPATCH_OPUS', 'CORRECT_OPUS', 'PAUSE'] as const, 'fallback action'), instructions: nonEmpty(o.instructions, 'fallback instructions'), origin: enumeration(o.origin, ['pre_opus', 'post_opus'] as const, 'origin') };
 }
 
 export function validateOpusResult(value: unknown): OpusResult {

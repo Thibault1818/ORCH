@@ -1,7 +1,7 @@
 import { buildChildEnv } from './chunk-RFV7B6JD.js';
 import './chunk-UG72A2JI.js';
 import './chunk-Z7JNYNWE.js';
-import { hashCanonical } from './chunk-VBS3B32E.js';
+import { hashCanonical } from './chunk-UTG567T3.js';
 import './chunk-54K3JU53.js';
 import './chunk-RQZGDMFG.js';
 import './chunk-UGPJGAIN.js';
@@ -17,7 +17,7 @@ var NativeCodexWorkflowAdapter = class {
   }
   pm;
   decide(passport, stage, evidence, thread) {
-    const instruction = "Return only strict JSON with schema_version 2, job_id, action DISPATCH_OPUS|ACCEPT|CORRECT_OPUS|CONSULT_FABLE|PAUSE|STOP, summary, implementation_brief, required_changes, risk_level low|medium|high, fable_query, reviewed_commit. Use fable_query:null normally. CONSULT_FABLE is exceptional, low-risk, advisory-only, and requires purpose, question, verification_method, and fallback_if_skipped. Never ask Fable about repository facts, security, architecture, merge approval, or irreversible decisions.";
+    const instruction = "Return only strict JSON with schema_version 2, job_id, action DISPATCH_OPUS|ACCEPT|CORRECT_OPUS|CONSULT_FABLE|PAUSE|STOP, summary, implementation_brief, required_changes, risk_level low|medium|high, fable_query, reviewed_commit, fable_advice_disposition, fable_error, fable_iteration_effect. Use fable_query:null normally. Set the three Fable outcome fields to null except after a Fable consultation; then record accepted|rejected, any explicit error or null, and avoided|added|unchanged iteration effect. CONSULT_FABLE is exceptional, low-risk, advisory-only, and requires purpose, question, verification_method, and fallback_if_skipped. Never ask Fable about repository facts, security, architecture, merge approval, or irreversible decisions.";
     return this.call(instruction, { stage, passport: project(passport), ...evidence }, passport, thread, evidence.evidence?.worktree ?? process.cwd());
   }
   async available() {
@@ -150,8 +150,19 @@ var NativeWorkflowGitGateway = class {
     const worktree = path.join(this.projectRoot, ".orchestry", "workspaces", jobId);
     await fs.mkdir(path.dirname(worktree), { recursive: true, mode: 448 });
     try {
+      const existingBranch = (await git(worktree, ["branch", "--show-current"])).trim();
+      const existingCommit = (await git(worktree, ["rev-parse", "HEAD"])).trim();
+      const status = (await git(worktree, ["status", "--porcelain"])).trim();
+      if (existingBranch !== branch || existingCommit !== base_commit || status) throw new Error("Existing workflow worktree does not match the expected clean base");
+      return { branch, worktree, target_branch, base_commit };
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("does not match")) throw error;
+    }
+    try {
       await git(this.projectRoot, ["worktree", "add", worktree, "-b", branch, base_commit]);
     } catch {
+      const branchCommit = await git(this.projectRoot, ["rev-parse", branch]).then((value) => value.trim()).catch(() => null);
+      if (branchCommit !== base_commit) throw new Error("Existing workflow branch does not match the expected base");
       await git(this.projectRoot, ["worktree", "prune"]);
       await git(this.projectRoot, ["worktree", "add", worktree, branch]);
     }
@@ -327,5 +338,5 @@ function project(passport) {
 }
 
 export { NativeCodexWorkflowAdapter, NativeFableWorkflowAdapter, NativeOpusWorkflowAdapter, NativeWorkflowGitGateway, detectWorkflowCapabilities };
-//# sourceMappingURL=native-adapters-F64FYDGR.js.map
-//# sourceMappingURL=native-adapters-F64FYDGR.js.map
+//# sourceMappingURL=native-adapters-MDNK25SY.js.map
+//# sourceMappingURL=native-adapters-MDNK25SY.js.map
