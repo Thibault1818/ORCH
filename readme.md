@@ -13,7 +13,7 @@
 <p align="center">
   <a href="https://github.com/Thibault1818/ORCH"><img src="https://img.shields.io/badge/source-secured%20fork-f59e0b?style=for-the-badge&labelColor=0a0a0a" alt="Secured fork" /></a>&nbsp;
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-f59e0b?style=for-the-badge&labelColor=0a0a0a" alt="MIT License" /></a>&nbsp;
-  <a href="#development"><img src="https://img.shields.io/badge/tests-1954%20passing-f59e0b?style=for-the-badge&labelColor=0a0a0a" alt="Tests" /></a>
+  <a href="#development"><img src="https://img.shields.io/badge/tests-Vitest-f59e0b?style=for-the-badge&labelColor=0a0a0a" alt="Tests" /></a>
 </p>
 
 <br/>
@@ -32,34 +32,44 @@
 </p>
 
 ```bash
-# Pin the secured fork; do not install the upstream npm package.
-npm install -g "git+https://github.com/Thibault1818/ORCH.git#6f8272cf8c4a6a3942d618be34dd5377da4d646c"
-cd ~/your-project && orch
+# Fully isolate npm, HOME, XDG state, and the install prefix.
+export ORCH_SANDBOX="$(mktemp -d)"
+export HOME="$ORCH_SANDBOX/home"
+export XDG_CONFIG_HOME="$ORCH_SANDBOX/xdg-config"
+export XDG_CACHE_HOME="$ORCH_SANDBOX/xdg-cache"
+export NPM_CONFIG_CACHE="$ORCH_SANDBOX/npm-cache"
+export NPM_CONFIG_USERCONFIG="$ORCH_SANDBOX/npmrc"
+export TEMP_PREFIX="$ORCH_SANDBOX/prefix"
+export AUDITED_COMMIT_SHA="<reviewed-commit-sha>"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$NPM_CONFIG_CACHE" "$TEMP_PREFIX"
+npm install -g "git+https://github.com/Thibault1818/ORCH.git#$AUDITED_COMMIT_SHA" --prefix "$TEMP_PREFIX"
+export PATH="$TEMP_PREFIX/bin:$PATH"
 ```
 
 This repository is private/local package identity and is not published to npm. Review and update the pinned commit deliberately when adopting later fork changes.
 
-## Codex to Fable to Opus workflow
+## Direct Codex to Opus workflow
 
-The secured fork includes a recoverable, artifact-based implementation pipeline. Opus works on a dedicated worktree and cannot merge until deterministic checks pass and Codex returns `DONE` with explicit merge authorization for the unchanged commit and diff.
+The secured fork includes a recoverable, artifact-based implementation pipeline. The normal path is Codex supervisor to Opus implementer to Codex supervisor. Opus works on a dedicated worktree and cannot merge until deterministic checks pass and Codex returns `ACCEPT` for the unchanged commit and diff.
 
 ```bash
 # First verify that the local Codex and Claude CLIs are available.
 orch workflow doctor
 
 # Start the autonomous foreground controller. It prints the recoverable job ID first.
-orch workflow start "Describe the change you want" --pipeline codex-fable-opus
+orch workflow start "Describe the change you want"            # adaptive, normally zero Fable calls
+orch workflow start "Describe the change you want" --mode direct
 
 # Monitor or recover the printed job ID from another terminal.
 orch workflow status <job-id>
 orch workflow pause <job-id>
-orch workflow resume <job-id>
+orch workflow resume <job-id> --reason "continue after review"
 orch workflow logs <job-id>
 orch workflow artifacts <job-id>
 orch workflow cancel <job-id>
 ```
 
-Fable is limited to one turn per call in an empty temporary workspace, with a three-call absolute pre-Opus cap and no automatic retry. The normal path uses two pre-Opus calls. Canonical artifacts and session references live under `.orchestry/workflows/<job-id>/` with restrictive permissions and secret redaction.
+Fable is an optional, stateless, advisory-only consultant. Adaptive mode permits at most one narrowly scoped call for the entire workflow when Codex requests it inside an already-required decision. Direct mode prohibits Fable. Denied or failed consultations execute Codex's predeclared safe fallback and do not block the direct workflow. Canonical artifacts and Codex/Opus session references live under `.orchestry/workflows/<job-id>/` with restrictive permissions and secret redaction.
 
 <br/>
 
@@ -155,7 +165,22 @@ Install the fork from the pinned Git commit shown above. ORCH auto-initializes a
 
 ### Claude Code integration
 
-Install-time side effects are disabled by default. To deliberately register the `/orch` skill and apply the optional Ink cache patch, install with `ORCH_POSTINSTALL_OPT_IN=1`; ORCH never performs this setup or any package installation in the background.
+Installation never changes user configuration. To deliberately register the optional `/orch` skill, run `orch setup claude-integration` and confirm the change. For an explicitly authorized persistent installation, use `npm install -g "git+https://github.com/Thibault1818/ORCH.git#<reviewed-commit-sha>" --prefix "$HOME/.local"`; direct dependencies are pinned and a shrinkwrap is shipped, while npm/Git/platform behavior remains outside byte-for-byte reproducibility guarantees.
+
+### Recoverable direct workflow
+
+```bash
+orch setup
+orch workflow start "Describe the implementation" --check "npm test"
+orch workflow start "Never consult Fable" --mode direct --check "npm test"
+orch workflow status
+```
+
+Codex returns strict phase-valid actions: `DISPATCH_OPUS`, `ACCEPT`, `CORRECT_OPUS`, `CONSULT_FABLE`, `PAUSE`, or `STOP`. Codex sends briefs and corrections directly to Opus. `CONSULT_FABLE` is exceptional, low-risk, bounded to one call, and its advice must return to Codex before it can influence execution. `orch workflow status` shows mode, optional consultation status, usage, context mode, and session rotations.
+
+After a terminal restart, use `orch workflow status` and then `orch workflow resume <job-id> --reason "terminal restarted"`. If status reports an interrupted invocation without a durable receipt, retry only after review with `--retry-invocation --reason "approved retry"`. Use `orch workflow session-rotate <job-id> opus --reason "expired session"` when a stored identity is invalid. ORCH defaults to an honest compact `passport_handoff`, even when help output advertises resume. Set `ORCHESTRY_ENABLE_NATIVE_RESUME=1` only after empirically verifying continuation for the installed CLI versions; invalid identities then rotate once through a handoff, while ambiguous timeouts fail closed without a second call.
+
+To remove the complete sandbox installation, workflow state, and worktrees, run `git worktree list`, remove any listed `.orchestry/workspaces/<job-id>` with `git worktree remove`, delete corresponding `orchestry/workflow/<job-id>` branches, then run `rm -rf .orchestry "$ORCH_SANDBOX"`. If optional Claude integration was explicitly installed, remove `~/.claude/skills/orch` separately. ORCH does not alter shell profiles.
 
 ```
 /orch deploy a team to refactor the auth module and add tests
@@ -209,7 +234,7 @@ orch run --all --watch
 
 ### Your code is safe
 
-> **Every agent works in an isolated git worktree.** Your `main` branch is never touched until you explicitly approve and merge. Mandatory review step in the state machine — no code ships without your OK. Agents can't overwrite each other's work.
+> **Every implementing agent works in an isolated git worktree.** The direct workflow cannot merge until Codex accepts the exact commit and diff and deterministic checks pass. Agents can't overwrite each other's work.
 
 <details>
 <summary><strong>Why does each agent need ~300 MB?</strong></summary>
@@ -635,8 +660,8 @@ src/
 
 ```bash
 npm run dev            # Run via tsx
-npm run build          # Build ESM + DTS
-npm test               # 1954 tests via Vitest
+npm run build:dist     # Build ESM + DTS
+npm test               # Full Vitest suite
 npm run typecheck      # Strict TypeScript
 ```
 
@@ -691,7 +716,7 @@ No. **Solo founders are the primary users.** You + 2 agents is already a zero-hu
 
 <br/>
 
-No. Every agent works in an isolated git worktree on its own branch. Nothing touches `main` until you explicitly approve. Mandatory review step in the state machine. Scope overlap detection prevents conflicts before they happen.
+No. Every implementing agent works in an isolated git worktree on its own branch. The direct workflow merges only after Codex accepts the exact reviewed commit and diff and deterministic checks pass. Scope overlap detection prevents conflicts before they happen.
 
 </details>
 

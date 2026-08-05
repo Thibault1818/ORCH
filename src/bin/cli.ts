@@ -43,7 +43,7 @@ const program = new Command();
 program
   .name('orchestry')
   .description('Agents Organizations — CLI orchestrator for AI agents')
-  .version('1.0.27-th.1')
+  .version('1.1.0-th.1')
   .option('--json', 'Output as JSON')
   .option('--quiet', 'Minimal output (IDs only)')
   .option('--no-color', 'Disable colors')
@@ -72,6 +72,7 @@ const COMMAND_STUBS: Array<[name: string, description: string]> = [
   ['serve',   'Headless daemon mode with structured logs'],
   ['workflow','Run the Codex-Fable-Opus workflow'],
   ['init',    'Initialize project'],
+  ['setup',   'Show setup status or configure an explicit integration'],
   ['update',  'Check for updates'],
 ];
 
@@ -105,6 +106,9 @@ async function main(): Promise<void> {
   if (sub === 'init') {
     const { registerInitCommand } = await import('../cli/commands/init.js');
     registerInitCommand(program);
+  } else if (sub === 'setup') {
+    const { registerSetupCommand } = await import('../cli/commands/setup.js');
+    registerSetupCommand(program);
   } else if (sub === 'update') {
     const { registerUpdateCommand } = await import('../cli/commands/update.js');
     registerUpdateCommand(program);
@@ -192,7 +196,7 @@ async function main(): Promise<void> {
       }
 
       // Check if user is running init, doctor, or update — let Commander handle it
-      if (sub === 'init' || sub === 'doctor' || sub === 'update') {
+      if (sub === 'init' || sub === 'setup' || sub === 'doctor' || sub === 'update') {
         await program.parseAsync(process.argv);
         return;
       }

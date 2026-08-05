@@ -6,6 +6,7 @@
 
 import type { ApprovalPolicy } from './agent.js';
 import type { WorkspaceMode } from './task.js';
+import type { WorkflowConfigOverrides } from './workflow/state.js';
 
 export interface ProjectConfig {
   name: string;
@@ -49,6 +50,7 @@ export interface OrchestratorConfig {
   execution: {
     security: ExecutionSecurityConfig;
   };
+  workflow?: WorkflowConfigOverrides;
   prompt?: {
     template?: string;
     system_template?: string;

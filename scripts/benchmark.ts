@@ -91,7 +91,7 @@ function benchCliTaskList(): BenchmarkResult {
 }
 
 function benchBuild(): BenchmarkResult {
-  const runs = [measure('npm run build')];
+  const runs = [measure('npm run build:dist')];
   return toBenchmarkResult('build', runs, TARGETS['build']!);
 }
 
@@ -267,7 +267,7 @@ async function main(): Promise<void> {
     execSync('node dist/cli.js --version', { stdio: 'pipe' });
   } catch {
     console.log('Building first (dist/ not ready)...');
-    execSync('npm run build', { stdio: 'inherit' });
+    execSync('npm run build:dist', { stdio: 'inherit' });
     console.log('');
   }
 

@@ -1,6 +1,6 @@
 {
   "name": "orch-secured-fork-local",
-  "version": "1.0.27-th.1",
+  "version": "1.1.0-th.1",
   "description": "AI agent runtime — orchestrate Claude, Cursor, Codex & OpenCode as one team. Multi-agent task automation with state machine, auto-retry, inter-agent messaging, goals and teams. Zero-config CLI + programmatic API.",
   "type": "module",
   "private": true,
@@ -14,7 +14,7 @@
   },
   "files": [
     "dist",
-    "scripts",
+    "npm-shrinkwrap.json",
     "skills"
   ],
   "main": "./dist/index.js",
@@ -27,17 +27,15 @@
   },
   "scripts": {
     "dev": "tsx src/bin/cli.ts",
-    "build": "tsup",
+    "build:dist": "tsup",
     "build:watch": "tsup --watch",
     "test": "vitest run",
     "test:watch": "vitest",
     "coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
-    "postinstall": "node scripts/postinstall.cjs || true",
     "benchmark": "tsx scripts/benchmark.ts",
-    "load-test": "tsx scripts/load-test.ts",
-    "prepublishOnly": "node -e \"throw new Error('This private fork must not be published to npm')\""
+    "load-test": "tsx scripts/load-test.ts"
   },
   "keywords": [
     "ai-agent",
@@ -81,16 +79,16 @@
     "url": "https://github.com/Thibault1818/ORCH/issues"
   },
   "dependencies": {
-    "chalk": "^5.4.1",
-    "commander": "^13.1.0",
-    "ink": "^6.8.0",
-    "js-yaml": "^5.2.3",
-    "liquidjs": "^10.27.2",
-    "nanoid": "^5.1.5",
-    "react": "^19.2.4"
+    "chalk": "5.6.2",
+    "commander": "13.1.0",
+    "ink": "6.8.0",
+    "js-yaml": "5.2.3",
+    "liquidjs": "10.27.2",
+    "nanoid": "5.1.6",
+    "react": "19.2.4"
   },
   "overrides": {
-    "ws": "^8.21.0",
+    "ws": "8.21.0",
     "esbuild": "0.28.1"
   },
   "devDependencies": {

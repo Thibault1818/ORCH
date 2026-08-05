@@ -22,8 +22,9 @@ import { printSuccess, printWarning, printError, dim } from '../output.js';
 const execFileAsync = promisify(execFileCb);
 
 /** Run init logic directly (used by auto-init on bare `orch`). */
-export async function runInit(opts: { name?: string; adapter?: string } = {}): Promise<void> {
-  const projectRoot = process.cwd();
+export async function runInit(opts: { name?: string; adapter?: string; target?: string } = {}): Promise<void> {
+  const projectRoot = path.resolve(opts.target ?? process.cwd());
+  if (opts.target) await fs.mkdir(projectRoot, { recursive: true });
   const paths = new Paths(projectRoot);
 
   if (await pathExists(paths.root)) {
@@ -249,17 +250,17 @@ async function ensureRootGitignore(projectRoot: string): Promise<void> {
 
 export function registerInitCommand(program: Command): void {
   program
-    .command('init')
+    .command('init [target]')
     .description('Initialize .orchestry/ in the current directory')
     .option('--name <name>', 'Project name')
     .option('--adapter <adapter>', 'Default agent adapter (claude, opencode, codex, cursor, pi, grok, antigravity, shell)')
-    .action(async (opts: { name?: string; adapter?: string }) => {
+    .action(async (target: string | undefined, opts: { name?: string; adapter?: string }) => {
       if (opts.adapter && !isAdapterKind(opts.adapter)) {
         printError(`Unknown adapter "${opts.adapter}"`, `Supported: ${SUPPORTED_ADAPTERS.join(', ')}`);
         process.exitCode = 2;
         return;
       }
-      await runInit(opts);
+      await runInit({ ...opts, target });
       console.log(`  Next: ${dim('orch task add "Create backend agent" --assignee agt_creator')}`);
       console.log();
     });
