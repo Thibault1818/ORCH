@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 
 const command = path.basename(process.argv[1]);
 const argv = process.argv.slice(2);
-const log = process.env.ORCH_FAKE_LOG;
+const log = process.env.HOME ? path.join(process.env.HOME, 'fake-calls.jsonl') : null;
 if (!log) process.exit(90);
 
 function record(stdin = '') {
@@ -36,7 +36,7 @@ if (!jobId) {
 
 if (command === 'claude') {
   const result = { job_id: jobId, status: 'completed', files_changed: [], commands_run: [], tests_reported: [], deviations: [], unresolved: [], summary: 'Deterministic fake implementation completed' };
-  console.log(JSON.stringify({ type: 'result', result: JSON.stringify(result), session_id: 'claude-fake', usage: {} }));
+  console.log(JSON.stringify({ type: 'result', result: JSON.stringify(result), session_id: 'claude-fake', usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }));
   process.exit(0);
 }
 
@@ -57,4 +57,4 @@ const decision = {
 };
 console.log(JSON.stringify({ type: 'thread.started', thread_id: 'codex-fake' }));
 console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(decision) } }));
-console.log(JSON.stringify({ type: 'turn.completed', usage: {} }));
+console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 0, output_tokens: 0 } }));

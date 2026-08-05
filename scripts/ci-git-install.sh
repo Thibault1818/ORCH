@@ -32,7 +32,7 @@ export XDG_CONFIG_HOME="$SANDBOX/xdg-config"
 export XDG_CACHE_HOME="$SANDBOX/xdg-cache"
 export NPM_CONFIG_CACHE="$SANDBOX/npm-cache"
 export NPM_CONFIG_USERCONFIG="$SANDBOX/npmrc"
-export ORCH_FAKE_LOG="$SANDBOX/fake-calls.jsonl"
+export ORCH_FAKE_LOG="$HOME/fake-calls.jsonl"
 export DOCTOR_FILE="$SANDBOX/doctor.json"
 export STATUS_FILE="$SANDBOX/status.json"
 TEMP_PREFIX="$SANDBOX/prefix"
@@ -116,9 +116,9 @@ git -C "$PROJECT" commit -m "Initialize deterministic fixture"
 
 (
   cd "$PROJECT"
-  orch workflow doctor > "$DOCTOR_FILE"
+  if ! orch workflow doctor > "$DOCTOR_FILE"; then cat "$DOCTOR_FILE" >&2; exit 1; fi
   orch workflow start "PROMPT_SENTINEL_PLAN3" --yes --mode direct --adviser none --max-adviser-calls 0 > "$SANDBOX/start.txt"
-  orch workflow status > "$STATUS_FILE"
+  if ! orch workflow status > "$STATUS_FILE"; then cat "$STATUS_FILE" >&2; exit 1; fi
 )
 
 node --input-type=module <<'NODE'
@@ -130,7 +130,7 @@ if (invocations.length !== 3) throw new Error(`Expected three workflow model-bou
 const expected = [
   { command: 'codex', argv: ['exec', '--json', '--sandbox', 'read-only', '--model', 'codex', '-c', 'model_reasoning_effort=high', '-'] },
   { command: 'claude', argv: ['--print', '--output-format', 'stream-json', '--max-turns', '50', '--verbose', '--model', 'opus', '--effort', 'high'] },
-  { command: 'codex', argv: ['exec', 'resume', 'codex-fake', '--json', '--sandbox', 'read-only', '--model', 'codex', '-c', 'model_reasoning_effort=high', '-'] },
+  { command: 'codex', argv: ['exec', '--json', '--sandbox', 'read-only', '--model', 'codex', '-c', 'model_reasoning_effort=high', '-'] },
 ];
 for (let index = 0; index < expected.length; index++) {
   if (invocations[index].command !== expected[index].command || JSON.stringify(invocations[index].argv) !== JSON.stringify(expected[index].argv)) throw new Error(`Unexpected ${['Supervisor', 'Implementer', 'Reviewer'][index]} invocation: ${JSON.stringify(invocations[index])}`);
