@@ -83,7 +83,10 @@ for (const file of ['dist/cli.js', 'dist/index.js', 'dist/index.d.ts', 'npm-shri
   if (installed !== committed) throw new Error(`Installed ${file} does not match GITHUB_SHA`);
 }
 const api = await import(pathToFileURL(path.join(root, 'dist/index.js')));
-if (typeof api.WorkflowEngine !== 'function' || typeof api.hashCanonical !== 'function') throw new Error('External package API import failed');
+for (const name of ['Orchestrator', 'WorkflowEngine', 'WorkflowArtifactStore', 'GovernanceStoreV3', 'GovernedMergeV3', 'AdapterRegistry', 'TaskService', 'RunService', 'buildContainer', 'buildFullContainer', 'buildLightContainer']) {
+  if (name in api) throw new Error(`Unsafe external package API export: ${name}`);
+}
+if (typeof api.validateExplicitChecks !== 'function') throw new Error('External package API import failed');
 NODE
 
 cp "$GITHUB_WORKSPACE/test/fixtures/fake-workflow-cli.mjs" "$FAKE_BIN/codex"

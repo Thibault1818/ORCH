@@ -91,7 +91,9 @@ export class WorkflowSafeguards {
     const endpoints = await this.endpoints();
     await record('platform', async () => {
       if (process.platform !== 'darwin') throw new Error('real-project workflow requires macOS sandbox-exec');
-      await verifyExecutable(await resolveExecutable('/usr/bin/sandbox-exec'));
+      const sandbox = executables.find((value) => value.realpath === '/usr/bin/sandbox-exec');
+      if (!sandbox) throw new Error('sandbox-exec is missing from the attested executable policy');
+      await verifyExecutable(sandbox);
       return 'macOS sandbox-exec is pinned';
     });
     await record('root-separation', async () => {
@@ -114,7 +116,7 @@ export class WorkflowSafeguards {
     });
     await record('sandbox-adversarial', async () => this.adversarialSandboxProbe(executables));
     await record('process-quiescence', async () => {
-      const owner = `doctor-${Date.now()}`;
+      const owner = 'workflow-doctor';
       await this.processes.awaitQuiescent?.(owner, 1_000);
       if (this.processes.active?.(owner).length) throw new Error('process registry is not quiescent');
       return 'owner process groups are quiescent';
@@ -152,6 +154,11 @@ export class WorkflowSafeguards {
     if (!this.processes.awaitQuiescent || !this.processes.active) throw new Error('Approval requires process-group quiescence support');
     await this.processes.awaitQuiescent(owner, 10_000);
     if (this.processes.active(owner).length) throw new Error(`Approval blocked while agent process groups remain active: ${owner}`);
+  }
+
+  async runQuiescent<T>(owner: string, action: () => Promise<T>): Promise<T> {
+    if (!this.processes.runQuiescent) throw new Error('Operation requires atomic process-group quiescence support');
+    return this.processes.runQuiescent(owner, action, 10_000);
   }
 
   private async adversarialSandboxProbe(executables: ExecutableDescriptor[]): Promise<string> {
@@ -197,7 +204,7 @@ export class WorkflowSafeguards {
   }
 
   private async discoverExecutables(extra: readonly string[] = []): Promise<ExecutableDescriptor[]> {
-    const names = new Set(['git', 'node', 'npm', 'npx', 'sh', 'bash', 'env', 'codex', 'claude', 'opencode', ...extra]);
+    const names = new Set(['/usr/bin/sandbox-exec', 'git', 'node', 'npm', 'npx', 'sh', 'bash', 'env', 'codex', 'claude', 'opencode', ...extra]);
     for (const value of process.env.ORCHESTRY_EXECUTABLE_ALLOWLIST?.split(path.delimiter).filter(Boolean) ?? []) names.add(value);
     const descriptors: ExecutableDescriptor[] = [];
     for (const name of names) {

@@ -25,7 +25,7 @@ beforeEach(async () => {
   await fs.writeFile(path.join(project, 'file.txt'), 'base\n');
   await exec('git', ['add', '.'], { cwd: project });
   await exec('git', ['commit', '-m', 'base'], { cwd: project });
-  manager = new WorkspaceManager(project, workspaces, new CommandRunner(new ProcessManager()));
+  manager = new WorkspaceManager(project, workspaces, new CommandRunner(new ProcessManager(path.join(workspaces, 'processes.json'))));
 });
 
 afterEach(async () => {
@@ -71,7 +71,7 @@ describe('WorkspaceManager isolated clones', () => {
   it('fails closed outside a Git repository', async () => {
     const plain = await fs.mkdtemp(path.join(os.tmpdir(), 'orch-not-git-'));
     try {
-      const isolated = new WorkspaceManager(plain, workspaces, new CommandRunner(new ProcessManager()));
+      const isolated = new WorkspaceManager(plain, workspaces, new CommandRunner(new ProcessManager(path.join(workspaces, 'processes-plain.json'))));
       await expect(isolated.prepare(task(), agent(), DEFAULT_CONFIG)).rejects.toThrow('requires a git repository');
     } finally {
       await fs.rm(plain, { recursive: true, force: true });

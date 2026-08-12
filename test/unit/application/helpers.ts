@@ -301,6 +301,7 @@ export function buildDeps(overrides: Partial<OrchestratorDeps> = {}): Orchestrat
   const executionSafeguards = overrides.executionSafeguards ?? {
     assertReady: vi.fn(async () => ({})),
     assertQuiescent: vi.fn(async () => {}),
+    runQuiescent: vi.fn(async (_owner: string, action: () => Promise<unknown>) => action()),
     executableAllowlist: vi.fn(async () => []),
     proxyEndpoint: vi.fn(async () => ({ host: '127.0.0.1', port: 4321 })),
   };

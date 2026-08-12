@@ -21,38 +21,18 @@ export { resolveModel, defaultModelForAdapter, isAdapterKind, isModelTier, MODEL
 export type { AgentShopTemplate } from './domain/agent-shop.js';
 export { AGENT_SHOP_TEMPLATES, getShopTemplateByKey } from './domain/agent-shop.js';
 
-// Application
-export { EventBus } from './application/event-bus.js';
+// Pure application helpers
 export { templateToAgentInput, isMcpSkill } from './application/agent-factory.js';
-export { TaskService } from './application/task-service.js';
-export { AgentService } from './application/agent-service.js';
-export { RunService } from './application/run-service.js';
-export { Orchestrator } from './application/orchestrator.js';
-export { WorkflowEngine, DEFAULT_WORKFLOW_CONFIG } from './application/workflow/engine.js';
-export type { StartWorkflowInput } from './application/workflow/engine.js';
-export { LegacyWorkflowRoleResolver } from './application/workflow/ports.js';
-export type { CodexRolePort, FableRolePort, OpusRolePort, WorkflowGitPort, WorkflowRolePorts, WorkflowRoleResolver, WorkflowRuntimePorts } from './application/workflow/ports.js';
 export { discoverDeterministicChecks, validateDeterministicCheckCommands, validateExplicitChecks } from './application/workflow/check-discovery.js';
 
 // Infrastructure interfaces
-export type { IAgentAdapter, AgentEvent, ExecuteParams, AdapterTestResult } from './infrastructure/adapters/interface.js';
-export { AdapterRegistry } from './infrastructure/adapters/registry.js';
 export type { ISkillLoader } from './infrastructure/skills/skill-loader.js';
 export { SkillLoader } from './infrastructure/skills/skill-loader.js';
-export { WorkflowArtifactStore, ARTIFACT_FILES, hashCanonical } from './infrastructure/workflow/artifact-store.js';
 export * from './domain/workflow/contracts.js';
 export * from './domain/workflow/state.js';
 export * from './domain/workflow/transitions.js';
 export * from './domain/workflow/roster.js';
-export * from './domain/governance/contracts-v3.js';
-export { GovernanceStoreV3, hashGovernanceRecordV3 } from './infrastructure/governance/governance-store-v3.js';
-export { GovernanceServiceV3, assertNoParallelScopeOverlap } from './application/governance/governance-service-v3.js';
-export { GovernedMergeV3 } from './application/governance/governed-merge-v3.js';
 
 // Clipboard
 export { detectClipboardType, getClipboardImage, isClipboardToolAvailable } from './infrastructure/clipboard-service.js';
 export type { ClipboardContentType, ClipboardImage } from './infrastructure/clipboard-service.js';
-
-// Container
-export { buildContainer, buildLightContainer, buildFullContainer } from './container.js';
-export type { Container, LightContainer } from './container.js';

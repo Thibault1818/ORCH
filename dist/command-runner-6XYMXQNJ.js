@@ -1,2 +1,0 @@
-#!/usr/bin/env node
-export{c as CommandRunner,h as commandFailureMessage,e as requireExecutable,f as resolveExecutable,d as streamingCommandFailureMessage,g as verifyExecutable}from'./chunk-UQEE676R.js';

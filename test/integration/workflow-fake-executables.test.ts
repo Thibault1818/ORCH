@@ -15,6 +15,7 @@ let root: string;
 let originalPath: string | undefined;
 let originalHome: string | undefined;
 let originalResume: string | undefined;
+const processManager = () => new ProcessManager(path.join(root, 'processes.json'));
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "orch-fake-v2-"));
   originalPath = process.env.PATH;
@@ -68,7 +69,7 @@ describe("workflow v2 fake executables", () => {
       },
       { text: JSON.stringify(opus()) },
     ]);
-    const pm = new ProcessManager();
+    const pm = processManager();
     const passport = samplePassport();
     await new NativeCodexWorkflowAdapter(pm).decide(
       passport,
@@ -147,7 +148,7 @@ describe("workflow v2 fake executables", () => {
     const passport = samplePassport();
     passport.config.profiles.codex.model = "";
     passport.config.profiles.opus.model = "";
-    const pm = new ProcessManager();
+    const pm = processManager();
     await new NativeCodexWorkflowAdapter(pm).decide(
       passport,
       "pre_opus",
@@ -188,7 +189,7 @@ describe("workflow v2 fake executables", () => {
   it("fails closed on malformed structured output", async () => {
     await scenario([{ text: "not-json" }]);
     await expect(
-      new NativeCodexWorkflowAdapter(new ProcessManager()).decide(
+      new NativeCodexWorkflowAdapter(processManager()).decide(
         samplePassport(),
         "pre_opus",
         { evidence: null, checks: null, opus: null, fable_advice: null },
@@ -201,7 +202,7 @@ describe("workflow v2 fake executables", () => {
     passport.config.profiles.opus.timeout_ms = 250;
     await scenario([{ text: "{}", sleep_ms: 10_000 }, { text: "{}" }]);
     await expect(
-      new NativeOpusWorkflowAdapter(new ProcessManager()).execute(
+      new NativeOpusWorkflowAdapter(processManager()).execute(
         passport,
         "continue",
         root,
@@ -219,7 +220,7 @@ describe("workflow v2 fake executables", () => {
     ]);
     const passport = samplePassport();
     const codex = await new NativeCodexWorkflowAdapter(
-      new ProcessManager(),
+      processManager(),
     ).decide(
       passport,
       "pre_opus",
@@ -232,7 +233,7 @@ describe("workflow v2 fake executables", () => {
       usage?: { duration_ms?: number };
     }> = [];
     const opusResult = await new NativeOpusWorkflowAdapter(
-      new ProcessManager(),
+      processManager(),
     ).execute(
       passport,
       "continue",

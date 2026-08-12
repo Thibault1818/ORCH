@@ -62,7 +62,7 @@ export interface OrchestratorDeps {
   processManager: IProcessManager;
   commandRunner: ICommandRunner;
   reviewExecutables: { npm: ExecutableDescriptor; npx: ExecutableDescriptor; node: ExecutableDescriptor };
-  executionSafeguards: WorkflowExecutionSafeguards & { assertReady(): Promise<unknown>; assertQuiescent(owner: string): Promise<void> };
+  executionSafeguards: WorkflowExecutionSafeguards & { assertReady(): Promise<unknown>; assertQuiescent(owner: string): Promise<void>; runQuiescent<T>(owner: string, action: () => Promise<T>): Promise<T> };
   eventBus: EventBus;
   taskService: TaskService;
   agentService: AgentService;
@@ -1990,9 +1990,10 @@ export class Orchestrator {
     if (!this.lockAcquired) return this.withTemporaryLock(() => this.approveTask(taskId));
     await this.withStateLock(async () => {
       await this.deps.executionSafeguards.assertReady();
-      await this.deps.executionSafeguards.assertQuiescent(taskId);
+      await this.deps.executionSafeguards.runQuiescent(taskId, async () => {
       const task = await this.deps.taskService.get(taskId);
       if (task.status !== 'review') throw new InvalidArgumentsError(`Task ${taskId} is not awaiting approval`);
+      if (task.labels?.includes(GOVERNED_LABEL)) throw new InvalidArgumentsError(`Task ${taskId} requires governed approval`);
       if (task.review_criteria?.length && (!task.review_results?.length || !ReviewRunner.allPassed(task.review_results))) {
         throw new InvalidArgumentsError(`Task ${taskId} has not passed its required checks`);
       }
@@ -2019,6 +2020,7 @@ export class Orchestrator {
         await this.deps.workspaceManager.cleanup(taskId, branch);
       }
       await this.deps.taskService.updateStatus(taskId, 'done');
+      });
     });
   }
 

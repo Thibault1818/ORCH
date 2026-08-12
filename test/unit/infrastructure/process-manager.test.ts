@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ProcessManager } from '../../../src/infrastructure/process/process-manager.js';
 import * as childProcess from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -76,6 +76,37 @@ describe('ProcessManager', () => {
       } finally {
         killSpy.mockRestore();
       }
+    });
+
+    it('persists a reservation before invoking native spawn', () => {
+      const mockProc = { pid: 12345, stdout: null, stderr: null, unref: vi.fn(), once: vi.fn() };
+      vi.mocked(childProcess.spawn).mockImplementation(() => {
+        const registry = JSON.parse(readFileSync(path.join(root, 'registry.json'), 'utf8')) as { reservations: Array<{ owner: string }> };
+        expect(registry.reservations).toMatchObject([{ owner: 'workflow' }]);
+        return mockProc as any;
+      });
+      manager.spawn('echo', ['hello'], { owner: 'workflow' });
+    });
+
+    it('rejects a concurrent spawn while an owner is frozen', async () => {
+      const concurrent = new ProcessManager(path.join(root, 'registry.json'));
+      let attempted = false;
+      await manager.runQuiescent('workflow', async () => {
+        expect(() => concurrent.spawn('echo', ['hello'], { owner: 'workflow' })).toThrow('frozen');
+        attempted = true;
+      });
+      expect(attempted).toBe(true);
+      expect(childProcess.spawn).not.toHaveBeenCalled();
+    });
+
+    it('adopts ownerless commands started by the frozen operation', async () => {
+      const mockProc = { pid: 12345, stdout: null, stderr: null, unref: vi.fn(), once: vi.fn() };
+      vi.mocked(childProcess.spawn).mockReturnValue(mockProc as any);
+      await manager.runQuiescent('workflow', async () => {
+        manager.spawn('echo', ['hello']);
+        const registry = JSON.parse(readFileSync(path.join(root, 'registry.json'), 'utf8')) as { groups: Array<{ owner: string }> };
+        expect(registry.groups).toMatchObject([{ owner: 'workflow' }]);
+      });
     });
   });
 

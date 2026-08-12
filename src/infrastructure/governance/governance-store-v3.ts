@@ -1,20 +1,57 @@
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { GOVERNANCE_KINDS, validateGovernanceRecordV3, type GovernanceRecordKindV3, type GovernanceRecordV3, type GovernanceRefV3, type StoredGovernanceRecordV3 } from '../../domain/governance/contracts-v3.js';
+import { GOVERNANCE_KINDS, validateGovernanceRecordV3, type CheckBindingV3, type GovernanceRecordKindV3, type GovernanceRecordV3, type GovernanceRefV3, type HumanApprovalV3, type StoredGovernanceRecordV3 } from '../../domain/governance/contracts-v3.js';
 import { sanitizeForPersistence } from '../security/redaction.js';
 import { atomicWrite, ensureDir, readJson } from '../storage/fs-utils.js';
 
 export class GovernanceStoreV3 {
   private readonly root: string;
   private readonly projectRoot: string;
-  constructor(projectRoot: string, private readonly controllerKeyPath: string) {
+  constructor(projectRoot: string, private readonly controllerKeyPath: string, private readonly authorities: GovernanceAuthoritiesV3 = {}) {
     this.projectRoot = path.resolve(projectRoot);
     this.root = path.join(this.projectRoot, '.orchestry', 'governance', 'v3');
     if (!path.isAbsolute(controllerKeyPath) || contains(this.projectRoot, controllerKeyPath)) throw new Error('Governance controller key must use an absolute path outside the repository');
   }
 
-  async put<T extends GovernanceRecordV3>(input: T): Promise<StoredGovernanceRecordV3<T>> {
+  async put<T extends Exclude<GovernanceRecordV3, CheckBindingV3 | HumanApprovalV3>>(input: T): Promise<StoredGovernanceRecordV3<T>> {
+    const kind = (input as GovernanceRecordV3).kind;
+    if (kind === 'check_binding' || kind === 'human_approval') throw new Error(`${kind} must be created by its trusted governance authority`);
+    return this.persist(input);
+  }
+
+  async runCheck(input: TrustedCheckRequestV3): Promise<StoredGovernanceRecordV3<CheckBindingV3>> {
+    const executor = this.authorities.checkExecutor;
+    if (!executor) throw new Error('Trusted governance check executor is unavailable');
+    const result = await executor.execute({ governance_id: safeId(input.governance_id), subject: input.subject, check_id: safeId(input.check_id) });
+    const snapshot = await this.read(input.governance_id, 'binding_snapshot', input.binding_snapshot.record_id);
+    if (!snapshot || snapshot.record_hash !== input.binding_snapshot.record_hash || snapshot.record.kind !== 'binding_snapshot' || !snapshot.record.bindings.some((binding) => binding.binding_id === result.executed_by_binding_id && binding.role === 'checker')) throw new Error('Trusted check executor is not bound as a checker');
+    return this.persist({
+      schema_version: 3,
+      kind: 'check_binding',
+      governance_id: input.governance_id,
+      record_id: input.record_id,
+      binding_snapshot: input.binding_snapshot,
+      subject: input.subject,
+      check_id: input.check_id,
+      command: result.command,
+      status: result.exit_code === 0 ? 'passed' : 'failed',
+      output_hash: createHash('sha256').update(result.output).digest('hex'),
+      executed_by_binding_id: result.executed_by_binding_id,
+      provenance: { command_source: 'trusted', execution_environment: 'sandboxed' },
+      started_at: result.started_at,
+      completed_at: result.completed_at,
+    });
+  }
+
+  async approve(input: TrustedApprovalRequestV3): Promise<StoredGovernanceRecordV3<HumanApprovalV3>> {
+    const identity = await this.authorities.humanIdentity?.authenticate();
+    if (!identity?.trim()) throw new Error('Authenticated human approval identity is required');
+    if (!input.reason.trim()) throw new Error('Human approval reason is required');
+    return this.persist({ schema_version: 3, kind: 'human_approval', ...input, approved_by: identity.trim(), approved_at: (this.authorities.now ?? (() => new Date().toISOString()))() });
+  }
+
+  private async persist<T extends GovernanceRecordV3>(input: T): Promise<StoredGovernanceRecordV3<T>> {
     const record = validateGovernanceRecordV3(sanitizeForPersistence(input)) as T;
     return this.lock(record.governance_id, async () => {
       await this.validateReferences(record);
@@ -88,21 +125,47 @@ export class GovernanceStoreV3 {
     await fs.mkdir(root, { recursive: true, mode: 0o700 });
     await fs.chmod(root, 0o700).catch(() => {});
     const lock = path.join(root, '.governance.lock');
+    const token = randomLockToken();
     const deadline = Date.now() + 5_000;
     while (true) {
-      try { await fs.mkdir(lock, { mode: 0o700 }); break; }
+      try { await fs.writeFile(lock, JSON.stringify({ pid: process.pid, token }), { flag: 'wx', mode: 0o600 }); break; }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        const stat = await fs.stat(lock).catch(() => null);
-        if (stat && Date.now() - stat.mtimeMs > 30_000) { await fs.rm(lock, { recursive: true, force: true }); continue; }
+        const existing = await fs.readFile(lock, 'utf8').then((raw) => JSON.parse(raw) as Record<string, unknown>).catch(() => null);
+        const stat = await fs.lstat(lock).catch(() => null);
+        if (existing && typeof existing.pid === 'number' && !processAlive(existing.pid)) { await fs.rm(lock, { force: true }); continue; }
+        if (!existing && stat && Date.now() - stat.mtimeMs > 30_000) { await fs.rm(lock, { force: true }); continue; }
         if (Date.now() > deadline) throw new Error(`Governance lock is active: ${governanceId}`);
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
     }
     try { return await work(); }
-    finally { await fs.rm(lock, { recursive: true, force: true }); }
+    finally {
+      const existing = await fs.readFile(lock, 'utf8').then((raw) => JSON.parse(raw) as Record<string, unknown>).catch(() => null);
+      if (existing?.token === token) await fs.rm(lock, { force: true });
+    }
   }
 }
+
+export interface TrustedCheckExecutorV3 {
+  execute(input: { governance_id: string; subject: CheckBindingV3['subject']; check_id: string }): Promise<{
+    command: string;
+    exit_code: number;
+    output: Uint8Array;
+    executed_by_binding_id: string;
+    started_at: string;
+    completed_at: string;
+  }>;
+}
+
+export interface GovernanceAuthoritiesV3 {
+  checkExecutor?: TrustedCheckExecutorV3;
+  humanIdentity?: { authenticate(): Promise<string> };
+  now?: () => string;
+}
+
+export type TrustedCheckRequestV3 = Pick<CheckBindingV3, 'governance_id' | 'record_id' | 'binding_snapshot' | 'subject' | 'check_id'>;
+export type TrustedApprovalRequestV3 = Pick<HumanApprovalV3, 'governance_id' | 'record_id' | 'subject' | 'reason'>;
 
 export function hashGovernanceRecordV3(value: GovernanceRecordV3): string { return hashCanonical(validateGovernanceRecordV3(value)); }
 function hashCanonical(value: unknown): string { return createHash('sha256').update(canonical(value)).digest('hex'); }
@@ -111,3 +174,5 @@ function safeId(value: string): string { if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}
 function safeEqual(left: string, right: string): boolean { const a=Buffer.from(left,'hex'),b=Buffer.from(right,'hex');return a.length===32&&b.length===32&&timingSafeEqual(a,b); }
 function contains(root: string, candidate: string): boolean { const relative=path.relative(root,path.resolve(candidate));return relative===''||(!relative.startsWith(`..${path.sep}`)&&relative!=='..'&&!path.isAbsolute(relative)); }
 function collectReferences(value: unknown): GovernanceRefV3[] { const refs: GovernanceRefV3[]=[]; const walk=(v:unknown)=>{if(!v||typeof v!=='object')return;if(Array.isArray(v)){v.forEach(walk);return;}const o=v as Record<string,unknown>;if(typeof o.kind==='string'&&typeof o.record_id==='string'&&typeof o.record_hash==='string'&&Object.keys(o).length===3)refs.push(o as unknown as GovernanceRefV3);else Object.values(o).forEach(walk)};walk(value);return refs; }
+function randomLockToken(): string { return randomUUID(); }
+function processAlive(pid: number): boolean { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; } }

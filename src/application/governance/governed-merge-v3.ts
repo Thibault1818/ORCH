@@ -11,28 +11,28 @@ export class GovernedMergeV3 {
     private readonly store: GovernanceStoreV3,
     runner: ICommandRunner,
     private readonly evidence: GitEvidenceVerifierV3,
-    private readonly quiescence: { assertQuiescent(owner: string): Promise<void> },
+    private readonly quiescence: { runQuiescent<T>(owner: string, action: () => Promise<T>): Promise<T> },
     private readonly operationLock: ProjectOperationLockV3,
   ) {
     this.gitRunner = (async () => new HardenedGit(runner, await resolveExecutable('git')))();
   }
 
-  async approve(input: { governance_id: string; record_id: string; integration_record_id: string; integration_record_hash: string; approved_by: string; reason: string; approved_at: string }): Promise<StoredGovernanceRecordV3<HumanApprovalV3>> {
+  async approve(input: { governance_id: string; record_id: string; integration_record_id: string; integration_record_hash: string; reason: string }): Promise<StoredGovernanceRecordV3<HumanApprovalV3>> {
     const lease = await this.operationLock.acquire(input.governance_id);
     try {
-      await this.quiescence.assertQuiescent(input.governance_id);
-      await lease.assertOwned();
-      if (!input.approved_by.trim() || !input.reason.trim()) throw new Error('Human approval identity and reason are required');
-      const integration = await this.store.read(input.governance_id, 'integration_receipt', input.integration_record_id);
-      if (!integration || integration.record_hash !== input.integration_record_hash) throw new Error('Human approval references stale integration evidence');
-      return await this.store.put({ schema_version: 3, kind: 'human_approval', governance_id: input.governance_id, record_id: input.record_id, subject: { kind: 'integration_receipt', record_id: input.integration_record_id, record_hash: input.integration_record_hash }, approved_by: input.approved_by, reason: input.reason, approved_at: input.approved_at });
+      return await this.quiescence.runQuiescent(input.governance_id, async () => {
+        await lease.assertOwned();
+        const integration = await this.store.read(input.governance_id, 'integration_receipt', input.integration_record_id);
+        if (!integration || integration.record_hash !== input.integration_record_hash) throw new Error('Human approval references stale integration evidence');
+        return this.store.approve({ governance_id: input.governance_id, record_id: input.record_id, subject: { kind: 'integration_receipt', record_id: input.integration_record_id, record_hash: input.integration_record_hash }, reason: input.reason });
+      });
     } finally { await lease.release(); }
   }
 
   async merge(input: { governance_id: string; integration_record_id: string; approval_record_id: string }): Promise<{ merged: true; commit: string }> {
     const lease = await this.operationLock.acquire(input.governance_id);
     try {
-    await this.quiescence.assertQuiescent(input.governance_id);
+    return await this.quiescence.runQuiescent(input.governance_id, async () => {
     await lease.assertOwned();
     const [integrationStored, approvalStored] = await Promise.all([
       this.store.read(input.governance_id, 'integration_receipt', input.integration_record_id),
@@ -89,6 +89,7 @@ export class GovernedMergeV3 {
     const after = await this.git(['rev-parse', '--verify', ref]);
     if (after.trim() !== integration.integrated_commit) throw new Error('Guarded target update did not persist');
     return { merged: true, commit: integration.integrated_commit };
+    });
     } finally { await lease.release(); }
   }
 

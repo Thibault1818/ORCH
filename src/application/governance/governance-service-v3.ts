@@ -1,9 +1,14 @@
 import type { BindingSnapshotV3, CandidateEvidenceV3, CheckBindingV3, DecompositionPlanV3, GovernanceRefV3, HumanApprovalV3, IntegrationReceiptV3, QuorumPolicyV3, QuorumResultV3, ReviewSubjectRefV3, ReviewVoteV3, StoredGovernanceRecordV3 } from '../../domain/governance/contracts-v3.js';
+import type { TrustedCheckRequestV3 } from '../../infrastructure/governance/governance-store-v3.js';
 import { GovernanceStoreV3, hashGovernanceRecordV3 } from '../../infrastructure/governance/governance-store-v3.js';
 import type { GitEvidenceVerifierV3 } from '../../infrastructure/governance/git-evidence-verifier-v3.js';
 
 export class GovernanceServiceV3 {
   constructor(private readonly store: GovernanceStoreV3, private readonly git: GitEvidenceVerifierV3) {}
+
+  runCheck(input: TrustedCheckRequestV3): Promise<StoredGovernanceRecordV3<CheckBindingV3>> {
+    return this.store.runCheck(input);
+  }
 
   async savePlan(plan: DecompositionPlanV3): Promise<StoredGovernanceRecordV3<DecompositionPlanV3>> {
     const snapshot = await this.required(plan.governance_id, plan.binding_snapshot);

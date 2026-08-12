@@ -1,10 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CommandRunner, requireExecutable } from '../../../src/infrastructure/process/command-runner.js';
 import { ProcessManager } from '../../../src/infrastructure/process/process-manager.js';
 import { readLines } from '../../../src/infrastructure/process/process-manager.js';
 
 describe('CommandRunner', () => {
-  const runner = new CommandRunner(new ProcessManager());
+  let root: string;
+  let runner: CommandRunner;
+  beforeAll(async () => { root = await fs.mkdtemp(path.join(os.tmpdir(), 'orch-command-runner-')); runner = new CommandRunner(new ProcessManager(path.join(root, 'processes.json'))); });
+  afterAll(async () => fs.rm(root, { recursive: true, force: true }));
 
   it('requires absolute executables and preserves stdin without a shell', async () => {
     await expect(runner.run({ executable: 'node', args: [], timeoutMs: 1000, maxStdoutBytes: 1000, maxStderrBytes: 1000 })).rejects.toThrow('absolute executable');

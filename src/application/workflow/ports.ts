@@ -168,6 +168,7 @@ export interface WorkflowRuntimePorts {
   safeguards: {
     assertReady(): Promise<unknown>;
     assertQuiescent(owner: string): Promise<void>;
+    runQuiescent<T>(owner: string, action: () => Promise<T>): Promise<T>;
   };
 }
 

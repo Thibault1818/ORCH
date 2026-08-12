@@ -80,5 +80,5 @@ function timestamp(v:unknown){const s=short(v,'timestamp');if(!Number.isFinite(D
 function integer(v:unknown,label:string){if(!Number.isSafeInteger(v)||(v as number)<0)throw new Error(`${label} must be a nonnegative integer`);return v as number}
 function bool(v:unknown){if(typeof v!=='boolean')throw new Error('Expected boolean');return v}
 function one<const T extends readonly string[]>(v:unknown,allowed:T,label:string):T[number]{if(typeof v!=='string'||!allowed.includes(v))throw new Error(`Invalid ${label}`);return v as T[number]}
-function safePath(v:string){if(v.startsWith('/')||v.includes('\\')||v.split('/').some(p=>!p||p==='.'||p==='..'))throw new Error('Unsafe governance path');return v}
+function safePath(v:string){if(v.startsWith('/')||v.startsWith(':')||v.includes('\\')||v.includes('\0')||v.split('/').some(p=>!p||p==='.'||p==='..'))throw new Error('Unsafe governance path');return v}
 function unique<T>(values:T[],key:(v:T)=>string,label:string){const seen=new Set<string>();for(const v of values){const k=key(v);if(seen.has(k))throw new Error(`Duplicate ${label}`);seen.add(k)}return values}

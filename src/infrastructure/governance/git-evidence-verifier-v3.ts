@@ -42,7 +42,7 @@ export class GitEvidenceVerifierV3 {
         git.run(this.projectRoot, ['ls-tree', '-z', candidate, '--', changedPath], { output: 'result' }),
         git.run(this.projectRoot, ['ls-tree', '-z', integration, '--', changedPath], { output: 'result' }),
       ]);
-      if (!candidateEntry.ok || !integrationEntry.ok || !candidateEntry.stdoutBuffer.equals(integrationEntry.stdoutBuffer)) throw new Error(`Integration does not preserve candidate composition for path: ${changedPath}`);
+      if (!candidateEntry.ok || !integrationEntry.ok || candidateEntry.stdoutBuffer.length === 0 || !candidateEntry.stdoutBuffer.equals(integrationEntry.stdoutBuffer)) throw new Error(`Integration does not preserve candidate composition for path: ${changedPath}`);
     }
   }
 }
@@ -59,7 +59,19 @@ export class FileProjectOperationLockV3 implements ProjectOperationLockV3 {
     await fs.mkdir(path.dirname(this.lockPath), { recursive: true, mode: 0o700 });
     const token = randomUUID();
     try { await fs.writeFile(this.lockPath, JSON.stringify({ owner, token, pid: process.pid }), { flag: 'wx', mode: 0o600 }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('Governance project operation lock is active'); throw error; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const existing = await fs.readFile(this.lockPath, 'utf8').then((raw) => JSON.parse(raw) as Record<string, unknown>).catch(() => null);
+      const stat = await fs.lstat(this.lockPath).catch(() => null);
+      if ((existing && typeof existing.pid === 'number' && !processAlive(existing.pid)) || (!existing && stat && Date.now() - stat.mtimeMs > 30_000)) {
+        const stale = `${this.lockPath}.stale-${randomUUID()}`;
+        try { await fs.rename(this.lockPath, stale); }
+        catch (renameError) { if ((renameError as NodeJS.ErrnoException).code === 'ENOENT') return this.acquire(owner); throw renameError; }
+        await fs.rm(stale, { force: true });
+        return this.acquire(owner);
+      }
+      throw new Error('Governance project operation lock is active');
+    }
     const assertOwned = async () => {
       const stat = await fs.lstat(this.lockPath);
       if (!stat.isFile() || stat.isSymbolicLink() || (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o600)) throw new Error('Governance project operation lock is unsafe');
@@ -73,6 +85,8 @@ export class FileProjectOperationLockV3 implements ProjectOperationLockV3 {
     };
   }
 }
+
+function processAlive(pid: number): boolean { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; } }
 
 function parseNulPaths(output: Buffer): string[] {
   if (output.length === 0) return [];

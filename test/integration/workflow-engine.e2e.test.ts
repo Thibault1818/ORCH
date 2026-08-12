@@ -1005,6 +1005,7 @@ class Fakes
   constructor(private root: string) {}
   async assertReady() { return {}; }
   async assertQuiescent() {}
+  async runQuiescent<T>(_owner: string, action: () => Promise<T>) { return action(); }
   availableCalls = 0;
   async available() {
     this.availableCalls++;

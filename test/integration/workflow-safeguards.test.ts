@@ -22,7 +22,7 @@ beforeEach(async () => {
   project = await fs.mkdtemp(path.join(os.tmpdir(), 'orch-safe-project-'));
   state = await fs.mkdtemp(path.join(os.tmpdir(), 'orch-safe-state-'));
   workspaces = await fs.mkdtemp(path.join(os.tmpdir(), 'orch-safe-clones-'));
-  const processes = new ProcessManager();
+  const processes = new ProcessManager(path.join(state, 'processes.json'));
   safeguards = new WorkflowSafeguards(project, state, workspaces, new CommandRunner(processes), processes);
 });
 
@@ -66,7 +66,7 @@ describe.runIf(process.platform === 'darwin')('workflow safeguards', () => {
   }, 20_000);
 
   it('blocks approval while an owner-tagged process group is still active', async () => {
-    const processes = new ProcessManager();
+    const processes = new ProcessManager(path.join(state, 'processes.json'));
     const guarded = new WorkflowSafeguards(project, state, workspaces, new CommandRunner(processes), processes);
     const node = await resolveExecutable('node');
     const handle = new CommandRunner(processes).start({ executable: node, args: ['-e', 'setTimeout(() => {}, 30000)'], env: {}, owner: 'wf_active' });

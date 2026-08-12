@@ -42,7 +42,7 @@ describe('ProcessManager durable recovery', () => {
 
     const recovered = new ProcessManager(registry);
     expect(recovered.active('stale')).toEqual([]);
-    expect(JSON.parse(await fs.readFile(registry, 'utf8'))).toEqual({ schema_version: 2, groups: [] });
+    expect(JSON.parse(await fs.readFile(registry, 'utf8'))).toEqual({ schema_version: 3, groups: [], reservations: [], freezes: [] });
   });
 
   it('migrates a live schema-v1 registry and preserves ownership', async () => {
@@ -55,7 +55,14 @@ describe('ProcessManager durable recovery', () => {
     const recovered = new ProcessManager(registry);
     expect(recovered.active('migrated')).toEqual([handle.pid]);
     const migrated = JSON.parse(await fs.readFile(registry, 'utf8')) as { schema_version: number; groups: Array<{ identity?: string; registered_at?: string }> };
-    expect(migrated.schema_version).toBe(2);
+    expect(migrated.schema_version).toBe(3);
     expect(migrated.groups[0]).toMatchObject({ identity: expect.any(String), registered_at: expect.any(String) });
+  });
+
+  it('fails closed on a recovered ambiguous spawn reservation', async () => {
+    const identity = (await import('node:child_process')).execFileSync('/bin/ps', ['-o', 'lstart=', '-p', String(process.pid)], { encoding: 'utf8' }).trim();
+    await fs.writeFile(registry, `${JSON.stringify({ schema_version: 3, groups: [], reservations: [{ id: 'pending', owner: 'workflow', parent_pid: process.pid, parent_identity: identity, created_at: new Date().toISOString() }], freezes: [] })}\n`, { mode: 0o600 });
+    const recovered = new ProcessManager(registry);
+    await expect(recovered.runQuiescent('workflow', async () => {}, 0)).rejects.toThrow('Timed out');
   });
 });

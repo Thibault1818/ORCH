@@ -27,6 +27,7 @@ beforeEach(async () => {
   const safeguards = {
     assertReady: async () => ({}),
     assertQuiescent: async () => {},
+    runQuiescent: async <T>(_owner: string, action: () => Promise<T>) => action(),
     executableAllowlist: async () => [git],
     proxyEndpoint: async () => ({ host: '127.0.0.1', port: 4321 }),
   };
@@ -97,5 +98,29 @@ describe('NativeWorkflowGitGateway', () => {
     await expect(gateway.merge(prepared.branch, commit, prepared.target_branch, prepared.base_commit)).resolves.toEqual({ success: true, detail: 'merged' });
     expect(await fs.readFile(path.join(root, 'file.txt'), 'utf8')).toBe('reviewed\n');
     expect(await gateway.isMerged(prepared.branch, commit, prepared.target_branch, prepared.base_commit)).toBe(true);
+  });
+
+  it('allows only one concurrent merge from the same target base', async () => {
+    const first = await gateway.prepare('wf_first');
+    const second = await gateway.prepare('wf_second');
+    await fs.writeFile(path.join(first.worktree, 'first.txt'), 'first\n');
+    await fs.writeFile(path.join(second.worktree, 'second.txt'), 'second\n');
+    await Promise.all([
+      exec('git', ['add', '.'], { cwd: first.worktree }),
+      exec('git', ['add', '.'], { cwd: second.worktree }),
+    ]);
+    await Promise.all([
+      exec('git', ['commit', '-m', 'first'], { cwd: first.worktree }),
+      exec('git', ['commit', '-m', 'second'], { cwd: second.worktree }),
+    ]);
+    const [firstCommit, secondCommit] = await Promise.all([
+      exec('git', ['rev-parse', 'HEAD'], { cwd: first.worktree }).then((value) => value.stdout.trim()),
+      exec('git', ['rev-parse', 'HEAD'], { cwd: second.worktree }).then((value) => value.stdout.trim()),
+    ]);
+    const results = await Promise.all([
+      gateway.merge(first.branch, firstCommit, first.target_branch, first.base_commit),
+      gateway.merge(second.branch, secondCommit, second.target_branch, second.base_commit),
+    ]);
+    expect(results.filter((result) => result.success)).toHaveLength(1);
   });
 });

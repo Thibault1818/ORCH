@@ -125,6 +125,14 @@ describe('forceTaskToReview clears agent.current_task', () => {
     expect(workspaceManager.cleanup).not.toHaveBeenCalled();
   });
 
+  it('rejects explicit approval of governed tasks', async () => {
+    const { orch, taskStore, workspaceManager, taskId, runId, agentId } = await setup({ labels: ['governed'] });
+    await (orch as any)._handleRunSuccess(taskId, runId, agentId, undefined, 'done', ['a.ts']);
+    await expect(orch.approveTask(taskId)).rejects.toThrow('requires governed approval');
+    expect((await taskStore.get(taskId))!.status).toBe('review');
+    expect(workspaceManager.mergeBack).not.toHaveBeenCalled();
+  });
+
   it('never merges a generic branch before explicit approval', async () => {
     const { orch, taskStore, workspaceManager, taskId, runId, agentId } = await setup({});
     await (orch as any)._handleRunSuccess(taskId, runId, agentId, undefined, 'done', ['a.ts']);

@@ -486,7 +486,7 @@ export class WorkflowEngine {
     if (job.phase !== "awaiting_approval")
       throw new Error(`Cannot approve workflow in ${job.phase}`);
     await this.safeguards.assertReady();
-    await this.safeguards.assertQuiescent(job.job_id);
+    return this.safeguards.runQuiescent(job.job_id, async () => {
     if (!job.branch || !job.worktree || !job.target_branch || !job.base_commit || !job.current_commit || !job.reviewed_diff_hash)
       throw new Error("Approval evidence is incomplete");
 
@@ -553,6 +553,7 @@ export class WorkflowEngine {
     });
     return this.transition(await this.requiredJob(job.job_id), "merge_ready", {
       next_action: "Merge the exact human-approved revision",
+    });
     });
   }
 
@@ -1092,7 +1093,7 @@ export class WorkflowEngine {
 
   private async merge(job: WorkflowJobV2): Promise<void> {
     await this.safeguards.assertReady();
-    await this.safeguards.assertQuiescent(job.job_id);
+    return this.safeguards.runQuiescent(job.job_id, async () => {
     if (
       !job.branch ||
       !job.worktree ||
@@ -1154,6 +1155,7 @@ export class WorkflowEngine {
     await this.event(job.job_id, "workflow_done", {
       commit: job.current_commit,
       diff_hash: evidence.diff_hash,
+    });
     });
   }
 

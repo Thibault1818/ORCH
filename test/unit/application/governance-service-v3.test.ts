@@ -11,6 +11,7 @@ let stateRoot: string;
 let store: GovernanceStoreV3;
 let service: GovernanceServiceV3;
 let evidenceByCommit: Map<string,RecomputedGitEvidenceV3>;
+let checkBindingId: string;
 const now = '2026-08-11T10:00:00.000Z';
 const hash = 'a'.repeat(64);
 const candidateCommit = 'b'.repeat(40);
@@ -20,7 +21,8 @@ beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'gov-service-'));
   stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'gov-service-key-'));
   const key=path.join(stateRoot,'controller.key');await fs.writeFile(key,Buffer.alloc(32,3),{mode:0o600});
-  store = new GovernanceStoreV3(root,key);
+  checkBindingId = 'checker';
+  store = new GovernanceStoreV3(root,key,{checkExecutor:{execute:async()=>({command:'npm test',exit_code:0,output:Buffer.from('passed'),executed_by_binding_id:checkBindingId,started_at:now,completed_at:now})}});
   evidenceByCommit=new Map([[candidateCommit,{base_commit:'a'.repeat(40),commit:candidateCommit,diff_hash:hash,changed_paths:['src/api/x.ts']}],[integratedCommit,{base_commit:'a'.repeat(40),commit:integratedCommit,diff_hash:hash,changed_paths:['src/api/x.ts']}]])
   service = new GovernanceServiceV3(store,{recompute:async(base_commit:string,commit:string)=>{const value=evidenceByCommit.get(commit);if(!value||value.base_commit!==base_commit)throw new Error('missing Git evidence');return value},assertAncestor:async()=>{},assertPathComposition:async()=>{}} as GitEvidenceVerifierV3);
 });
@@ -58,21 +60,12 @@ async function setup() {
     created_by_binding_id: 'planner',
     created_at: now,
   });
-  const candidateCheck = await store.put({
-    schema_version: 3,
-    kind: 'check_binding',
+  const candidateCheck = await service.runCheck({
     governance_id: 'gov',
     record_id: 'candidate-check',
     binding_snapshot: snapshotRef,
     subject: { kind: 'candidate', id: 'cand', commit: candidateCommit },
     check_id: 'test',
-    command: 'npm test',
-    status: 'passed',
-    output_hash: hash,
-    executed_by_binding_id: 'checker',
-    provenance: { command_source: 'trusted', execution_environment: 'sandboxed' },
-    started_at: now,
-    completed_at: now,
   });
   const candidate = await service.saveCandidate({
     schema_version: 3,
@@ -109,6 +102,12 @@ describe('GovernanceServiceV3', () => {
     expect(candidate.record.unit_id).toBe('api');
   });
 
+  it('rejects check results from an executor that is not bound as a checker', async () => {
+    const { snapshotRef } = await setup();
+    checkBindingId = 'worker';
+    await expect(service.runCheck({ governance_id: 'gov', record_id: 'forged-check', binding_snapshot: snapshotRef, subject: { kind: 'candidate', id: 'cand', commit: candidateCommit }, check_id: 'test' })).rejects.toThrow('bound as a checker');
+  });
+
   it('rejects fake candidate Git evidence',async()=>{await setup();evidenceByCommit.set(candidateCommit,{base_commit:'a'.repeat(40),commit:candidateCommit,diff_hash:'f'.repeat(64),changed_paths:['src/api/forged.ts']});await expect(service.saveCandidate({...(await store.read('gov','candidate_evidence','candidate'))!.record as typeof import('../../../src/domain/governance/contracts-v3.js').CandidateEvidenceV3,record_id:'forged'})).rejects.toThrow('Git evidence')});
 
   it('rejects self-review and integrates only after independent quorum and exact checks', async () => {
@@ -125,7 +124,7 @@ describe('GovernanceServiceV3', () => {
     ], evaluated_at: now });
     expect(quorum.record.satisfied).toBe(true);
 
-    const integrationCheck = await store.put({ schema_version: 3, kind: 'check_binding', governance_id: 'gov', record_id: 'integration-check', binding_snapshot: snapshotRef, subject: { kind: 'integration', id: 'integration', commit: integratedCommit }, check_id: 'test', command: 'npm test', status: 'passed', output_hash: hash, executed_by_binding_id: 'checker', provenance: { command_source: 'trusted', execution_environment: 'sandboxed' }, started_at: now, completed_at: now });
+    const integrationCheck = await service.runCheck({ governance_id: 'gov', record_id: 'integration-check', binding_snapshot: snapshotRef, subject: { kind: 'integration', id: 'integration', commit: integratedCommit }, check_id: 'test' });
     const integration = await service.saveIntegration({ schema_version: 3, kind: 'integration_receipt', governance_id: 'gov', record_id: 'integration', plan: { kind: 'decomposition_plan', record_id: 'plan', record_hash: plan.record_hash }, binding_snapshot: snapshotRef, integrated_by_binding_id: 'integrator', target_branch: 'main', base_commit: 'a'.repeat(40), candidates: [{ evidence: candidateRef, quorum_result: { kind: 'quorum_result', record_id: 'quorum', record_hash: quorum.record_hash } }], integrated_commit: integratedCommit, diff_hash: hash, check_bindings: [{ kind: 'check_binding', record_id: 'integration-check', record_hash: integrationCheck.record_hash }], integrated_at: now });
     expect(integration.record.integrated_commit).toBe(integratedCommit);
   });

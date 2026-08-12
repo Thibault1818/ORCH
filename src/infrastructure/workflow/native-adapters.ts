@@ -18,6 +18,7 @@ import type {
 import { ProcessManager, type IProcessManager } from "../process/process-manager.js";
 import { CommandRunner, commandFailureMessage, requireExecutable, resolveExecutable, type ExecutableDescriptor, type ICommandRunner } from "../process/command-runner.js";
 import { HardenedGit } from "../git/hardened-git.js";
+import { FileProjectOperationLockV3 } from "../governance/git-evidence-verifier-v3.js";
 import { buildChildEnv } from "../adapters/utils.js";
 import type {
   AdapterCapabilityDescriptor,
@@ -463,6 +464,7 @@ export function createNativeWorkflowDriverRegistry(pm: IProcessManager, runner: 
 export class NativeWorkflowGitGateway implements WorkflowGitPort {
   private readonly runner: ICommandRunner;
   private readonly gitRunner: Promise<HardenedGit>;
+  private readonly mergeLock: FileProjectOperationLockV3;
   constructor(
     private readonly projectRoot: string,
     runner: ICommandRunner,
@@ -472,6 +474,7 @@ export class NativeWorkflowGitGateway implements WorkflowGitPort {
   ) {
     const commandRunner = runner;
     this.runner = commandRunner;
+    this.mergeLock = new FileProjectOperationLockV3(this.workspaceRoot);
     this.gitRunner = (async () => new HardenedGit(
       commandRunner,
       gitExecutable ?? await resolveExecutable("git"),
@@ -581,7 +584,6 @@ export class NativeWorkflowGitGateway implements WorkflowGitPort {
   ): Promise<CheckResults> {
     const trusted = await this.validateChecks(commands, worktree);
     const proxy = await this.executionSafeguards.proxyEndpoint();
-    const allowedExecutables = await this.executionSafeguards.executableAllowlist();
     const checks: CheckResults["checks"] = [];
     for (const command of trusted) {
       const [executable, ...args] = command.split(" ");
@@ -592,6 +594,7 @@ export class NativeWorkflowGitGateway implements WorkflowGitPort {
           this.git(worktree, ["rev-parse", "HEAD"]),
           this.git(worktree, ["status", "--porcelain"]),
         ]);
+        const allowedExecutables = await this.executionSafeguards.executableAllowlist([absolute]);
         if (beforeHead.trim() !== commit || beforeStatus.trim())
           throw new Error("Check worktree is not the exact clean reviewed commit");
         executionRoot = await fs.mkdtemp(path.join(os.tmpdir(), "orch-check-"));
@@ -611,7 +614,7 @@ export class NativeWorkflowGitGateway implements WorkflowGitPort {
           maxStderrBytes: 4 * 1024 * 1024,
           owner: path.basename(worktree),
           allowedExecutables,
-           sandbox: { workspace: worktree, proxyAddress: proxy, writableWorkspace: true, readOnlyFiles: allowedExecutables.map((value) => value.realpath) },
+          sandbox: { workspace: worktree, proxyAddress: proxy, writableWorkspace: true, readOnlyFiles: allowedExecutables.map((value) => value.realpath) },
         });
         const [afterHead, afterStatus] = await Promise.all([
           this.git(worktree, ["rev-parse", "HEAD"]),
@@ -683,6 +686,9 @@ export class NativeWorkflowGitGateway implements WorkflowGitPort {
     targetBranch: string,
     baseCommit: string,
   ) {
+    let lease;
+    try { lease = await this.mergeLock.acquire(path.basename(branch)); }
+    catch (error) { return { success: false, detail: error instanceof Error ? error.message : String(error) }; }
     try {
       if (!branch.startsWith("orchestry/workflow/"))
         return {
@@ -718,6 +724,14 @@ export class NativeWorkflowGitGateway implements WorkflowGitPort {
         return { success: false, detail: "Controller worktree is dirty" };
       const integrationRef = `refs/orchestry/integration/${path.basename(branch)}`;
       await this.git(this.projectRoot, ["fetch", "--no-tags", this.cloneForBranch(branch), `${expectedCommit}:${integrationRef}`], { fileProtocol: "always" });
+      const [finalBranch, finalCommit, finalStatus] = await Promise.all([
+        this.git(this.projectRoot, ["branch", "--show-current"]),
+        this.git(this.projectRoot, ["rev-parse", "HEAD"]),
+        this.git(this.projectRoot, ["status", "--porcelain"]),
+      ]);
+      if (finalBranch.trim() !== targetBranch || finalCommit.trim() !== baseCommit || finalStatus.trim())
+        return { success: false, detail: "Target branch changed immediately before merge" };
+      await lease.assertOwned();
       await this.git(this.projectRoot, [
         "merge",
         "--no-ff",
@@ -732,7 +746,7 @@ export class NativeWorkflowGitGateway implements WorkflowGitPort {
         success: false,
         detail: error instanceof Error ? error.message : String(error),
       };
-    }
+    } finally { await lease.release(); }
   }
 
   private cloneForBranch(branch: string): string {
@@ -933,6 +947,7 @@ async function spawnCapture(
 export interface WorkflowExecutionSafeguards {
   assertReady(): Promise<unknown>;
   assertQuiescent(owner: string): Promise<void>;
+  runQuiescent<T>(owner: string, action: () => Promise<T>): Promise<T>;
   executableAllowlist(extra?: readonly string[]): Promise<ExecutableDescriptor[]>;
   proxyEndpoint(): Promise<{ host: string; port: number }>;
 }

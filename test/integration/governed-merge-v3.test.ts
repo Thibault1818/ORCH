@@ -21,6 +21,7 @@ let service: GovernanceServiceV3;
 let merge: GovernedMergeV3;
 let evidence: GitEvidenceVerifierV3;
 let runner: CommandRunner;
+let processes: ProcessManager;
 
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'gov-merge-'));
@@ -32,11 +33,12 @@ beforeEach(async () => {
   await exec('git', ['commit', '-m', 'base'], { cwd: root });
   stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'gov-merge-key-'));
   const key=path.join(stateRoot,'controller.key');await fs.writeFile(key,Buffer.alloc(32,5),{mode:0o600});
-  runner=new CommandRunner(new ProcessManager(path.join(stateRoot,'processes.json')));
-  store = new GovernanceStoreV3(root,key);
+  processes=new ProcessManager(path.join(stateRoot,'processes.json'));
+  runner=new CommandRunner(processes);
+  store = new GovernanceStoreV3(root,key,{checkExecutor:{execute:async()=>({command:'npm test',exit_code:0,output:Buffer.from('passed'),executed_by_binding_id:'checker',started_at:now,completed_at:now})},humanIdentity:{authenticate:async()=> 'human'},now:()=>now});
   evidence = new GitEvidenceVerifierV3(root,runner);
   service = new GovernanceServiceV3(store,evidence);
-  merge = new GovernedMergeV3(root,store,runner,evidence,{assertQuiescent:async()=>{}},new FileProjectOperationLockV3(root));
+  merge = new GovernedMergeV3(root,store,runner,evidence,processes,new FileProjectOperationLockV3(root));
 });
 afterEach(async () => Promise.all([fs.rm(root, { recursive: true, force: true }),fs.rm(stateRoot,{recursive:true,force:true})]));
 
@@ -64,9 +66,10 @@ describe('GovernedMergeV3', () => {
     const policy = await store.put({ schema_version: 3, kind: 'quorum_policy', governance_id: 'gov', record_id: 'policy', binding_snapshot: snapshotRef, applies_to: 'candidate_evidence', eligible_reviewer_binding_ids: ['reviewer'], minimum_approvals: 1, maximum_rejections: 0, require_distinct_principals: true, human_approval_required: false, created_by_binding_id: 'planner', created_at: now });
     const vote = await service.saveReviewVote({ schema_version: 3, kind: 'review_vote', governance_id: 'gov', record_id: 'vote', binding_snapshot: snapshotRef, subject: candidateRef, reviewer_binding_id: 'reviewer', decision: 'approve', reason: 'reviewed', cast_at: now });
     const quorum = await service.evaluateQuorum({ governance_id: 'gov', record_id: 'quorum', policy: { kind: 'quorum_policy', record_id: 'policy', record_hash: policy.record_hash }, subject: candidateRef, votes: [{ kind: 'review_vote', record_id: 'vote', record_hash: vote.record_hash }], evaluated_at: now });
-    const check = await store.put({ schema_version: 3, kind: 'check_binding', governance_id: 'gov', record_id: 'check', binding_snapshot: snapshotRef, subject: { kind: 'integration', id: 'integration', commit: integrated }, check_id: 'test', command: 'npm test', status: 'passed', output_hash: hash, executed_by_binding_id: 'checker', provenance: { command_source: 'trusted', execution_environment: 'sandboxed' }, started_at: now, completed_at: now });
+    const check = await service.runCheck({ governance_id: 'gov', record_id: 'check', binding_snapshot: snapshotRef, subject: { kind: 'integration', id: 'integration', commit: integrated }, check_id: 'test' });
     const integration = await service.saveIntegration({ schema_version: 3, kind: 'integration_receipt', governance_id: 'gov', record_id: 'integration', plan: { kind: 'decomposition_plan', record_id: 'plan', record_hash: plan.record_hash }, binding_snapshot: snapshotRef, integrated_by_binding_id: 'integrator', target_branch: 'main', base_commit: base, candidates: [{ evidence: candidateRef, quorum_result: { kind: 'quorum_result', record_id: 'quorum', record_hash: quorum.record_hash } }], integrated_commit: integrated, diff_hash: actual.diff_hash, check_bindings: [{ kind: 'check_binding', record_id: 'check', record_hash: check.record_hash }], integrated_at: now });
-    const approval = await merge.approve({ governance_id: 'gov', record_id: 'approval', integration_record_id: 'integration', integration_record_hash: integration.record_hash, approved_by: 'human', reason: 'reviewed exact integration', approved_at: now });
+    const approval = await merge.approve({ governance_id: 'gov', record_id: 'approval', integration_record_id: 'integration', integration_record_hash: integration.record_hash, reason: 'reviewed exact integration' });
+    expect(approval.record.approved_by).toBe('human');
 
     expect((await merge.merge({ governance_id: 'gov', integration_record_id: 'integration', approval_record_id: approval.record.record_id })).commit).toBe(integrated);
     expect((await exec('git', ['rev-parse', 'main'], { cwd: root })).stdout.trim()).toBe(integrated);
@@ -89,7 +92,7 @@ describe('GovernedMergeV3', () => {
     const vote = await service.saveReviewVote({ schema_version: 3, kind: 'review_vote', governance_id: 'drift', record_id: 'vote', binding_snapshot: snapshotRef, subject: candidateRef, reviewer_binding_id: 'reviewer', decision: 'approve', reason: 'ok', cast_at: now });
     const quorum = await service.evaluateQuorum({ governance_id: 'drift', record_id: 'quorum', policy: { kind: 'quorum_policy', record_id: 'policy', record_hash: policy.record_hash }, subject: candidateRef, votes: [{ kind: 'review_vote', record_id: 'vote', record_hash: vote.record_hash }], evaluated_at: now });
     const integration = await service.saveIntegration({ schema_version: 3, kind: 'integration_receipt', governance_id: 'drift', record_id: 'integration', plan: { kind: 'decomposition_plan', record_id: 'plan', record_hash: plan.record_hash }, binding_snapshot: snapshotRef, integrated_by_binding_id: 'integrator', target_branch: 'main', base_commit: base, candidates: [{ evidence: candidateRef, quorum_result: { kind: 'quorum_result', record_id: 'quorum', record_hash: quorum.record_hash } }], integrated_commit: integrated, diff_hash: actual.diff_hash, check_bindings: [], integrated_at: now });
-    const approval = await merge.approve({ governance_id: 'drift', record_id: 'approval', integration_record_id: 'integration', integration_record_hash: integration.record_hash, approved_by: 'human', reason: 'reviewed', approved_at: now });
+    const approval = await merge.approve({ governance_id: 'drift', record_id: 'approval', integration_record_id: 'integration', integration_record_hash: integration.record_hash, reason: 'reviewed' });
     await fs.writeFile(path.join(root, 'other.txt'), 'drift\n');
     await exec('git', ['add', '.'], { cwd: root });
     await exec('git', ['commit', '-m', 'drift'], { cwd: root });
@@ -114,11 +117,11 @@ describe('GovernedMergeV3', () => {
   it('rejects base drift immediately before update-ref',async()=>{
     const prepared=await prepareCase('race');
     const integration=await service.saveIntegration(prepared.receipt);
-    const approval=await merge.approve({governance_id:'race',record_id:'approval',integration_record_id:'integration',integration_record_hash:integration.record_hash,approved_by:'human',reason:'reviewed',approved_at:now});
+    const approval=await merge.approve({governance_id:'race',record_id:'approval',integration_record_id:'integration',integration_record_hash:integration.record_hash,reason:'reviewed'});
     let drift='';
     let recomputations=0;
     const racingEvidence={recompute:async(base:string,commit:string)=>{const value=await evidence.recompute(base,commit);if(++recomputations===2){await fs.writeFile(path.join(root,'drift.txt'),'drift\n');await exec('git',['add','.'],{cwd:root});await exec('git',['commit','-m','drift'],{cwd:root});drift=(await exec('git',['rev-parse','HEAD'],{cwd:root})).stdout.trim()}return value},assertAncestor:(a:string,b:string)=>evidence.assertAncestor(a,b),assertPathComposition:(a:string,b:string,p:readonly string[])=>evidence.assertPathComposition(a,b,p)} as GitEvidenceVerifierV3;
-    const racingMerge=new GovernedMergeV3(root,store,runner,racingEvidence,{assertQuiescent:async()=>{}},new FileProjectOperationLockV3(root));
+    const racingMerge=new GovernedMergeV3(root,store,runner,racingEvidence,processes,new FileProjectOperationLockV3(root));
     await expect(racingMerge.merge({governance_id:'race',integration_record_id:'integration',approval_record_id:approval.record.record_id})).rejects.toThrow();
     expect((await exec('git',['rev-parse','main'],{cwd:root})).stdout.trim()).toBe(drift);
   });
@@ -126,12 +129,22 @@ describe('GovernedMergeV3', () => {
   it('allows only one concurrent governed merge',async()=>{
     const prepared=await prepareCase('concurrent');
     const integration=await service.saveIntegration(prepared.receipt);
-    const approval=await merge.approve({governance_id:'concurrent',record_id:'approval',integration_record_id:'integration',integration_record_hash:integration.record_hash,approved_by:'human',reason:'reviewed',approved_at:now});
+    const approval=await merge.approve({governance_id:'concurrent',record_id:'approval',integration_record_hash:integration.record_hash,integration_record_id:'integration',reason:'reviewed'});
     const input={governance_id:'concurrent',integration_record_id:'integration',approval_record_id:approval.record.record_id};
     const results=await Promise.allSettled([merge.merge(input),merge.merge(input)]);
     expect(results.filter((value)=>value.status==='fulfilled')).toHaveLength(1);
     expect(results.filter((value)=>value.status==='rejected')).toHaveLength(1);
   });
+
+  it('blocks approval while the governance owner has a live process',async()=>{
+    const prepared=await prepareCase('active');
+    const integration=await service.saveIntegration(prepared.receipt);
+    const handle=processes.spawn(process.execPath,['-e','setInterval(() => {}, 1000)'],{owner:'active',env:{}});
+    try {
+      await expect(merge.approve({governance_id:'active',record_id:'approval',integration_record_id:'integration',integration_record_hash:integration.record_hash,reason:'reviewed'})).rejects.toThrow('Timed out');
+      expect(await store.read('active','human_approval','approval')).toBeNull();
+    } finally { await processes.killWithGrace(handle.pid,20); }
+  },15_000);
 });
 
 async function prepareCase(governanceId:string,options:{secondUnit?:boolean;extraIntegrationPath?:boolean}={}){
