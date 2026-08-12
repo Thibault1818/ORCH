@@ -1,13 +1,28 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Command } from 'commander';
+
+const mocks = vi.hoisted(() => ({
+  run: vi.fn(async () => ({ ok: true, exitCode: 0 })),
+  resolveExecutable: vi.fn(async () => ({ path: '/bin/vi', realpath: '/bin/vi', sha256: '0'.repeat(64) })),
+}));
+
+vi.mock('../../../src/infrastructure/process/command-runner.js', () => ({
+  CommandRunner: class { run = mocks.run; },
+  commandFailureMessage: () => 'editor failed',
+  resolveExecutable: mocks.resolveExecutable,
+}));
+
 import { registerConfigCommand } from '../../../src/cli/commands/config.js';
 import { makeContainer } from './helpers.js';
 
 describe('config command', () => {
   let program: Command;
   let container: Container;
+  let originalEditor: string | undefined;
 
   beforeEach(() => {
+    vi.clearAllMocks();
+    originalEditor = process.env.EDITOR;
     delete process.env['ORCH_ALLOW_SECURITY_CONFIG_WRITE'];
     process.exitCode = undefined;
     program = new Command();
@@ -19,6 +34,8 @@ describe('config command', () => {
   });
 
   afterEach(() => {
+    if (originalEditor === undefined) delete process.env.EDITOR;
+    else process.env.EDITOR = originalEditor;
     delete process.env['ORCH_ALLOW_SECURITY_CONFIG_WRITE'];
     process.exitCode = undefined;
   });
@@ -88,6 +105,20 @@ describe('config command', () => {
 
       expect(container.configStore.set).not.toHaveBeenCalled();
       expect(process.exitCode).toBe(1);
+    });
+  });
+
+  describe('config edit', () => {
+    it('opens the config with inherited stdio through CommandRunner', async () => {
+      process.env.EDITOR = 'vi -f';
+      container.paths.configPath = '/tmp/config.yml';
+
+      await program.parseAsync(['config', 'edit'], { from: 'user' });
+
+      expect(mocks.run).toHaveBeenCalledWith(expect.objectContaining({
+        args: ['-f', '/tmp/config.yml'],
+        stdio: 'inherit',
+      }));
     });
   });
 });

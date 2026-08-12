@@ -13,6 +13,7 @@ function descriptor(adapter: AdapterCapabilityDescriptor['adapter'], compatible:
 const capabilities: WorkflowCapabilities = {
   codex: descriptor('codex', ['supervisor', 'reviewer']),
   claude: descriptor('claude', 'implementer'),
+  opencode: descriptor('opencode', 'implementer'),
   fable: descriptor('fable', 'adviser'),
   grok: descriptor('grok', null, 'stdin transport is not proven'),
   antigravity: descriptor('antigravity', null),

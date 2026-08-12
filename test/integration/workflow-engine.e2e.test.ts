@@ -49,6 +49,7 @@ beforeEach(async () => {
     fable: fakes,
     opus: fakes,
     git: fakes,
+    safeguards: fakes,
   });
 });
 afterEach(async () => {
@@ -63,6 +64,11 @@ describe("direct Codex-Opus workflow v2", () => {
       objective: "direct change",
       required_checks: CHECKS,
     });
+    const pending = await engine.run(id);
+    expect(pending.phase).toBe("awaiting_approval");
+    expect(fakes.merges).toBe(0);
+    expect(fakes.checkCalls).toBe(1);
+    await engine.approve(id, "reviewed by test operator");
     const result = await engine.run(id);
     expect(result.phase).toBe("done");
     expect(result.fable_calls).toBe(0);
@@ -218,7 +224,7 @@ describe("direct Codex-Opus workflow v2", () => {
       mode: "direct",
       required_checks: CHECKS,
     });
-    const result = await engine.run(id);
+    const result = await runApproved(engine, id);
     expect(result.phase).toBe("done");
     expect(fakes.fableCalls).toBe(0);
     expect(result.consultation_status).toBe("fallback_executed");
@@ -231,7 +237,7 @@ describe("direct Codex-Opus workflow v2", () => {
       config: { fable_total_cap: 0 },
       required_checks: CHECKS,
     });
-    const result = await engine.run(id);
+    const result = await runApproved(engine, id);
     expect(result.phase).toBe("done");
     expect(fakes.fableCalls).toBe(0);
     expect(result.consultation_status).toBe("fallback_executed");
@@ -246,7 +252,7 @@ describe("direct Codex-Opus workflow v2", () => {
       required_checks: CHECKS,
       config: { fable_total_cap: 1 },
     });
-    const result = await engine.run(id);
+    const result = await runApproved(engine, id);
     expect(result.phase).toBe("done");
     expect(fakes.fableCalls).toBe(0);
     expect(
@@ -264,7 +270,7 @@ describe("direct Codex-Opus workflow v2", () => {
       required_checks: CHECKS,
       config: { fable_total_cap: 1 },
     });
-    expect((await engine.run(id)).phase).toBe("done");
+    expect((await runApproved(engine, id)).phase).toBe("done");
     expect(fakes.fableCalls).toBe(1);
     expect(fakes.sequence).toEqual([
       "codex:pre_opus",
@@ -283,7 +289,7 @@ describe("direct Codex-Opus workflow v2", () => {
       required_checks: CHECKS,
       config: { fable_total_cap: 1 },
     });
-    const result = await engine.run(id);
+    const result = await runApproved(engine, id);
     expect(result.phase).toBe("done");
     expect(fakes.fableCalls).toBe(1);
     expect(result.consultation_status).toBe("fallback_executed");
@@ -327,7 +333,7 @@ describe("direct Codex-Opus workflow v2", () => {
       await store.reserveOperation(id, "fable_consultation", operation),
     ).toBe(true);
     await store.patchJob(id, { consultation_status: "fallback_executed" });
-    const result = await engine.run(id);
+    const result = await runApproved(engine, id);
     expect(result.phase).toBe("done");
     expect(fakes.fableCalls).toBe(0);
     expect(fakes.opusPrompts[0]).toContain("safe fallback");
@@ -386,7 +392,7 @@ describe("direct Codex-Opus workflow v2", () => {
       consultation_status: "attempt_started",
       fable_calls: 1,
     });
-    const result = await engine.run(id);
+    const result = await runApproved(engine, id);
     expect(result.phase).toBe("done");
     expect(fakes.fableCalls).toBe(0);
     expect(fakes.codexEvidence[1]?.fable_advice?.answer).toBe(
@@ -405,7 +411,7 @@ describe("direct Codex-Opus workflow v2", () => {
       required_checks: CHECKS,
       config: { fable_total_cap: 1 },
     });
-    expect((await engine.run(id)).phase).toBe("done");
+    expect((await runApproved(engine, id)).phase).toBe("done");
     expect(fakes.fableCalls).toBe(1);
     expect(fakes.opusCalls).toBe(2);
     expect(fakes.opusPrompts[1]).toContain("safe fallback");
@@ -416,7 +422,7 @@ describe("direct Codex-Opus workflow v2", () => {
       objective: "correct",
       required_checks: CHECKS,
     });
-    const result = await engine.run(id);
+    const result = await runApproved(engine, id);
     expect(result.phase).toBe("done");
     expect(fakes.fableCalls).toBe(0);
     expect(fakes.opusPrompts).toEqual(["implement directly", "fix directly"]);
@@ -487,14 +493,18 @@ describe("direct Codex-Opus workflow v2", () => {
         fable: fakes,
         opus: fakes,
         git: fakes,
+        safeguards: fakes,
       }).advance(id);
+    expect(result?.phase).toBe("awaiting_approval");
+    await engine.approve(id, "restart test approval");
+    result = await engine.run(id);
     expect(result?.phase).toBe("done");
-    expect(result?.revision).toBe(6);
+    expect(result?.revision).toBe(7);
     expect(fakes).toMatchObject({
       codexCalls: 2,
       opusCalls: 1,
       merges: 1,
-      checkCalls: 3,
+      checkCalls: 2,
     });
   });
   it("does not double count attempts during crash-safe replay", async () => {
@@ -509,6 +519,7 @@ describe("direct Codex-Opus workflow v2", () => {
         fable: fakes,
         opus: fakes,
         git: fakes,
+        safeguards: fakes,
       }).advance(id);
     const attempts = await store.readLlmAttempts(id);
     expect(attempts).toHaveLength(3);
@@ -527,6 +538,7 @@ describe("direct Codex-Opus workflow v2", () => {
       fable: fakes,
       opus: fakes,
       git: fakes,
+      safeguards: fakes,
     }).advance(id);
     expect((await store.readPassport(id))!.roster_hash).toBe(before);
   });
@@ -536,12 +548,17 @@ describe("direct Codex-Opus workflow v2", () => {
       required_checks: CHECKS,
     });
     expect((await engine.advance(id)).phase).toBe("opus_execution");
-    const result = await new WorkflowEngine(new WorkflowArtifactStore(root), {
+    const restarted = new WorkflowEngine(new WorkflowArtifactStore(root), {
       codex: fakes,
       fable: fakes,
       opus: fakes,
       git: fakes,
-    }).resume(id, { reason: "terminal restarted" });
+      safeguards: fakes,
+    });
+    const pending = await restarted.resume(id, { reason: "terminal restarted" });
+    expect(pending.phase).toBe("awaiting_approval");
+    await restarted.approve(id, "terminal restart approval");
+    const result = await restarted.run(id);
     expect(result.phase).toBe("done");
     expect(fakes).toMatchObject({ codexCalls: 2, opusCalls: 1, merges: 1 });
   });
@@ -665,6 +682,7 @@ describe("direct Codex-Opus workflow v2", () => {
     const semanticEngine = new WorkflowEngine(store, {
       roles: resolver,
       git: fakes,
+      safeguards: fakes,
     });
     const id = await semanticEngine.start({
       objective: "rotated restart",
@@ -690,6 +708,7 @@ describe("direct Codex-Opus workflow v2", () => {
     await new WorkflowEngine(new WorkflowArtifactStore(root), {
       roles: resolver,
       git: fakes,
+      safeguards: fakes,
     }).resume(id, { reason: "continue" });
     expect(
       resolver.calls.find((call) => call.role === "implementer")?.binding
@@ -701,6 +720,7 @@ describe("direct Codex-Opus workflow v2", () => {
     const semanticEngine = new WorkflowEngine(store, {
       roles: resolver,
       git: fakes,
+      safeguards: fakes,
     });
     const id = await semanticEngine.start({
       objective: "rotation accounting",
@@ -745,6 +765,7 @@ describe("direct Codex-Opus workflow v2", () => {
     const id = await new WorkflowEngine(store, {
       roles: resolver,
       git: fakes,
+      safeguards: fakes,
     }).start({
       objective: "semantic routing",
       required_checks: CHECKS,
@@ -756,7 +777,16 @@ describe("direct Codex-Opus workflow v2", () => {
       result = await new WorkflowEngine(new WorkflowArtifactStore(root), {
         roles: resolver,
         git: fakes,
+        safeguards: fakes,
       }).advance(id);
+    expect(result?.phase).toBe("awaiting_approval");
+    const resumed = new WorkflowEngine(new WorkflowArtifactStore(root), {
+      roles: resolver,
+      git: fakes,
+      safeguards: fakes,
+    });
+    await resumed.approve(id, "semantic routing approval");
+    result = await resumed.run(id);
     expect(result?.phase).toBe("done");
     expect(
       resolver.calls.map((call) => `${call.role}:${call.binding.profile.name}`),
@@ -790,6 +820,7 @@ describe("direct Codex-Opus workflow v2", () => {
     const semanticEngine = new WorkflowEngine(store, {
       roles: resolver,
       git: fakes,
+      safeguards: fakes,
     });
     const roster = semanticRoster();
     roster.implementer = { ...roster.implementer, adapter: "fable" };
@@ -835,9 +866,12 @@ describe("direct Codex-Opus workflow v2", () => {
       timestamp: new Date().toISOString(),
       result: resultValue,
     });
+    const pending = await engine.run(id);
+    expect(pending.phase).toBe("awaiting_approval");
+    await engine.approve(id, "replayed checks approval");
     const result = await engine.run(id);
     expect(result.phase).toBe("done");
-    expect(fakes.checkCalls).toBe(2);
+    expect(fakes.checkCalls).toBe(1);
   });
   it("blocks rather than repeating an ambiguous interrupted check", async () => {
     const id = await reachVerification();
@@ -873,7 +907,7 @@ describe("direct Codex-Opus workflow v2", () => {
     const result = await engine.run(id);
     expect(result.phase).toBe("blocked");
     expect(result.blocker).toContain("AMBIGUOUS_EFFECT");
-    expect(fakes.checkCalls).toBe(1);
+    expect(fakes.checkCalls).toBe(0);
   });
   it("blocks on a stale reviewed diff", async () => {
     fakes.staleDiff = true;
@@ -890,7 +924,8 @@ describe("direct Codex-Opus workflow v2", () => {
       objective: "stale commit",
       required_checks: CHECKS,
     });
-    expect((await engine.run(id)).phase).toBe("failed");
+    expect((await engine.run(id)).phase).toBe("awaiting_approval");
+    await expect(engine.approve(id, "stale commit test")).rejects.toThrow("stale");
     expect(fakes.merges).toBe(0);
   });
   it("fails closed when checks move the reviewed branch", async () => {
@@ -899,6 +934,8 @@ describe("direct Codex-Opus workflow v2", () => {
       objective: "moving commit",
       required_checks: CHECKS,
     });
+    expect((await engine.run(id)).phase).toBe("awaiting_approval");
+    await engine.approve(id, "moving commit test");
     expect((await engine.run(id)).phase).toBe("failed");
     expect(fakes.merges).toBe(0);
   });
@@ -909,7 +946,8 @@ describe("direct Codex-Opus workflow v2", () => {
       objective: "unreviewed merge",
       required_checks: CHECKS,
     });
-    expect((await engine.run(id)).phase).toBe("failed");
+    expect((await engine.run(id)).phase).toBe("awaiting_approval");
+    await expect(engine.approve(id, "unreviewed merge test")).rejects.toThrow("stale");
     expect(fakes.merges).toBe(0);
   });
   it("fails closed on merge failure", async () => {
@@ -918,6 +956,8 @@ describe("direct Codex-Opus workflow v2", () => {
       objective: "merge fail",
       required_checks: CHECKS,
     });
+    expect((await engine.run(id)).phase).toBe("awaiting_approval");
+    await engine.approve(id, "merge failure test");
     expect((await engine.run(id)).phase).toBe("failed");
     expect(fakes.merges).toBe(1);
   });
@@ -931,6 +971,13 @@ describe("direct Codex-Opus workflow v2", () => {
     expect((await engine.advance(id)).phase).toBe("codex_post_opus");
     expect((await engine.advance(id)).phase).toBe("verification");
     return id;
+  }
+
+  async function runApproved(target: WorkflowEngine, id: string) {
+    const pending = await target.run(id);
+    expect(pending.phase).toBe("awaiting_approval");
+    await target.approve(id, "test approval");
+    return target.run(id);
   }
 });
 
@@ -956,6 +1003,8 @@ class Fakes
   opusPrompts: string[] = [];
   codexEvidence: CodexDecisionEvidence[] = [];
   constructor(private root: string) {}
+  async assertReady() { return {}; }
+  async assertQuiescent() {}
   availableCalls = 0;
   async available() {
     this.availableCalls++;
@@ -1061,7 +1110,7 @@ class Fakes
     commands: string[],
   ): Promise<CheckResults> {
     this.checkCalls++;
-    if (this.moveCommitDuringFinalChecks && this.checkCalls === 3)
+    if (this.moveCommitDuringFinalChecks && this.checkCalls === 2)
       this.current = "9999999";
     return {
       job_id: path.basename(worktree),

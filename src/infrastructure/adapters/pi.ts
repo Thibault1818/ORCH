@@ -10,25 +10,23 @@
 import type { IAgentAdapter, AdapterTestResult, ExecuteParams, AgentEvent, ExecuteHandle } from './interface.js';
 import type { IProcessManager } from '../process/process-manager.js';
 import type { Readable } from 'node:stream';
+import type { ICommandRunner, StreamingCommandHandle } from '../process/command-runner.js';
 import { createTokenUsage, type TokenUsage } from '../../domain/run.js';
 import { classifyAdapterError } from '../../domain/errors.js';
-import { buildChildEnv } from './utils.js';
-import { execFile } from 'node:child_process';
+import { adapterCommandRunner, buildChildEnv, probeVersion } from './utils.js';
 
 export class PiAdapter implements IAgentAdapter {
   readonly kind = 'pi';
 
-  constructor(private readonly processManager: IProcessManager) {}
+  private readonly runner: ICommandRunner;
+
+  constructor(private readonly processManager: IProcessManager, runner?: ICommandRunner) {
+    this.runner = adapterCommandRunner(processManager, runner);
+  }
 
   async test(): Promise<AdapterTestResult> {
     try {
-      const stdout = await new Promise<string>((resolve, reject) => {
-        execFile('pi', ['--version'], (err, out) => {
-          if (err) reject(err);
-          else resolve(out);
-        });
-      });
-      return { ok: true, version: stdout.trim() };
+      return { ok: true, version: await probeVersion(this.runner, 'pi') };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return {
@@ -59,35 +57,31 @@ export class PiAdapter implements IAgentAdapter {
       args.push('--append-system-prompt', effectiveSystemPrompt);
     }
 
-    const { process: proc, pid } = this.processManager.spawn('pi', args, {
+    const command = this.runner.start({
+      executable: 'pi',
+      args,
       cwd: params.workspace,
       env: buildChildEnv(params.env),
       signal: params.signal,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdin: JSON.stringify({
+        id: `orch-${Date.now()}`,
+        type: 'prompt',
+        message: params.prompt,
+      }) + '\n',
+      keepStdinOpen: true,
+      timeoutMs: params.config.timeout_ms,
+      owner: params.execution.owner,
+      sandbox: params.execution.sandbox,
+      allowedExecutables: params.execution.allowedExecutables,
     });
+    const proc = command.process;
 
     // Capture stderr tail so auth/extension-load errors surface in non-zero exits
     // rather than being silently drained. Drains backpressure at the same time.
     const stderrTail = createStderrTailCapture(proc.stderr);
 
-    if (proc.stdin) {
-      proc.stdin.write(JSON.stringify({
-        id: `orch-${Date.now()}`,
-        type: 'prompt',
-        message: params.prompt,
-      }) + '\n');
-      // DO NOT call proc.stdin.end() here. Pi --mode rpc is a long-lived
-      // persistent session: it sends a prompt preflight response, then drives
-      // the LLM call asynchronously, streaming message_update / turn_end /
-      // agent_end as the model responds. Closing stdin after the write breaks
-      // that pipeline — verified on pi-coding-agent 0.73.1: pi stalls right
-      // after the user-message_end event and never produces an assistant turn.
-      // We terminate the long-lived process via processManager.killWithGrace
-      // immediately after the terminal `done` event (see createPiRpcEvents).
-    }
-
-    const events = createPiRpcEvents(proc, pid, this.processManager, stderrTail, params.signal);
-    return { pid, events };
+    const events = createPiRpcEvents(command, this.processManager, stderrTail, params.signal);
+    return { pid: command.pid, events };
   }
 
   async stop(pid: number): Promise<void> {
@@ -96,25 +90,18 @@ export class PiAdapter implements IAgentAdapter {
 }
 
 function createPiRpcEvents(
-  proc: import('node:child_process').ChildProcess,
-  pid: number,
+  command: StreamingCommandHandle,
   processManager: IProcessManager,
   stderrTail: () => string,
   signal?: AbortSignal,
 ): AsyncGenerator<AgentEvent> {
   async function* generate(): AsyncGenerator<AgentEvent> {
+    const proc = command.process;
+    const pid = command.pid;
     let gotDoneEvent = false;
     let streamErrorYielded = false;
     let finalText = '';
     let lastTokens: TokenUsage | undefined;
-    let exitCode: number | null = null;
-    let exitError: Error | null = null;
-
-    const exitPromise = new Promise<void>((resolve) => {
-      proc.on('close', (code) => { exitCode = code; resolve(); });
-      proc.on('error', (err) => { exitError = err; resolve(); });
-    });
-
     let streamError: Error | null = null;
     try {
       if (proc.stdout) {
@@ -164,21 +151,22 @@ function createPiRpcEvents(
       }
     }
 
-    await exitPromise;
+    const completion = await command.completion;
 
     // streamError was already surfaced as an error event — don't double-report.
     if (streamErrorYielded) return;
 
-    const spawnError = exitError as Error | null;
-    if (spawnError && !signal?.aborted && !gotDoneEvent) {
-      const message = appendStderrTail(spawnError.message, stderrTail());
-      const classified = classifyAdapterError(message, exitCode ?? undefined);
+    if (completion.spawnError && !signal?.aborted && !gotDoneEvent) {
+      const message = appendStderrTail(completion.spawnError.message, stderrTail());
+      const classified = classifyAdapterError(message, completion.exitCode ?? undefined);
       throw Object.assign(new Error(message), { errorKind: classified });
     }
-    if (exitCode !== 0 && exitCode !== null && !signal?.aborted && !gotDoneEvent) {
-      const baseMsg = `Pi process exited with code ${exitCode}`;
+    if (!completion.ok && !signal?.aborted && !gotDoneEvent) {
+      const baseMsg = completion.integrityError ?? (completion.termination === 'timed_out'
+        ? 'Pi process timed out'
+        : `Pi process exited with code ${completion.exitCode}`);
       const message = appendStderrTail(baseMsg, stderrTail());
-      const classified = classifyAdapterError(message, exitCode);
+      const classified = classifyAdapterError(message, completion.exitCode ?? undefined);
       throw Object.assign(new Error(message), { errorKind: classified });
     }
   }

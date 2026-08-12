@@ -8,22 +8,22 @@
 
 import type { IAgentAdapter, AdapterTestResult, ExecuteParams, AgentEvent, ExecuteHandle } from './interface.js';
 import type { IProcessManager } from '../process/process-manager.js';
-import { extractTokens, createStreamingEvents, buildFullPrompt, buildChildEnv } from './utils.js';
-import { classifyAdapterError, AdapterErrorKind } from '../../domain/errors.js';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
+import type { ICommandRunner } from '../process/command-runner.js';
+import { extractTokens, createStreamingEvents, buildFullPrompt, buildChildEnv, adapterCommandRunner, probeVersion } from './utils.js';
+import { classifyAdapterError } from '../../domain/errors.js';
 
 export class CodexAdapter implements IAgentAdapter {
   readonly kind = 'codex';
 
-  constructor(private readonly processManager: IProcessManager) {}
+  private readonly runner: ICommandRunner;
+
+  constructor(private readonly processManager: IProcessManager, runner?: ICommandRunner) {
+    this.runner = adapterCommandRunner(processManager, runner);
+  }
 
   async test(): Promise<AdapterTestResult> {
     try {
-      const { stdout } = await execFileAsync('codex', ['--version']);
-      return { ok: true, version: stdout.trim() };
+      return { ok: true, version: await probeVersion(this.runner, 'codex') };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return {
@@ -51,22 +51,22 @@ export class CodexAdapter implements IAgentAdapter {
     // Read prompt from stdin (avoids ARG_MAX limits on long prompts)
     args.push('-');
 
-    const { process: proc, pid } = this.processManager.spawn('codex', args, {
+    const command = this.runner.start({
+      executable: 'codex',
+      args,
       cwd: params.workspace,
       env: buildChildEnv(params.env),
       signal: params.signal,
-      stdio: ['pipe', 'pipe', 'pipe'], // stdin must be 'pipe' to send prompt
+      stdin: buildFullPrompt(params.systemPrompt, params.prompt),
+      timeoutMs: params.config.timeout_ms,
+      owner: params.execution.owner,
+      sandbox: params.execution.sandbox,
+      allowedExecutables: params.execution.allowedExecutables,
     });
 
-    // Pipe prompt via stdin — prepend system prompt if present (Codex has no native --system-prompt)
-    if (proc.stdin) {
-      proc.stdin.write(buildFullPrompt(params.systemPrompt, params.prompt));
-      proc.stdin.end();
-    }
+    const events = createStreamingEvents(command, parseCodexEvent, 'Codex', params.signal);
 
-    const events = createStreamingEvents(proc, parseCodexEvent, 'Codex', params.signal);
-
-    return { pid, events };
+    return { pid: command.pid, events };
   }
 
   async stop(pid: number): Promise<void> {

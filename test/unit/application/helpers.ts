@@ -202,12 +202,16 @@ export function createMockProcessManager(): IProcessManager {
     kill: vi.fn(),
     killWithGrace: vi.fn(async () => {}),
     spawn: vi.fn(() => ({ process: {} as any, pid: 12345 })),
+    active: vi.fn(() => []),
+    awaitQuiescent: vi.fn(async () => {}),
   };
 }
 
 export function createMockWorkspaceManager(): IWorkspaceManager {
+  const evidence = { baseCommit: 'a'.repeat(40), commit: 'b'.repeat(40), diffHash: 'c'.repeat(64), changedFiles: [], targetBranch: 'main' };
   return {
     prepare: vi.fn(async () => ({ path: '/tmp/ws' })),
+    inspect: vi.fn(async () => evidence),
     mergeBack: vi.fn(async () => ({ success: true as const })),
     cleanup: vi.fn(async () => {}),
     validate: vi.fn(),
@@ -294,6 +298,12 @@ export function buildDeps(overrides: Partial<OrchestratorDeps> = {}): Orchestrat
   const stateStore = overrides.stateStore ?? createMockStateStore();
   const eventBus = overrides.eventBus ?? new EventBus();
   const config = overrides.config ?? { ...DEFAULT_CONFIG, scheduling: { ...DEFAULT_CONFIG.scheduling, poll_interval_ms: 100_000 } };
+  const executionSafeguards = overrides.executionSafeguards ?? {
+    assertReady: vi.fn(async () => ({})),
+    assertQuiescent: vi.fn(async () => {}),
+    executableAllowlist: vi.fn(async () => []),
+    proxyEndpoint: vi.fn(async () => ({ host: '127.0.0.1', port: 4321 })),
+  };
 
   return {
     taskStore,
@@ -304,6 +314,13 @@ export function buildDeps(overrides: Partial<OrchestratorDeps> = {}): Orchestrat
     workspaceManager: overrides.workspaceManager ?? createMockWorkspaceManager(),
     templateEngine: overrides.templateEngine ?? createMockTemplateEngine(),
     processManager: overrides.processManager ?? createMockProcessManager(),
+    commandRunner: overrides.commandRunner ?? { run: vi.fn(), start: vi.fn() } as unknown as OrchestratorDeps['commandRunner'],
+    reviewExecutables: overrides.reviewExecutables ?? {
+      npm: { path: '/usr/bin/npm', realpath: '/usr/bin/npm', sha256: 'a'.repeat(64) },
+      npx: { path: '/usr/bin/npx', realpath: '/usr/bin/npx', sha256: 'b'.repeat(64) },
+      node: { path: '/usr/bin/node', realpath: '/usr/bin/node', sha256: 'c'.repeat(64) },
+    },
+    executionSafeguards,
     eventBus,
     taskService: overrides.taskService ?? new TaskService(taskStore, eventBus, config, undefined, agentStore),
     agentService: overrides.agentService ?? new AgentService(agentStore, stateStore, eventBus, config),

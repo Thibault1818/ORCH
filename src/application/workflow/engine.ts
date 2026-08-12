@@ -8,6 +8,7 @@ import {
   validateFableAdvice,
   validateFableFallbackRecord,
   validateFableQuery,
+  validateHumanApproval,
   validateOpusResult,
   type CheckResults,
   type CodexDecisionStage,
@@ -15,6 +16,7 @@ import {
   type FableAdviceV1,
   type FableFallbackReason,
   type FableQueryV1,
+  type HumanApprovalV1,
   type OpusResult,
 } from "../../domain/workflow/contracts.js";
 import type {
@@ -109,6 +111,7 @@ export interface StartWorkflowInput {
 export class WorkflowEngine {
   private readonly roles: WorkflowRoleResolver;
   private readonly git: WorkflowRuntimePorts["git"];
+  private readonly safeguards: WorkflowRuntimePorts["safeguards"];
 
   constructor(
     private readonly store: WorkflowArtifactStore,
@@ -117,9 +120,11 @@ export class WorkflowEngine {
     this.roles =
       "roles" in ports ? ports.roles : new LegacyWorkflowRoleResolver(ports);
     this.git = ports.git;
+    this.safeguards = ports.safeguards;
   }
 
   async start(input: StartWorkflowInput): Promise<string> {
+    await this.safeguards.assertReady();
     if (!input.objective.trim())
       throw new Error("Workflow objective must not be empty");
     const requiredChecks = validateDeterministicCheckCommands(
@@ -319,22 +324,26 @@ export class WorkflowEngine {
   }
 
   async run(jobId: string): Promise<WorkflowJobV2> {
+    await this.safeguards.assertReady();
     while (true) {
       const job = await this.advance(jobId);
       if (
         isTerminalWorkflowPhase(job.phase) ||
         job.phase === "paused" ||
-        job.phase === "blocked"
+        job.phase === "blocked" ||
+        job.phase === "awaiting_approval"
       )
         return job;
     }
   }
   async advance(jobId: string): Promise<WorkflowJobV2> {
+    await this.safeguards.assertReady();
     const job = await this.requiredJob(jobId);
     if (
       isTerminalWorkflowPhase(job.phase) ||
       job.phase === "paused" ||
-      job.phase === "blocked"
+      job.phase === "blocked" ||
+      job.phase === "awaiting_approval"
     )
       return job;
     try {
@@ -420,6 +429,7 @@ export class WorkflowEngine {
     jobId: string,
     options: { retry_invocation?: boolean; reason?: string } = {},
   ): Promise<WorkflowJobV2> {
+    await this.safeguards.assertReady();
     const job = await this.requiredJob(jobId);
     const reason = options.reason?.trim();
     if (!reason) throw new Error("Resume requires --reason");
@@ -469,6 +479,83 @@ export class WorkflowEngine {
     });
   }
 
+  async approve(jobId: string, reason: string): Promise<WorkflowJobV2> {
+    const approvalReason = reason.trim();
+    if (!approvalReason) throw new Error("Approval requires --reason");
+    const job = await this.requiredJob(jobId);
+    if (job.phase !== "awaiting_approval")
+      throw new Error(`Cannot approve workflow in ${job.phase}`);
+    await this.safeguards.assertReady();
+    await this.safeguards.assertQuiescent(job.job_id);
+    if (!job.branch || !job.worktree || !job.target_branch || !job.base_commit || !job.current_commit || !job.reviewed_diff_hash)
+      throw new Error("Approval evidence is incomplete");
+
+    const evidence = await this.git.inspect(job.branch, job.worktree);
+    const actualCommit = await this.git.currentCommit(job.branch);
+    if (actualCommit !== job.current_commit)
+      throw new Error("Approval evidence is stale or incomplete");
+    if (await this.git.isMerged(job.branch, job.current_commit, job.target_branch, job.base_commit))
+      throw new Error("Cannot approve a workflow revision that was merged externally");
+    const checkArtifact = await this.store.readArtifact<CheckResults>(job.job_id, "test_results");
+    if (!checkArtifact) throw new Error("Approval requires deterministic check results");
+    const checks = validateCheckResults(checkArtifact.payload);
+    const passport = await this.requiredPassport(job.job_id);
+    if (checks.job_id !== job.job_id || checkArtifact.metadata.phase !== "verification" || checkArtifact.metadata.producing_role !== "orchestrator" || !sameCommands(checks.checks.map((check) => check.command), passport.required_checks) || !checks.passed || checks.commit !== job.current_commit || evidence.commit !== job.current_commit || evidence.diff_hash !== job.reviewed_diff_hash)
+      throw new Error("Approval evidence is stale or incomplete");
+
+    const approval: HumanApprovalV1 = {
+      schema_version: 1,
+      job_id: job.job_id,
+      target_branch: job.target_branch,
+      base_commit: job.base_commit,
+      reviewed_commit: job.current_commit,
+      reviewed_diff_hash: job.reviewed_diff_hash,
+      check_results_hash: checkArtifact.metadata.artifact_hash,
+      reason: approvalReason,
+      approved_at: new Date().toISOString(),
+    };
+    const existing = await this.store.readArtifact<HumanApprovalV1>(job.job_id, "human_approval");
+    if (existing) {
+      const prior = validateHumanApproval(existing.payload);
+      if (prior.job_id !== approval.job_id || prior.target_branch !== approval.target_branch || prior.base_commit !== approval.base_commit || prior.reviewed_commit !== approval.reviewed_commit || prior.reviewed_diff_hash !== approval.reviewed_diff_hash || prior.check_results_hash !== approval.check_results_hash)
+        throw new Error("Existing human approval does not match current evidence");
+      const passport = await this.requiredPassport(job.job_id);
+      const registered = passport.artifacts.some((item) => item.filename === existing.metadata.filename && item.hash === existing.metadata.artifact_hash);
+      await this.addArtifact(job.job_id, existing);
+      if (!registered) {
+        await this.event(job.job_id, "workflow_approved", {
+          reviewed_commit: prior.reviewed_commit,
+          reviewed_diff_hash: prior.reviewed_diff_hash,
+          check_results_hash: prior.check_results_hash,
+          recovered: true,
+        });
+      }
+      return this.transition(job, "merge_ready", {
+        next_action: "Merge the exact human-approved revision",
+      });
+    }
+    const stored = await this.store.writeArtifact({
+      job_id: job.job_id,
+      name: "human_approval",
+      phase: job.phase,
+      revision: job.artifact_revision + 1,
+      invocation_id: `approval_${nanoid(12)}`,
+      producing_role: "human",
+      parent_artifact_hash: job.latest_artifact_hash,
+      payload: approval,
+      validate: validateHumanApproval,
+    });
+    await this.addArtifact(job.job_id, stored);
+    await this.event(job.job_id, "workflow_approved", {
+      reviewed_commit: approval.reviewed_commit,
+      reviewed_diff_hash: approval.reviewed_diff_hash,
+      check_results_hash: approval.check_results_hash,
+    });
+    return this.transition(await this.requiredJob(job.job_id), "merge_ready", {
+      next_action: "Merge the exact human-approved revision",
+    });
+  }
+
   private async step(job: WorkflowJobV2): Promise<void> {
     switch (job.phase) {
       case "codex_pre_opus":
@@ -488,6 +575,8 @@ export class WorkflowEngine {
         return this.codexDecision(job, "post_opus");
       case "verification":
         return this.verification(job);
+      case "awaiting_approval":
+        return;
       case "merge_ready":
         return this.merge(job);
       default:
@@ -582,7 +671,7 @@ export class WorkflowEngine {
     if (decision.action === "CORRECT_OPUS")
       return this.dispatchOpus(job, decision.required_changes.join("\n"), true);
     if (decision.action === "ACCEPT") {
-      if (!evidence.evidence || !evidence.checks || !evidence.opus)
+      if (!evidence.evidence || !evidence.opus)
         throw new Error("ACCEPT requires real Opus evidence");
       return this.transition(job, "verification", {
         last_action: "ACCEPT",
@@ -947,20 +1036,6 @@ export class WorkflowEngine {
       payload: evidence.diff || "(empty diff)",
     });
     await this.addArtifact(job.job_id, diffStored);
-    const checks = await this.runChecksOnce(
-      job,
-      job.worktree,
-      evidence.commit,
-      passport.required_checks,
-    );
-    const checkStored = await this.artifact(
-      await this.requiredJob(job.job_id),
-      "test_results",
-      "orchestrator",
-      checks,
-      validateCheckResults,
-    );
-    await this.addArtifact(job.job_id, checkStored);
     await this.updatePassport(job.job_id, { current_commit: evidence.commit });
     await this.transition(
       await this.requiredJob(job.job_id),
@@ -968,7 +1043,7 @@ export class WorkflowEngine {
       {
         current_commit: evidence.commit,
         reviewed_diff_hash: evidence.diff_hash,
-        next_action: "Codex reviews actual Opus diff, commit, and checks",
+        next_action: "Reviewer inspects the exact Opus diff before generated checks execute",
       },
     );
   }
@@ -983,7 +1058,6 @@ export class WorkflowEngine {
       throw new Error("Verification evidence is missing");
     const passport = await this.requiredPassport(job.job_id);
     const evidence = await this.git.inspect(job.branch, job.worktree);
-    const prior = await this.payload<CheckResults>(job, "test_results");
     const checks = await this.runChecksOnce(
       job,
       job.worktree,
@@ -991,13 +1065,12 @@ export class WorkflowEngine {
       passport.required_checks,
     );
     if (
-      !prior.passed ||
       !checks.passed ||
+      !sameCommands(checks.checks.map((check) => check.command), passport.required_checks) ||
       checks.checks.length === 0 ||
       !hasMeaningfulChecks(checks.checks.map((check) => check.command)) ||
       evidence.commit !== job.current_commit ||
-      evidence.diff_hash !== job.reviewed_diff_hash ||
-      prior.commit !== evidence.commit
+      evidence.diff_hash !== job.reviewed_diff_hash
     )
       return this.block(
         job,
@@ -1011,12 +1084,15 @@ export class WorkflowEngine {
       validateCheckResults,
     );
     await this.addArtifact(job.job_id, stored);
-    await this.transition(await this.requiredJob(job.job_id), "merge_ready", {
-      next_action: "Merge only the revalidated reviewed revision",
+    await this.safeguards.assertQuiescent(job.job_id);
+    await this.transition(await this.requiredJob(job.job_id), "awaiting_approval", {
+      next_action: `Run orch workflow approve ${job.job_id} --reason <reason> to authorize merge`,
     });
   }
 
   private async merge(job: WorkflowJobV2): Promise<void> {
+    await this.safeguards.assertReady();
+    await this.safeguards.assertQuiescent(job.job_id);
     if (
       !job.branch ||
       !job.worktree ||
@@ -1029,6 +1105,10 @@ export class WorkflowEngine {
     const actual = await this.git.currentCommit(job.branch);
     if (actual !== job.current_commit)
       throw new Error("Merge approval is stale or incomplete");
+    const approval = validateHumanApproval(await this.payload<HumanApprovalV1>(job, "human_approval"));
+    const approvedChecks = await this.store.readArtifact<CheckResults>(job.job_id, "test_results");
+    if (!approvedChecks || approval.job_id !== job.job_id || approval.target_branch !== job.target_branch || approval.base_commit !== job.base_commit || approval.reviewed_commit !== job.current_commit || approval.reviewed_diff_hash !== job.reviewed_diff_hash || approval.check_results_hash !== approvedChecks.metadata.artifact_hash)
+      throw new Error("Human approval is stale or incomplete");
     if (
       await this.git.isMerged(
         job.branch,
@@ -1092,7 +1172,7 @@ export class WorkflowEngine {
       throw new Error("Post-Opus worktree evidence is missing");
     return {
       evidence: await this.git.inspect(job.branch, job.worktree),
-      checks: await this.payload<CheckResults>(job, "test_results"),
+      checks: null,
       opus: await this.payload<OpusResult>(job, "opus_report"),
       fable_advice: fableAdvice,
     };
@@ -2248,6 +2328,9 @@ function semanticRoleForPhase(
 }
 function sameBinding(left: RosterAgent, right: RosterAgent): boolean {
   return hashCanonical(left) === hashCanonical(right);
+}
+function sameCommands(actual: string[], expected: string[]): boolean {
+  return actual.length === expected.length && actual.every((command, index) => command === expected[index]);
 }
 function withoutSession<T>(result: RoleResult<T>): RoleResult<T> {
   return {

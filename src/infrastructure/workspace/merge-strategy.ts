@@ -1,77 +1,42 @@
-/**
- * Git merge strategy for worktree branches.
- *
- * Encapsulates `git merge --no-ff` execution and conflict handling.
- */
-
+import path from 'node:path';
+import os from 'node:os';
+import type { ICommandRunner } from '../process/command-runner.js';
+import { CommandRunner, resolveExecutable } from '../process/command-runner.js';
 import type { IProcessManager } from '../process/process-manager.js';
+import { HardenedGit } from '../git/hardened-git.js';
 
 export type MergeResult =
   | { success: true }
   | { success: false; conflictInfo: string };
 
 export class MergeStrategy {
+  private readonly runner: ICommandRunner;
+  private readonly git: Promise<HardenedGit>;
+
   constructor(
     private readonly projectRoot: string,
-    private readonly processManager: IProcessManager,
-  ) {}
+    runner: ICommandRunner | IProcessManager,
+  ) {
+    const commandRunner = 'run' in runner ? runner : new CommandRunner(runner);
+    this.runner = commandRunner;
+    this.git = (async () => new HardenedGit(
+      commandRunner,
+      commandRunner.resolveExecutable ? await commandRunner.resolveExecutable('git') : await resolveExecutable('git'),
+      { configRoot: path.join(os.tmpdir(), 'orch-merge-git') },
+    ))();
+  }
 
-  /**
-   * Merge a branch into the current branch with --no-ff.
-   * On conflict, aborts the merge and returns conflict info.
-   */
   async mergeBack(branch: string): Promise<MergeResult> {
-    return new Promise((resolve) => {
-      const { process: proc } = this.processManager.spawn(
-        'git',
-        ['merge', '--no-ff', branch, '-m', `Merge ${branch}`],
-        { cwd: this.projectRoot },
-      );
-
-      let output = '';
-      const maxOutputLen = 2000;
-      const appendOutput = (chunk: Buffer) => {
-        if (output.length < maxOutputLen) output += chunk.toString();
-      };
-      proc.stdout?.on('data', appendOutput);
-      proc.stderr?.on('data', appendOutput);
-
-      proc.on('close', (code) => {
-        if (code === 0) {
-          resolve({ success: true });
-          return;
-        }
-
-        const trimmedOutput = output.slice(0, 1000);
-        const isConflict = trimmedOutput.includes('CONFLICT') || trimmedOutput.includes('Merge conflict');
-
-        if (!isConflict) {
-          // Non-conflict failure (branch not found, hook failure, etc.) — no merge to abort
-          resolve({ success: false, conflictInfo: trimmedOutput });
-          return;
-        }
-
-        // Abort the failed merge to restore clean state
-        try {
-          const { process: abortProc } = this.processManager.spawn(
-            'git',
-            ['merge', '--abort'],
-            { cwd: this.projectRoot },
-          );
-          abortProc.on('close', () => {
-            resolve({ success: false, conflictInfo: trimmedOutput });
-          });
-          abortProc.on('error', () => {
-            resolve({ success: false, conflictInfo: trimmedOutput });
-          });
-        } catch {
-          resolve({ success: false, conflictInfo: trimmedOutput });
-        }
-      });
-
-      proc.on('error', (err) => {
-        resolve({ success: false, conflictInfo: err.message });
-      });
-    });
+    const git = await this.git;
+    const result = await git.run(
+      this.projectRoot,
+      ['merge', '--no-ff', branch, '-m', `Merge ${branch}`],
+      { output: 'result' },
+    );
+    if (result.ok) return { success: true };
+    const output = `${result.stdout}${result.stderr}`.slice(0, 1000);
+    if (output.includes('CONFLICT') || output.includes('Merge conflict'))
+      await git.run(this.projectRoot, ['merge', '--abort'], { output: 'result' });
+    return { success: false, conflictInfo: output };
   }
 }

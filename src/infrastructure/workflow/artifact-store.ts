@@ -30,6 +30,12 @@ import {
   readJson,
   readJsonl,
 } from "../storage/fs-utils.js";
+import {
+  migrateWorkflowState,
+  validateWorkflowMigrationJournal,
+  workflowStateVersion,
+  type WorkflowMigrationJournal,
+} from "./state-migrations.js";
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -45,6 +51,7 @@ export const ARTIFACT_FILES = {
   opus_report: "opus-report-r%REV%-i%ITER%-a%SEQ%.json",
   opus_diff: "opus-r%REV%-i%ITER%-a%SEQ%.diff",
   test_results: "test-results-r%REV%-i%ITER%-a%SEQ%.json",
+  human_approval: "human-approval-r%REV%-i%ITER%-a%SEQ%.json",
 } as const;
 export type ArtifactName = keyof typeof ARTIFACT_FILES;
 
@@ -80,9 +87,14 @@ interface SessionsJournal {
 
 export class WorkflowArtifactStore {
   private readonly root: string;
-  constructor(projectRoot: string) {
-    this.root = path.join(projectRoot, ".orchestry", "workflows");
+  private readonly migrations = new Map<string, Promise<void>>();
+  constructor(projectRoot: string, options: { rootIsStateRoot?: boolean } = {}) {
+    this.root = options.rootIsStateRoot
+      ? path.join(projectRoot, "workflows")
+      : path.join(projectRoot, ".orchestry", "workflows");
   }
+
+  get rootPath(): string { return this.root; }
 
   async createJob(
     job: WorkflowJobV1,
@@ -368,6 +380,7 @@ export class WorkflowArtifactStore {
   }
   async readJob(jobId: string): Promise<WorkflowJobV1 | null> {
     const id = safeId(jobId);
+    await this.ensureMigration(id);
     await this.recoverSessions(id);
     await this.recoverTransition(id);
     const value = await readJson<unknown>(this.file(id, "job.json"));
@@ -375,6 +388,7 @@ export class WorkflowArtifactStore {
   }
   async readPassport(jobId: string): Promise<WorkflowPassportV1 | null> {
     const id = safeId(jobId);
+    await this.ensureMigration(id);
     await this.recoverSessions(id);
     await this.recoverPassport(id);
     await this.recoverTransition(id);
@@ -407,6 +421,7 @@ export class WorkflowArtifactStore {
   }
   async readSessions(jobId: string): Promise<WorkflowSessionsV1 | null> {
     const id = safeId(jobId);
+    await this.ensureMigration(id);
     await this.recoverSessions(id);
     const value = await readJson<unknown>(this.file(id, "sessions.json"));
     return value === null ? null : validateWorkflowSessions(value);
@@ -789,6 +804,71 @@ export class WorkflowArtifactStore {
   }
   private async write(file: string, value: unknown): Promise<void> {
     await atomicWrite(file, canonicalJson(removeForbidden(value)) + "\n");
+  }
+  private async ensureMigration(id: string): Promise<void> {
+    const active = this.migrations.get(id);
+    if (active) return active;
+    const migration = this.migrateOrRecover(id).finally(() => {
+      this.migrations.delete(id);
+    });
+    this.migrations.set(id, migration);
+    return migration;
+  }
+  private async migrateOrRecover(id: string): Promise<void> {
+    const pending = this.file(id, "migration.pending.json");
+    const rawJournal = await readJson<unknown>(pending);
+    if (rawJournal) {
+      await this.applyMigration(id, validateWorkflowMigrationJournal(rawJournal));
+      return;
+    }
+    const [job, passport, sessions] = await Promise.all([
+      readJson<unknown>(this.file(id, "job.json")),
+      readJson<unknown>(this.file(id, "passport.json")),
+      readJson<unknown>(this.file(id, "sessions.json")),
+    ]);
+    if (job === null && passport === null && sessions === null) return;
+    if (job === null || passport === null || sessions === null)
+      throw new Error(`Workflow state is incomplete: ${id}`);
+    const versions = [
+      workflowStateVersion(job, "workflow job"),
+      workflowStateVersion(passport, "workflow passport"),
+      workflowStateVersion(sessions, "workflow sessions"),
+    ];
+    if (versions.every((version) => version === 2)) {
+      validateWorkflowJob(job);
+      validateWorkflowPassport(passport);
+      validateWorkflowSessions(sessions);
+      return;
+    }
+    if (!versions.every((version) => version === 1))
+      throw new Error(`Workflow state has mixed schema versions without a migration journal: ${id}`);
+    const journal = migrateWorkflowState(job, passport, sessions);
+    await this.write(pending, journal);
+    await this.applyMigration(id, journal);
+  }
+  private async applyMigration(id: string, journal: WorkflowMigrationJournal): Promise<void> {
+    const pending = this.file(id, "migration.pending.json");
+    const targets = [
+      ["job.json", journal.job, "workflow job"],
+      ["passport.json", journal.passport, "workflow passport"],
+      ["sessions.json", journal.sessions, "workflow sessions"],
+    ] as const;
+    for (const [name, target, label] of targets) {
+      const file = this.file(id, name);
+      const current = await readJson<unknown>(file);
+      if (current !== null && workflowStateVersion(current, label) === 2) {
+        const validated = name === "job.json"
+          ? validateWorkflowJob(current)
+          : name === "passport.json"
+            ? validateWorkflowPassport(current)
+            : validateWorkflowSessions(current);
+        if (canonicalJson(validated) !== canonicalJson(target))
+          throw new Error(`Workflow migration journal conflicts with canonical ${label}`);
+        continue;
+      }
+      await this.write(file, target);
+    }
+    await fs.rm(pending, { force: true });
   }
   private async recoverTransition(id: string): Promise<void> {
     const journal = await readJson<TransitionJournal>(

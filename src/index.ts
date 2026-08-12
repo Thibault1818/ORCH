@@ -44,6 +44,10 @@ export * from './domain/workflow/contracts.js';
 export * from './domain/workflow/state.js';
 export * from './domain/workflow/transitions.js';
 export * from './domain/workflow/roster.js';
+export * from './domain/governance/contracts-v3.js';
+export { GovernanceStoreV3, hashGovernanceRecordV3 } from './infrastructure/governance/governance-store-v3.js';
+export { GovernanceServiceV3, assertNoParallelScopeOverlap } from './application/governance/governance-service-v3.js';
+export { GovernedMergeV3 } from './application/governance/governed-merge-v3.js';
 
 // Clipboard
 export { detectClipboardType, getClipboardImage, isClipboardToolAvailable } from './infrastructure/clipboard-service.js';

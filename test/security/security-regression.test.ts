@@ -43,7 +43,7 @@ describe('secured fork static invariants', () => {
       'src/infrastructure/adapters/opencode.ts',
     ]) {
       const adapter = source(path);
-      expect(adapter).toMatch(/stdin\?*\.write|stdin\.write/);
+      expect(adapter).toMatch(/stdin:\s*(?:buildFullPrompt|params\.prompt)/);
       expect(adapter).not.toMatch(/args\.push\((?:fullPrompt|params\.prompt|effectiveSystemPrompt)\)/);
       expect(adapter).toContain('buildChildEnv(params.env)');
     }
@@ -87,8 +87,10 @@ describe('secured fork static invariants', () => {
     expect(paths).toContain('stat.isSymbolicLink()');
     expect(paths).toContain('fs.realpath(expected)');
     expect(paths).toContain('ID_PATTERN.test(id)');
-    expect(paths).toContain('path.relative(realProjectRoot, realRoot)');
-    expect(workspace).toContain('validateWorkspacePath(workspacePath, projectRoot)');
+    expect(paths).toContain('externalOrchestryRoots');
+    expect(paths).toContain('ORCH state and workspace roots must be separate');
+    expect(workspace).toContain("['clone', '--local', '--no-hardlinks'");
+    expect(workspace).not.toContain("['worktree', 'add'");
     expect(processes).toContain('this.ownedPids.has(pid)');
     expect(processes).toMatch(/Number\.isSafeInteger\(pid\)\s*&&\s*pid\s*>\s*1/);
   });

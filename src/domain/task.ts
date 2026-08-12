@@ -20,6 +20,7 @@ export type TaskStatus =
 export const AUTONOMOUS_LABEL = 'autonomous' as const;
 export const GOAL_LEAD_LABEL = 'goal-lead' as const;
 export const GOAL_REVIEW_LABEL = 'goal-review' as const;
+export const GOVERNED_LABEL = 'governed' as const;
 
 export type GoalTaskRole = 'lead_analysis' | 'worker' | 'lead_review';
 
@@ -35,6 +36,10 @@ export interface ReviewResult {
 
 export interface TaskProof {
   branch?: string;
+  base_commit?: string;
+  reviewed_commit?: string;
+  reviewed_diff_hash?: string;
+  target_branch?: string;
   pr_url?: string;
   files_changed: string[];
   test_results?: string;

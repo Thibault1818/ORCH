@@ -79,6 +79,7 @@ function descriptor(
 const capabilities: WorkflowCapabilities = {
   codex: descriptor("codex", ["supervisor", "reviewer"]),
   claude: descriptor("claude", ["implementer", "reviewer"]),
+  opencode: descriptor("opencode", "implementer"),
   fable: descriptor("fable", "adviser"),
   grok: descriptor("grok", null),
   antigravity: descriptor("antigravity", null),
@@ -94,6 +95,7 @@ async function setup(config: Record<string, unknown> = { workflow: {} }) {
   await fs.writeFile(path.join(root, "package-lock.json"), "{}");
   const start = vi.fn(async () => "wf_test");
   const run = vi.fn(async () => ({ phase: "completed" }));
+  const approve = vi.fn(async () => ({ phase: "merge_ready" }));
   const rotateBinding = vi.fn(async () => {});
   const container = makeContainer({
     context: {
@@ -104,8 +106,9 @@ async function setup(config: Record<string, unknown> = { workflow: {} }) {
       projectRoot: root,
     },
     config: config as any,
-    workflowEngine: { start, run, rotateBinding } as any,
+    workflowEngine: { start, run, approve, rotateBinding } as any,
     workflowStore: {
+      readJob: vi.fn(async () => ({ phase: "awaiting_approval", current_commit: "abcdef1234567890" })),
       readPassport: vi.fn(async () => ({
         roster: {
           schema_version: 1,
@@ -142,10 +145,29 @@ async function setup(config: Record<string, unknown> = { workflow: {} }) {
     readStdin: async () => "Objective from stdin",
   });
   vi.spyOn(console, "log").mockImplementation(() => {});
-  return { program, start, run, rotateBinding, container };
+  return { program, start, run, approve, rotateBinding, container };
 }
 
 describe("workflow start preflight", () => {
+  it("requires an interactive exact-commit challenge before approval", async () => {
+    const { container, approve, run } = await setup();
+    const program = new Command().exitOverride();
+    registerWorkflowCommand(program, container as any, {
+      confirmApproval: async () => "approve abcdef123456",
+    });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await program.parseAsync(["workflow", "approve", "wf_test", "--reason", "reviewed"], { from: "user" });
+    expect(approve).toHaveBeenCalledWith("wf_test", "reviewed");
+    expect(run).toHaveBeenCalledWith("wf_test");
+  });
+
+  it("rejects a mismatched approval challenge", async () => {
+    const { container, approve } = await setup();
+    const program = new Command().exitOverride();
+    registerWorkflowCommand(program, container as any, { confirmApproval: async () => "approve wrong" });
+    await expect(program.parseAsync(["workflow", "approve", "wf_test", "--reason", "reviewed"], { from: "user" })).rejects.toThrow("challenge");
+    expect(approve).not.toHaveBeenCalled();
+  });
   it("prints a complete dry-run summary without calling the engine", async () => {
     const { program, start, run } = await setup();
     await program.parseAsync(["workflow", "start", "--yes", "--dry-run"], {
@@ -473,6 +495,7 @@ describe("workflow start preflight", () => {
     expect(Object.keys(output.cli_descriptors)).toEqual([
       "codex",
       "claude",
+      "opencode",
       "fable",
       "grok",
       "antigravity",

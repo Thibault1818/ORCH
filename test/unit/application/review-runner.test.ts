@@ -1,191 +1,170 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ReviewRunner } from '../../../src/application/review-runner.js';
-import type { ReviewCriterion, ReviewResult } from '../../../src/domain/task.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ReviewRunner, type ReviewRunnerExecutables } from '../../../src/application/review-runner.js';
+import type { ReviewResult } from '../../../src/domain/task.js';
+import type { CommandResult, ICommandRunner } from '../../../src/infrastructure/process/command-runner.js';
 
-// Mock execFile from node:child_process
-vi.mock('node:child_process', () => ({
-  execFile: vi.fn(),
-}));
+const executables: ReviewRunnerExecutables = {
+  npm: descriptor('/opt/bin/npm'),
+  npx: descriptor('/opt/bin/npx'),
+  node: descriptor('/opt/bin/node'),
+};
 
-import { execFile } from 'node:child_process';
-const mockExecFile = vi.mocked(execFile);
+function descriptor(executablePath: string) {
+  return { path: executablePath, realpath: executablePath, sha256: 'a'.repeat(64) };
+}
 
-function simulateExecFile(exitCode: number, stdout: string, stderr: string) {
-  mockExecFile.mockImplementationOnce((_cmd, _args, _opts, callback) => {
-    const error = exitCode !== 0 ? Object.assign(new Error('failed'), { code: exitCode }) : null;
-    (callback as Function)(error, stdout, stderr);
-    return {} as any;
-  });
+function commandResult(stdout: string, stderr = '', ok = true): CommandResult {
+  return {
+    executable: executables.npm.realpath,
+    executableDescriptor: executables.npm,
+    args: [],
+    cwd: '/tmp/test',
+    pid: 1,
+    ok,
+    termination: 'exited',
+    exitCode: ok ? 0 : 1,
+    signal: null,
+    stdout,
+    stderr,
+    stdoutBytes: Buffer.byteLength(stdout),
+    stderrBytes: Buffer.byteLength(stderr),
+    stdoutTruncated: false,
+    stderrTruncated: false,
+    durationMs: 1,
+    spawnError: null,
+    integrityError: null,
+    sandbox: null,
+  };
 }
 
 describe('ReviewRunner', () => {
+  let run: ReturnType<typeof vi.fn<ICommandRunner['run']>>;
+  let commandRunner: ICommandRunner;
+  const safeguards = {
+    assertReady: vi.fn(async () => ({})),
+    executableAllowlist: vi.fn(async () => Object.values(executables)),
+    proxyEndpoint: vi.fn(async () => ({ host: '127.0.0.1', port: 4321 })),
+  };
+
   beforeEach(() => {
-    vi.clearAllMocks();
+    run = vi.fn<ICommandRunner['run']>();
+    commandRunner = {
+      run,
+      start: () => { throw new Error('not used'); },
+    };
   });
 
   describe('runAll', () => {
-    it('should run all criteria and return results', async () => {
-      const runner = new ReviewRunner({ cwd: '/tmp/test' });
-
-      // Sorted order: typecheck first, then test_pass
-      simulateExecFile(0, 'No errors found', '');
-      simulateExecFile(0, 'All tests passed', '');
+    it('runs all criteria in staged order', async () => {
+      run.mockResolvedValueOnce(commandResult('No errors found'));
+      run.mockResolvedValueOnce(commandResult('All tests passed'));
+      const runner = new ReviewRunner({ cwd: '/tmp/test' }, commandRunner, executables, safeguards, 'tsk_review');
 
       const results = await runner.runAll(['test_pass', 'typecheck']);
 
-      expect(results).toHaveLength(2);
-      expect(results[0]).toEqual({
-        criterion: 'typecheck',
-        passed: true,
-        output: expect.stringContaining('No errors found'),
-      });
-      expect(results[1]).toEqual({
-        criterion: 'test_pass',
-        passed: true,
-        output: expect.stringContaining('All tests passed'),
-      });
+      expect(results).toEqual([
+        { criterion: 'typecheck', passed: true, output: 'No errors found' },
+        { criterion: 'test_pass', passed: true, output: 'All tests passed' },
+      ]);
+      expect(run.mock.calls.map(([request]) => request.executable)).toEqual([executables.npx, executables.npm]);
     });
 
-    it('should sort criteria: typecheck → lint → test_pass', async () => {
-      const runner = new ReviewRunner({ cwd: '/tmp/test' });
-
-      simulateExecFile(0, 'tc ok', '');
-      simulateExecFile(0, 'lint ok', '');
-      simulateExecFile(0, 'test ok', '');
+    it('sorts criteria: typecheck, lint, test_pass', async () => {
+      run.mockResolvedValue(commandResult('ok'));
+      const runner = new ReviewRunner({ cwd: '/tmp/test' }, commandRunner, executables, safeguards, 'tsk_review');
 
       const results = await runner.runAll(['test_pass', 'lint', 'typecheck']);
 
-      expect(results.map((r) => r.criterion)).toEqual(['typecheck', 'lint', 'test_pass']);
+      expect(results.map((result) => result.criterion)).toEqual(['typecheck', 'lint', 'test_pass']);
     });
 
-    it('should stop on first failure in fail-fast mode (default)', async () => {
-      const runner = new ReviewRunner({ cwd: '/tmp/test' });
-
-      // typecheck fails → lint and test_pass should NOT run
-      simulateExecFile(1, '', 'error TS2345: Argument of type');
+    it('stops on first failure by default', async () => {
+      run.mockResolvedValueOnce(commandResult('', 'error TS2345', false));
+      const runner = new ReviewRunner({ cwd: '/tmp/test' }, commandRunner, executables, safeguards, 'tsk_review');
 
       const results = await runner.runAll(['test_pass', 'typecheck', 'lint']);
 
       expect(results).toHaveLength(1);
-      expect(results[0]!.criterion).toBe('typecheck');
-      expect(results[0]!.passed).toBe(false);
-      expect(mockExecFile).toHaveBeenCalledTimes(1);
+      expect(results[0]).toMatchObject({ criterion: 'typecheck', passed: false });
+      expect(run).toHaveBeenCalledTimes(1);
     });
 
-    it('should run all criteria when fail_fast is false', async () => {
-      const runner = new ReviewRunner({ cwd: '/tmp/test', fail_fast: false });
-
-      simulateExecFile(1, '', 'type error');
-      simulateExecFile(1, '', 'lint error');
-      simulateExecFile(1, '', 'FAIL src/test.ts');
+    it('runs all criteria when fail_fast is false', async () => {
+      run.mockResolvedValue(commandResult('', 'failed', false));
+      const runner = new ReviewRunner({ cwd: '/tmp/test', fail_fast: false }, commandRunner, executables, safeguards, 'tsk_review');
 
       const results = await runner.runAll(['test_pass', 'typecheck', 'lint']);
 
       expect(results).toHaveLength(3);
-      expect(results.every((r) => !r.passed)).toBe(true);
+      expect(results.every((result) => !result.passed)).toBe(true);
     });
 
-    it('should mark failed criteria correctly', async () => {
-      const runner = new ReviewRunner({ cwd: '/tmp/test', fail_fast: false });
-
-      // Sorted order: typecheck, test_pass
-      simulateExecFile(0, 'No errors found', '');
-      simulateExecFile(1, '', 'error TS2345: Argument of type');
-
-      const results = await runner.runAll(['test_pass', 'typecheck']);
-
-      expect(results[0]!.passed).toBe(true);
-      expect(results[1]!.passed).toBe(false);
-      expect(results[1]!.output).toContain('TS2345');
-    });
-
-    it('should pass cwd and timeout to execFile', async () => {
-      const runner = new ReviewRunner({ cwd: '/my/project', timeout_ms: 60_000 });
-
-      simulateExecFile(0, 'ok', '');
+    it('uses bounded execution and an explicit safe environment', async () => {
+      run.mockResolvedValue(commandResult('ok'));
+      const runner = new ReviewRunner({ cwd: '/my/project', timeout_ms: 60_000 }, commandRunner, executables, safeguards, 'tsk_review');
 
       await runner.runAll(['test_pass']);
 
-      expect(mockExecFile).toHaveBeenCalledWith(
-        'npm',
-        ['test'],
-        expect.objectContaining({ cwd: '/my/project', timeout: 60_000 }),
-        expect.any(Function),
-      );
+      expect(run).toHaveBeenCalledWith(expect.objectContaining({
+        executable: executables.npm,
+        args: ['test'],
+        cwd: '/my/project',
+        timeoutMs: 60_000,
+        maxStdoutBytes: 1024 * 1024,
+        maxStderrBytes: 1024 * 1024,
+        env: expect.objectContaining({ CI: '1', NO_COLOR: '1' }),
+        allowedExecutables: [executables.npm, executables.npx, executables.node],
+        owner: 'tsk_review',
+        sandbox: expect.objectContaining({ workspace: '/my/project' }),
+      }));
+      expect(run.mock.calls[0]![0].env).not.toHaveProperty('NODE_OPTIONS');
+      expect(run.mock.calls[0]![0].env?.PATH).toBe('/opt/bin:/usr/bin:/bin:/usr/sbin:/sbin');
     });
 
-    it('should truncate output to 2000 chars', async () => {
-      const runner = new ReviewRunner({ cwd: '/tmp/test' });
-      const longOutput = 'x'.repeat(3000);
+    it('rejects an unbounded timeout', () => {
+      expect(() => new ReviewRunner({ cwd: '/tmp/test', timeout_ms: 600_001 }, commandRunner, executables, safeguards, 'tsk_review'))
+        .toThrow('timeout_ms');
+    });
 
-      simulateExecFile(0, longOutput, '');
+    it('fails closed when command execution rejects', async () => {
+      run.mockRejectedValueOnce(new Error('Executable SHA-256 changed'));
+      const runner = new ReviewRunner({ cwd: '/tmp/test' }, commandRunner, executables, safeguards, 'tsk_review');
 
       const results = await runner.runAll(['test_pass']);
 
-      expect(results[0]!.output.length).toBeLessThanOrEqual(2000);
+      expect(results).toEqual([{ criterion: 'test_pass', passed: false, output: 'Executable SHA-256 changed' }]);
     });
 
-    it('redacts secrets from persisted review output', async () => {
-      const runner = new ReviewRunner({ cwd: '/tmp/test' });
+    it('truncates and redacts persisted output', async () => {
+      run.mockResolvedValue(commandResult(`Authorization: Bearer secret-token\n${'x'.repeat(3000)}`, 'api_key="supersecret12345"', false));
+      const runner = new ReviewRunner({ cwd: '/tmp/test' }, commandRunner, executables, safeguards, 'tsk_review');
 
-      simulateExecFile(1, 'Authorization: Bearer secret-token', 'api_key="supersecret12345"');
+      const [result] = await runner.runAll(['test_pass']);
 
-      const results = await runner.runAll(['test_pass']);
-
-      expect(results[0]!.output).toContain('Authorization: Bearer [REDACTED]');
-      expect(results[0]!.output).toContain('api_key="[REDACTED]"');
-      expect(results[0]!.output).not.toContain('secret-token');
-      expect(results[0]!.output).not.toContain('supersecret12345');
+      expect(result!.output.length).toBeLessThanOrEqual(2000);
+      expect(result!.output).toContain('Authorization: Bearer [REDACTED]');
+      expect(result!.output).not.toContain('secret-token');
+      expect(result!.output).not.toContain('supersecret12345');
     });
   });
 
   describe('allPassed', () => {
-    it('should return true when all results passed', () => {
-      const results: ReviewResult[] = [
-        { criterion: 'test_pass', passed: true, output: 'ok' },
-        { criterion: 'typecheck', passed: true, output: 'ok' },
-      ];
-      expect(ReviewRunner.allPassed(results)).toBe(true);
-    });
-
-    it('should return false when any result failed', () => {
-      const results: ReviewResult[] = [
-        { criterion: 'test_pass', passed: true, output: 'ok' },
-        { criterion: 'typecheck', passed: false, output: 'error' },
-      ];
-      expect(ReviewRunner.allPassed(results)).toBe(false);
-    });
-
-    it('should return false for empty results', () => {
+    it('requires at least one result and all results passing', () => {
+      expect(ReviewRunner.allPassed([{ criterion: 'test_pass', passed: true, output: 'ok' }])).toBe(true);
+      expect(ReviewRunner.allPassed([{ criterion: 'typecheck', passed: false, output: 'error' }])).toBe(false);
       expect(ReviewRunner.allPassed([])).toBe(false);
     });
   });
 
   describe('formatReport', () => {
-    it('should format passing results with checkmarks', () => {
-      const results: ReviewResult[] = [
-        { criterion: 'test_pass', passed: true, output: '42 tests passed' },
-      ];
-      const report = ReviewRunner.formatReport(results);
-      expect(report).toContain('✓ test_pass: PASSED');
-      expect(report).toContain('42 tests passed');
-    });
-
-    it('should format failing results with X marks', () => {
-      const results: ReviewResult[] = [
-        { criterion: 'lint', passed: false, output: '3 errors found' },
-      ];
-      const report = ReviewRunner.formatReport(results);
-      expect(report).toContain('✗ lint: FAILED');
-      expect(report).toContain('3 errors found');
-    });
-
-    it('should format mixed results', () => {
+    it('formats mixed results', () => {
       const results: ReviewResult[] = [
         { criterion: 'test_pass', passed: true, output: 'ok' },
         { criterion: 'typecheck', passed: false, output: 'fail' },
       ];
+
       const report = ReviewRunner.formatReport(results);
+
       expect(report).toContain('✓ test_pass: PASSED');
       expect(report).toContain('✗ typecheck: FAILED');
     });

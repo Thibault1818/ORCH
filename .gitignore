@@ -10,8 +10,11 @@ node_modules/
 # Test coverage
 coverage/
 
-# Internal docs
+# Internal docs except the release procedure
 docs/
+!docs/
+docs/*
+!docs/RELEASING.md
 
 # Landing pages
 landing/
@@ -41,5 +44,4 @@ npm-debug.log*
 .playwright-mcp
 archive
 
-docs
 .env.local

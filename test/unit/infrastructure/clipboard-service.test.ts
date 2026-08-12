@@ -1,17 +1,41 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import type { ChildProcess } from 'node:child_process';
 
-const execFileMock = vi.fn();
-const execFileSyncMock = vi.fn();
-const mkdtempMock = vi.fn();
-const readFileMock = vi.fn();
-const unlinkMock = vi.fn().mockResolvedValue(undefined);
-const rmMock = vi.fn().mockResolvedValue(undefined);
-const writeFileMock = vi.fn().mockResolvedValue(undefined);
+const {
+  commandRunMock,
+  resolveExecutableMock,
+  accessSyncMock,
+  statSyncMock,
+  mkdtempMock,
+  readFileMock,
+  unlinkMock,
+  rmMock,
+} = vi.hoisted(() => ({
+  commandRunMock: vi.fn(),
+  resolveExecutableMock: vi.fn((command: string) => Promise.resolve({
+    path: `/resolved/${command}`,
+    realpath: `/resolved/${command}`,
+    sha256: 'a'.repeat(64),
+  })),
+  accessSyncMock: vi.fn(),
+  statSyncMock: vi.fn(() => ({ isFile: () => true })),
+  mkdtempMock: vi.fn(),
+  readFileMock: vi.fn(),
+  unlinkMock: vi.fn().mockResolvedValue(undefined),
+  rmMock: vi.fn().mockResolvedValue(undefined),
+}));
 
-vi.mock('node:child_process', () => ({
-  execFile: execFileMock,
-  execFileSync: execFileSyncMock,
+vi.mock('node:fs', async (importOriginal) => ({
+  ...await importOriginal<typeof import('node:fs')>(),
+  accessSync: accessSyncMock,
+  statSync: statSyncMock,
+}));
+
+vi.mock('../../../src/infrastructure/process/command-runner.js', () => ({
+  CommandRunner: class {
+    run = commandRunMock;
+  },
+  resolveExecutable: resolveExecutableMock,
+  commandFailureMessage: () => 'command failed',
 }));
 
 vi.mock('node:fs/promises', () => ({
@@ -19,52 +43,26 @@ vi.mock('node:fs/promises', () => ({
   readFile: readFileMock,
   unlink: unlinkMock,
   rm: rmMock,
-  writeFile: writeFileMock,
 }));
 
-function mockExecFileResolve(stdout: string | Buffer): void {
-  execFileMock.mockImplementation(
-    (_cmd: string, _args: unknown, _opts: unknown, cb?: unknown) => {
-      const callback = typeof _opts === 'function' ? _opts : cb;
-      if (typeof callback === 'function') {
-        (callback as (err: null, result: { stdout: string | Buffer; stderr: string }) => void)(null, { stdout, stderr: '' });
-      }
-      return {} as ChildProcess;
-    },
-  );
+function commandResult(stdout: string | Buffer, ok = true) {
+  const stdoutBuffer = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
+  return { ok, stdout: stdoutBuffer.toString('utf8'), stdoutBuffer };
 }
 
-function mockExecFileReject(): void {
-  execFileMock.mockImplementation(
-    (_cmd: string, _args: unknown, _opts: unknown, cb?: unknown) => {
-      const callback = typeof _opts === 'function' ? _opts : cb;
-      if (typeof callback === 'function') {
-        (callback as (err: Error) => void)(new Error('command failed'));
-      }
-      return {} as ChildProcess;
-    },
-  );
+function mockCommandResolve(stdout: string | Buffer): void {
+  commandRunMock.mockResolvedValue(commandResult(stdout));
 }
 
-function mockExecFileSequence(results: Array<{ stdout: string | Buffer } | { error: true }>): void {
-  let callIndex = 0;
-  execFileMock.mockImplementation(
-    (_cmd: string, _args: unknown, _opts: unknown, cb?: unknown) => {
-      const callback = typeof _opts === 'function' ? _opts : cb;
-      const entry = results[callIndex++];
-      if (typeof callback === 'function') {
-        if (entry && 'error' in entry) {
-          (callback as (err: Error) => void)(new Error('failed'));
-        } else {
-          (callback as (err: null, result: { stdout: string | Buffer; stderr: string }) => void)(
-            null,
-            { stdout: entry?.stdout ?? '', stderr: '' },
-          );
-        }
-      }
-      return {} as ChildProcess;
-    },
-  );
+function mockCommandReject(): void {
+  commandRunMock.mockRejectedValue(new Error('command failed'));
+}
+
+function mockCommandSequence(results: Array<{ stdout: string | Buffer } | { error: true }>): void {
+  for (const entry of results) {
+    if ('error' in entry) commandRunMock.mockRejectedValueOnce(new Error('failed'));
+    else commandRunMock.mockResolvedValueOnce(commandResult(entry.stdout));
+  }
 }
 
 describe('clipboard-service', () => {
@@ -72,6 +70,8 @@ describe('clipboard-service', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    accessSyncMock.mockImplementation(() => undefined);
+    statSyncMock.mockReturnValue({ isFile: () => true });
     mkdtempMock.mockResolvedValue('/tmp/orch-clip-test');
     readFileMock.mockResolvedValue(Buffer.from('fake-png'));
     unlinkMock.mockResolvedValue(undefined);
@@ -91,14 +91,14 @@ describe('clipboard-service', () => {
 
     it('returns true on linux when xclip is installed', async () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
-      execFileSyncMock.mockReturnValue(Buffer.from('/usr/bin/xclip'));
       const { isClipboardToolAvailable } = await import('../../../src/infrastructure/clipboard-service.js');
       expect(isClipboardToolAvailable()).toBe(true);
+      expect(commandRunMock).not.toHaveBeenCalled();
     });
 
     it('returns false on linux when xclip is missing', async () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
-      execFileSyncMock.mockImplementation(() => { throw new Error('not found'); });
+      accessSyncMock.mockImplementation(() => { throw new Error('not found'); });
       const { isClipboardToolAvailable } = await import('../../../src/infrastructure/clipboard-service.js');
       expect(isClipboardToolAvailable()).toBe(false);
     });
@@ -123,37 +123,37 @@ describe('clipboard-service', () => {
       });
 
       it('detects PNG image', async () => {
-        mockExecFileResolve('«class PNGf», 12345\n«class ut16», 0');
+        mockCommandResolve('«class PNGf», 12345\n«class ut16», 0');
         const { detectClipboardType } = await import('../../../src/infrastructure/clipboard-service.js');
         expect(await detectClipboardType()).toBe('image');
       });
 
       it('detects TIFF image', async () => {
-        mockExecFileResolve('«class TIFF», 12345');
+        mockCommandResolve('«class TIFF», 12345');
         const { detectClipboardType } = await import('../../../src/infrastructure/clipboard-service.js');
         expect(await detectClipboardType()).toBe('image');
       });
 
       it('detects text (ut16)', async () => {
-        mockExecFileResolve('«class ut16», 42');
+        mockCommandResolve('«class ut16», 42');
         const { detectClipboardType } = await import('../../../src/infrastructure/clipboard-service.js');
         expect(await detectClipboardType()).toBe('text');
       });
 
       it('detects text (utf8)', async () => {
-        mockExecFileResolve('«class utf8», 42');
+        mockCommandResolve('«class utf8», 42');
         const { detectClipboardType } = await import('../../../src/infrastructure/clipboard-service.js');
         expect(await detectClipboardType()).toBe('text');
       });
 
       it('returns empty on error', async () => {
-        mockExecFileReject();
+        mockCommandReject();
         const { detectClipboardType } = await import('../../../src/infrastructure/clipboard-service.js');
         expect(await detectClipboardType()).toBe('empty');
       });
 
       it('returns empty for empty clipboard', async () => {
-        mockExecFileResolve('');
+        mockCommandResolve('');
         const { detectClipboardType } = await import('../../../src/infrastructure/clipboard-service.js');
         expect(await detectClipboardType()).toBe('empty');
       });
@@ -165,19 +165,19 @@ describe('clipboard-service', () => {
       });
 
       it('detects image/png', async () => {
-        mockExecFileResolve('TARGETS\nimage/png\ntext/plain');
+        mockCommandResolve('TARGETS\nimage/png\ntext/plain');
         const { detectClipboardType } = await import('../../../src/infrastructure/clipboard-service.js');
         expect(await detectClipboardType()).toBe('image');
       });
 
       it('detects text/plain', async () => {
-        mockExecFileResolve('TARGETS\ntext/plain\nUTF8_STRING');
+        mockCommandResolve('TARGETS\ntext/plain\nUTF8_STRING');
         const { detectClipboardType } = await import('../../../src/infrastructure/clipboard-service.js');
         expect(await detectClipboardType()).toBe('text');
       });
 
       it('returns empty on error', async () => {
-        mockExecFileReject();
+        mockCommandReject();
         const { detectClipboardType } = await import('../../../src/infrastructure/clipboard-service.js');
         expect(await detectClipboardType()).toBe('empty');
       });
@@ -189,19 +189,19 @@ describe('clipboard-service', () => {
       });
 
       it('detects image', async () => {
-        mockExecFileResolve('image');
+        mockCommandResolve('image');
         const { detectClipboardType } = await import('../../../src/infrastructure/clipboard-service.js');
         expect(await detectClipboardType()).toBe('image');
       });
 
       it('detects text', async () => {
-        mockExecFileSequence([{ stdout: 'none' }, { stdout: 'text' }]);
+        mockCommandSequence([{ stdout: 'none' }, { stdout: 'text' }]);
         const { detectClipboardType } = await import('../../../src/infrastructure/clipboard-service.js');
         expect(await detectClipboardType()).toBe('text');
       });
 
       it('returns empty on error', async () => {
-        mockExecFileReject();
+        mockCommandReject();
         const { detectClipboardType } = await import('../../../src/infrastructure/clipboard-service.js');
         expect(await detectClipboardType()).toBe('empty');
       });
@@ -217,14 +217,14 @@ describe('clipboard-service', () => {
   describe('getClipboardImage', () => {
     it('returns null when clipboard has text', async () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' });
-      mockExecFileResolve('«class ut16», 42');
+      mockCommandResolve('«class ut16», 42');
       const { getClipboardImage } = await import('../../../src/infrastructure/clipboard-service.js');
       expect(await getClipboardImage()).toBeNull();
     });
 
     it('returns null when clipboard is empty', async () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' });
-      mockExecFileResolve('');
+      mockCommandResolve('');
       const { getClipboardImage } = await import('../../../src/infrastructure/clipboard-service.js');
       expect(await getClipboardImage()).toBeNull();
     });
@@ -233,7 +233,7 @@ describe('clipboard-service', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' });
       const pngData = Buffer.from('fake-png-data');
 
-      mockExecFileSequence([
+      mockCommandSequence([
         { stdout: '«class PNGf», 12345' },  // detect
         { stdout: 'ok' },                    // osascript write PNG
       ]);
@@ -251,7 +251,7 @@ describe('clipboard-service', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
       const pngData = Buffer.from('fake-png-data');
 
-      mockExecFileSequence([
+      mockCommandSequence([
         { stdout: 'TARGETS\nimage/png' },  // detect
         { stdout: pngData },               // xclip -o image data
       ]);
@@ -261,12 +261,20 @@ describe('clipboard-service', () => {
 
       expect(result).not.toBeNull();
       expect(result!.ext).toBe('png');
+      expect(result!.data).toEqual(pngData);
+      expect(commandRunMock).toHaveBeenLastCalledWith(expect.objectContaining({
+        executable: expect.objectContaining({ path: '/resolved/xclip', realpath: '/resolved/xclip' }),
+        args: ['-selection', 'clipboard', '-t', 'image/png', '-o'],
+        timeoutMs: 3_000,
+        maxStdoutBytes: 50 * 1024 * 1024,
+        maxStderrBytes: 64 * 1024,
+      }));
     });
 
     it('returns null on macOS when osascript returns error string', async () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' });
 
-      mockExecFileSequence([
+      mockCommandSequence([
         { stdout: '«class PNGf», 12345' },  // detect
         { stdout: 'error' },                 // osascript failed
       ]);
@@ -279,7 +287,7 @@ describe('clipboard-service', () => {
     it('returns null on linux when xclip returns empty buffer', async () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
 
-      mockExecFileSequence([
+      mockCommandSequence([
         { stdout: 'TARGETS\nimage/png' },
         { stdout: Buffer.alloc(0) },
       ]);
@@ -292,7 +300,7 @@ describe('clipboard-service', () => {
     it('cleans up temp files on macOS even on error', async () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' });
 
-      mockExecFileSequence([
+      mockCommandSequence([
         { stdout: '«class PNGf», 12345' },  // detect
         { error: true },                      // osascript throws
       ]);
@@ -301,6 +309,23 @@ describe('clipboard-service', () => {
       const result = await getClipboardImage();
       expect(result).toBeNull();
       expect(rmMock).toHaveBeenCalledWith('/tmp/orch-clip-test', { recursive: true });
+    });
+
+    it('uses a bounded pinned descriptor without a shell', async () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      mockCommandResolve('«class ut16», 42');
+
+      const { detectClipboardType } = await import('../../../src/infrastructure/clipboard-service.js');
+      await detectClipboardType();
+
+      expect(commandRunMock).toHaveBeenCalledWith(expect.objectContaining({
+        executable: expect.objectContaining({ path: '/resolved/osascript', realpath: '/resolved/osascript' }),
+        args: ['-e', 'clipboard info'],
+        timeoutMs: 3_000,
+        maxStdoutBytes: 64 * 1024,
+        maxStderrBytes: 64 * 1024,
+      }));
+      expect(commandRunMock.mock.calls[0]![0]).not.toHaveProperty('shell');
     });
   });
 });

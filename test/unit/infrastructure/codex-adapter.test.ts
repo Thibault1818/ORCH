@@ -5,6 +5,7 @@ import type { AgentEvent, ExecuteParams } from '../../../src/infrastructure/adap
 import { AdapterErrorKind } from '../../../src/domain/errors.js';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
+import { adapterExecution, attachAdapterCommandRunner } from './adapter-command-runner.js';
 
 // Top-level mock so vi.mock hoisting applies to the whole module.
 // execFile is intercepted; by default it succeeds with a version string.
@@ -42,12 +43,12 @@ function createMockProcess() {
 }
 
 function createMockProcessManager(proc: ReturnType<typeof createMockProcess>): IProcessManager {
-  return {
+  return attachAdapterCommandRunner({
     isAlive: vi.fn(() => true),
     kill: vi.fn(),
     killWithGrace: vi.fn(async () => {}),
     spawn: vi.fn(() => ({ process: proc as any, pid: proc.pid })),
-  };
+  }, proc as any, 'codex/1.0.0');
 }
 
 function makeParams(overrides?: Partial<ExecuteParams>): ExecuteParams {
@@ -55,6 +56,7 @@ function makeParams(overrides?: Partial<ExecuteParams>): ExecuteParams {
     prompt: 'codex prompt',
     workspace: '/tmp/codex-ws',
     config: { adapter: 'codex' },
+    execution: adapterExecution,
     ...overrides,
   };
 }
@@ -401,23 +403,10 @@ describe('CodexAdapter', () => {
   });
 
   describe('test', () => {
-    it('returns errorKind SPAWN_FAILED when execFile throws an ENOENT error', async () => {
-      const { execFile } = await import('node:child_process');
-      vi.mocked(execFile).mockImplementationOnce(
-        (
-          _cmd: unknown,
-          _args: unknown,
-          cb: (err: Error | null, stdout: string, stderr: string) => void,
-        ) => {
-          const err = new Error('spawn codex ENOENT');
-          (err as NodeJS.ErrnoException).code = 'ENOENT';
-          cb(err, '', '');
-          return {} as ReturnType<typeof execFile>;
-        },
-      );
-
+    it('returns errorKind SPAWN_FAILED when the runner cannot resolve the CLI', async () => {
       const proc = createMockProcess();
       const pm = createMockProcessManager(proc);
+      vi.mocked((pm as any).resolveExecutable).mockRejectedValueOnce(new Error('spawn codex ENOENT'));
       const adapter = new CodexAdapter(pm);
 
       const result = await adapter.test();

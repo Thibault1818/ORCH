@@ -6,10 +6,20 @@
  * that do not expose a non-interactive model catalog.
  */
 
-import { spawn } from 'node:child_process';
 import { isAdapterKind, type AdapterKind } from '../../domain/model-tiers.js';
+import {
+  CommandRunner,
+  commandFailureMessage,
+  resolveExecutable,
+  type ExecutableDescriptor,
+} from '../process/command-runner.js';
+import { ProcessManager } from '../process/process-manager.js';
 
 const DISCOVERY_TIMEOUT_MS = 15_000;
+const DISCOVERY_MAX_STDOUT_BYTES = 1024 * 1024;
+const DISCOVERY_MAX_STDERR_BYTES = 256 * 1024;
+const commandRunner = new CommandRunner(new ProcessManager());
+const executableDescriptors = new Map<string, Promise<ExecutableDescriptor>>();
 
 export interface ModelOption {
   value: string;
@@ -110,39 +120,28 @@ export async function loadModelCatalog(adapters: readonly AdapterKind[]): Promis
 }
 
 async function run(command: string, args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    let timer: ReturnType<typeof setTimeout>;
-
-    const finish = (err?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (err) reject(err);
-      else resolve(stdout);
-    };
-
-    timer = setTimeout(() => {
-      child.kill('SIGTERM');
-      finish(new Error(`${command} ${args.join(' ')} timed out`));
-    }, DISCOVERY_TIMEOUT_MS);
-
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', finish);
-    child.on('close', (code, signal) => {
-      if (code === 0) {
-        finish();
-      } else {
-        finish(new Error(`${command} ${args.join(' ')} failed: ${signal ?? code}${stderr ? ` ${stderr}` : ''}`));
-      }
-    });
+  const result = await commandRunner.run({
+    executable: await pinnedExecutable(command),
+    args,
+    env: process.env,
+    timeoutMs: DISCOVERY_TIMEOUT_MS,
+    maxStdoutBytes: DISCOVERY_MAX_STDOUT_BYTES,
+    maxStderrBytes: DISCOVERY_MAX_STDERR_BYTES,
   });
+  if (!result.ok) throw new Error(commandFailureMessage(result));
+  return result.stdout;
+}
+
+function pinnedExecutable(command: string): Promise<ExecutableDescriptor> {
+  let descriptor = executableDescriptors.get(command);
+  if (!descriptor) {
+    descriptor = resolveExecutable(command);
+    executableDescriptors.set(command, descriptor);
+    void descriptor.catch(() => {
+      if (executableDescriptors.get(command) === descriptor) executableDescriptors.delete(command);
+    });
+  }
+  return descriptor;
 }
 
 export function parseGrokModels(output: string): ModelOption[] {

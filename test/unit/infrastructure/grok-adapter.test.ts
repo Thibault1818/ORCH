@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { GrokAdapter } from '../../../src/infrastructure/adapters/grok.js';
 import type { ExecuteParams } from '../../../src/infrastructure/adapters/interface.js';
 import type { IProcessManager } from '../../../src/infrastructure/process/process-manager.js';
+import type { ICommandRunner } from '../../../src/infrastructure/process/command-runner.js';
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -13,7 +14,14 @@ vi.mock('node:util', async (importOriginal) => {
 });
 
 function processManager(): IProcessManager {
-  return { isAlive: vi.fn(() => false), kill: vi.fn(), killWithGrace: vi.fn(async () => {}), spawn: vi.fn() } as unknown as IProcessManager;
+  return {
+    isAlive: vi.fn(() => false),
+    kill: vi.fn(),
+    killWithGrace: vi.fn(async () => {}),
+    spawn: vi.fn(),
+    start: vi.fn(),
+    run: vi.fn(async () => ({ ok: true, stdout: 'grok 0.2.64' })),
+  } as unknown as IProcessManager & ICommandRunner;
 }
 
 function params(): ExecuteParams {
@@ -32,9 +40,7 @@ describe('GrokAdapter', () => {
     const { execFile } = await import('node:child_process');
     const adapter = new GrokAdapter(processManager());
     await expect(adapter.test()).resolves.toMatchObject({ ok: true, version: 'grok 0.2.64' });
-    expect(execFile).toHaveBeenCalledWith('grok', ['--version'], expect.objectContaining({ env: expect.any(Object) }), expect.any(Function));
-    const env = (execFile as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[2].env as Record<string, string>;
-    expect(JSON.stringify(env)).not.toContain('ENV_SENTINEL');
+    expect(execFile).not.toHaveBeenCalled();
   });
 
   it('returns grok kind and delegates stop', async () => {

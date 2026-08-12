@@ -1,23 +1,25 @@
-import { Paths } from './chunk-IFOHGLEJ.js';
-import { canTransition, isTerminal } from './chunk-MQCWGD2M.js';
-export { Orchestrator, canTransition, isBlocked, isDispatchable, isTerminal, resolveFailureStatus } from './chunk-MQCWGD2M.js';
+import { HardenedGit } from './chunk-47ZZP7VU.js';
+import { Paths } from './chunk-ANGKUOFG.js';
+import { ProcessManager } from './chunk-W5CCIQAE.js';
+import { canTransition, isTerminal } from './chunk-F3DKF5JN.js';
+export { Orchestrator, canTransition, isBlocked, isDispatchable, isTerminal, resolveFailureStatus } from './chunk-F3DKF5JN.js';
 export { createTokenUsage } from './chunk-UG72A2JI.js';
 import { InvalidArgumentsError, TaskNotFoundError, InvalidTransitionError, AgentNotFoundError, OrchestryError, TeamNotFoundError, GoalNotFoundError, GoalHasPendingTasksError } from './chunk-Z7JNYNWE.js';
 export { AdapterErrorKind, AgentNotFoundError, ERROR_HINTS, GoalHasPendingTasksError, NotInitializedError, OrchestryError, TaskNotFoundError, WorkspaceError, classifyAdapterError } from './chunk-Z7JNYNWE.js';
-import { GOAL_LEAD_LABEL, GOAL_REVIEW_LABEL, AUTONOMOUS_LABEL } from './chunk-YNPZFT75.js';
-export { DEFAULT_WORKFLOW_CONFIG, LegacyWorkflowRoleResolver, WORKFLOW_SCHEMA_VERSION, WorkflowEngine, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult } from './chunk-OFPJ6QUT.js';
+import { GOAL_LEAD_LABEL, GOAL_REVIEW_LABEL, AUTONOMOUS_LABEL } from './chunk-LMCD6ZPU.js';
+import { CommandRunner, resolveExecutable, commandFailureMessage } from './chunk-OBMT332P.js';
+export { DEFAULT_WORKFLOW_CONFIG, LegacyWorkflowRoleResolver, WORKFLOW_SCHEMA_VERSION, WorkflowEngine, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateHumanApproval, validateOpusResult } from './chunk-VMAB2NQK.js';
 export { discoverDeterministicChecks, validateDeterministicCheckCommands, validateExplicitChecks } from './chunk-D6YHC656.js';
-export { ARTIFACT_FILES, ROLE_PERMISSIONS, SEMANTIC_ROLES, WORKFLOW_PHASE_TRANSITIONS, WorkflowArtifactStore, canTransitionWorkflow, createRosterSnapshot, hashCanonical, hashRosterAgent, hashRosterSnapshot, isTerminalWorkflowPhase, legacyRosterSnapshot, transitionWorkflow, validateRosterAgent, validateRosterSnapshot } from './chunk-3R3KVGGX.js';
+export { ARTIFACT_FILES, ROLE_PERMISSIONS, SEMANTIC_ROLES, WORKFLOW_PHASE_TRANSITIONS, WorkflowArtifactStore, canTransitionWorkflow, createRosterSnapshot, hashCanonical, hashRosterAgent, hashRosterSnapshot, isTerminalWorkflowPhase, legacyRosterSnapshot, transitionWorkflow, validateRosterAgent, validateRosterSnapshot } from './chunk-77BIYQ4K.js';
 export { AdapterRegistry } from './chunk-6DWHQPTE.js';
 export { SkillLoader } from './chunk-Y5P4NXTL.js';
-import { ensureDir, readYaml, writeYaml, readJson, writeJson, listFiles, appendJsonl, readJsonl, readJsonlTail, closeAppendHandle, pathExists } from './chunk-54K3JU53.js';
-import { sanitizeText } from './chunk-RQZGDMFG.js';
-import fs, { mkdtemp, readFile, unlink, rm, mkdir } from 'fs/promises';
-import { constants, createWriteStream, createReadStream } from 'fs';
-import path, { join } from 'path';
+import { ensureDir, atomicWrite, readJson, readYaml, writeYaml, writeJson, listFiles, appendJsonl, readJsonl, readJsonlTail, closeAppendHandle, pathExists } from './chunk-54K3JU53.js';
+import { sanitizeText, sanitizeForPersistence } from './chunk-RQZGDMFG.js';
+import fs2, { mkdtemp, readFile, unlink, rm, mkdir } from 'fs/promises';
+import { constants, createWriteStream, createReadStream, accessSync, statSync } from 'fs';
+import path2, { join, isAbsolute, delimiter, resolve } from 'path';
 import { nanoid } from 'nanoid';
-import { execFile as execFile$1, execFileSync } from 'child_process';
-import { promisify } from 'util';
+import { createHmac, createHash, timingSafeEqual } from 'crypto';
 import { homedir, tmpdir } from 'os';
 
 // src/domain/model-tiers.ts
@@ -772,23 +774,23 @@ var TaskService = class {
   async list(filter) {
     return this.taskStore.list(filter);
   }
-  async get(id) {
-    const task = await this.taskStore.get(id);
-    if (!task) throw new TaskNotFoundError(id);
+  async get(id2) {
+    const task = await this.taskStore.get(id2);
+    if (!task) throw new TaskNotFoundError(id2);
     return task;
   }
-  async updateStatus(id, newStatus) {
-    const task = await this.get(id);
+  async updateStatus(id2, newStatus) {
+    const task = await this.get(id2);
     const oldStatus = task.status;
     if (!canTransition(oldStatus, newStatus)) {
-      throw new InvalidTransitionError(id, oldStatus, newStatus);
+      throw new InvalidTransitionError(id2, oldStatus, newStatus);
     }
     task.status = newStatus;
     task.updated_at = (/* @__PURE__ */ new Date()).toISOString();
     await this.taskStore.save(task);
     this.eventBus.emit({
       type: "task:status_changed",
-      taskId: id,
+      taskId: id2,
       from: oldStatus,
       to: newStatus
     });
@@ -806,17 +808,17 @@ var TaskService = class {
     });
     return task;
   }
-  async cancel(id) {
-    const task = await this.get(id);
+  async cancel(id2) {
+    const task = await this.get(id2);
     if (isTerminal(task.status)) {
-      throw new InvalidTransitionError(id, task.status, "cancelled");
+      throw new InvalidTransitionError(id2, task.status, "cancelled");
     }
-    return this.updateStatus(id, "cancelled");
+    return this.updateStatus(id2, "cancelled");
   }
-  async retry(id) {
-    const task = await this.get(id);
+  async retry(id2) {
+    const task = await this.get(id2);
     if (task.status !== "failed" && task.status !== "cancelled") {
-      throw new InvalidTransitionError(id, task.status, "todo");
+      throw new InvalidTransitionError(id2, task.status, "todo");
     }
     const oldStatus = task.status;
     task.status = "todo";
@@ -826,16 +828,16 @@ var TaskService = class {
     await this.taskStore.save(task);
     this.eventBus.emit({
       type: "task:status_changed",
-      taskId: id,
+      taskId: id2,
       from: oldStatus,
       to: "todo"
     });
     return task;
   }
-  async reject(id, feedback) {
-    const task = await this.get(id);
+  async reject(id2, feedback) {
+    const task = await this.get(id2);
     if (task.status !== "review") {
-      throw new InvalidTransitionError(id, task.status, "todo");
+      throw new InvalidTransitionError(id2, task.status, "todo");
     }
     const oldStatus = task.status;
     task.status = "todo";
@@ -845,14 +847,14 @@ var TaskService = class {
     await this.taskStore.save(task);
     this.eventBus.emit({
       type: "task:status_changed",
-      taskId: id,
+      taskId: id2,
       from: oldStatus,
       to: "todo"
     });
     return task;
   }
-  async update(id, fields) {
-    const task = await this.get(id);
+  async update(id2, fields) {
+    const task = await this.get(id2);
     if (fields.title !== void 0) {
       if (!fields.title.trim()) throw new InvalidArgumentsError("Task title cannot be empty");
       task.title = fields.title.trim();
@@ -866,22 +868,22 @@ var TaskService = class {
     }
     if (fields.labels !== void 0) task.labels = fields.labels;
     if (fields.attachments?.length && this.paths) {
-      const attachmentNames = await this.copyAttachments(id, fields.attachments);
+      const attachmentNames = await this.copyAttachments(id2, fields.attachments);
       task.attachments = [...task.attachments ?? [], ...attachmentNames];
     }
     task.updated_at = (/* @__PURE__ */ new Date()).toISOString();
     await this.taskStore.save(task);
     return task;
   }
-  async delete(id) {
-    const task = await this.get(id);
+  async delete(id2) {
+    const task = await this.get(id2);
     if (task.status === "in_progress") {
       throw new InvalidArgumentsError("Cannot delete a running task. Cancel it first.");
     }
-    await this.taskStore.delete(id);
+    await this.taskStore.delete(id2);
     if (this.paths) {
-      const dir = this.paths.taskAttachmentsDir(id);
-      await fs.rm(dir, { recursive: true, force: true });
+      const dir = this.paths.taskAttachmentsDir(id2);
+      await fs2.rm(dir, { recursive: true, force: true });
     }
   }
   getAttachmentPath(taskId, filename) {
@@ -890,8 +892,8 @@ var TaskService = class {
     }
     validateAttachmentName(filename);
     const dir = this.paths.taskAttachmentsDir(taskId);
-    const resolved = path.resolve(dir, filename);
-    if (!isWithin(resolved, path.resolve(dir))) {
+    const resolved = path2.resolve(dir, filename);
+    if (!isWithin(resolved, path2.resolve(dir))) {
       throw new InvalidArgumentsError(`Invalid attachment filename: ${filename}`);
     }
     return resolved;
@@ -901,15 +903,15 @@ var TaskService = class {
     const dir = this.paths.taskAttachmentsDir(taskId);
     await ensureDir(dir);
     const paths = this.paths;
-    const projectRoot = path.resolve(paths.root, "..");
-    const realProjectRoot = await fs.realpath(projectRoot);
-    const realStateRoot = await fs.realpath(paths.root).catch(() => paths.root);
-    const realDestDir = path.resolve(dir);
-    const destDirStat = await fs.lstat(realDestDir);
+    const projectRoot = path2.resolve(paths.root, "..");
+    const realProjectRoot = await fs2.realpath(projectRoot);
+    const realStateRoot = await fs2.realpath(paths.root).catch(() => paths.root);
+    const realDestDir = path2.resolve(dir);
+    const destDirStat = await fs2.lstat(realDestDir);
     if (!destDirStat.isDirectory() || destDirStat.isSymbolicLink()) {
       throw new InvalidArgumentsError(`Attachment destination is not a safe directory: ${realDestDir}`);
     }
-    const actualDestDir = await fs.realpath(realDestDir);
+    const actualDestDir = await fs2.realpath(realDestDir);
     if (!isWithin(actualDestDir, realStateRoot)) {
       throw new InvalidArgumentsError(`Attachment destination escaped state directory: ${realDestDir}`);
     }
@@ -917,18 +919,18 @@ var TaskService = class {
       sourcePaths.map(async (srcPath) => {
         let handle;
         try {
-          const stat = await fs.lstat(srcPath);
+          const stat = await fs2.lstat(srcPath);
           if (!stat.isFile()) throw new Error("not a regular file");
-          const realSource = await fs.realpath(srcPath);
+          const realSource = await fs2.realpath(srcPath);
           if (!isWithin(realSource, realProjectRoot) || isWithin(realSource, realStateRoot)) {
             throw new Error("outside project or inside .orchestry");
           }
-          handle = await fs.open(srcPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+          handle = await fs2.open(srcPath, constants.O_RDONLY | constants.O_NOFOLLOW);
           const openedStat = await handle.stat();
           if (!openedStat.isFile() || openedStat.dev !== stat.dev || openedStat.ino !== stat.ino) {
             throw new Error("source changed during validation");
           }
-          const basename = path.basename(srcPath);
+          const basename = path2.basename(srcPath);
           validateAttachmentName(basename);
           return { handle, basename };
         } catch {
@@ -941,16 +943,16 @@ var TaskService = class {
     try {
       const names = await Promise.all(
         validated.map(async ({ handle, basename }) => {
-          const dest = path.resolve(realDestDir, basename);
+          const dest = path2.resolve(realDestDir, basename);
           if (!isWithin(dest, realDestDir)) {
             throw new InvalidArgumentsError(`Attachment destination escaped task directory: ${basename}`);
           }
-          const currentDestDir = await fs.realpath(realDestDir);
+          const currentDestDir = await fs2.realpath(realDestDir);
           if (currentDestDir !== actualDestDir) {
             throw new InvalidArgumentsError(`Attachment destination changed during copy: ${basename}`);
           }
           await copyFromHandle(handle, dest);
-          await fs.chmod(dest, 384).catch(() => {
+          await fs2.chmod(dest, 384).catch(() => {
           });
           return basename;
         })
@@ -961,8 +963,8 @@ var TaskService = class {
       })));
     }
   }
-  async incrementAttempts(id) {
-    const task = await this.get(id);
+  async incrementAttempts(id2) {
+    const task = await this.get(id2);
     task.attempts += 1;
     task.updated_at = (/* @__PURE__ */ new Date()).toISOString();
     await this.taskStore.save(task);
@@ -997,13 +999,13 @@ function validateAttachmentName(name) {
   }
 }
 function isWithin(child, parent) {
-  const rel = path.relative(parent, child);
-  return rel === "" || !rel.startsWith("..") && !path.isAbsolute(rel);
+  const rel = path2.relative(parent, child);
+  return rel === "" || !rel.startsWith("..") && !path2.isAbsolute(rel);
 }
 async function copyFromHandle(handle, dest) {
   const writer = createWriteStream(dest, { flags: "wx", mode: 384 });
   const reader = createReadStream("", { fd: handle.fd, autoClose: false, start: 0 });
-  await new Promise((resolve, reject) => {
+  await new Promise((resolve2, reject) => {
     const fail = (err) => {
       reader.destroy();
       writer.destroy();
@@ -1011,7 +1013,7 @@ async function copyFromHandle(handle, dest) {
     };
     reader.on("error", fail);
     writer.on("error", fail);
-    writer.on("finish", resolve);
+    writer.on("finish", resolve2);
     reader.pipe(writer);
   });
 }
@@ -1066,30 +1068,30 @@ var AgentService = class {
   async list() {
     return this.agentStore.list();
   }
-  async get(id) {
-    const agent = await this.agentStore.get(id);
-    if (!agent) throw new AgentNotFoundError(id);
+  async get(id2) {
+    const agent = await this.agentStore.get(id2);
+    if (!agent) throw new AgentNotFoundError(id2);
     return agent;
   }
-  async remove(id) {
-    const agent = await this.get(id);
+  async remove(id2) {
+    const agent = await this.get(id2);
     if (agent.status === "running") {
       const state = await this.stateStore.read();
-      const isActuallyRunning = Object.values(state.running).some((e) => e.agent_id === id);
+      const isActuallyRunning = Object.values(state.running).some((e) => e.agent_id === id2);
       if (isActuallyRunning) {
         throw new InvalidArgumentsError("Cannot remove a running agent. Stop it first.");
       }
       agent.status = "idle";
       await this.agentStore.save(agent);
     }
-    await this.agentStore.delete(id);
+    await this.agentStore.delete(id2);
   }
-  async update(id, fields) {
-    const agent = await this.get(id);
+  async update(id2, fields) {
+    const agent = await this.get(id2);
     if (fields.name !== void 0) {
       if (!fields.name.trim()) throw new InvalidArgumentsError("Agent name cannot be empty");
       const existing = await this.agentStore.getByName(fields.name.trim());
-      if (existing && existing.id !== id) {
+      if (existing && existing.id !== id2) {
         throw new InvalidArgumentsError(`Agent "${fields.name}" already exists`);
       }
       agent.name = fields.name.trim();
@@ -1106,27 +1108,27 @@ var AgentService = class {
     await this.agentStore.save(agent);
     return agent;
   }
-  async disable(id) {
-    return this.setStatus(id, "disabled");
+  async disable(id2) {
+    return this.setStatus(id2, "disabled");
   }
-  async enable(id) {
-    return this.setStatus(id, "idle");
+  async enable(id2) {
+    return this.setStatus(id2, "idle");
   }
-  async setAutonomous(id, enabled) {
-    const agent = await this.get(id);
+  async setAutonomous(id2, enabled) {
+    const agent = await this.get(id2);
     agent.autonomous = enabled;
     await this.agentStore.save(agent);
-    this.eventBus.emit({ type: "agent:autonomous_toggled", agentId: id, autonomous: enabled });
+    this.eventBus.emit({ type: "agent:autonomous_toggled", agentId: id2, autonomous: enabled });
     return agent;
   }
-  async setStatus(id, status) {
-    const agent = await this.get(id);
+  async setStatus(id2, status) {
+    const agent = await this.get(id2);
     agent.status = status;
     await this.agentStore.save(agent);
     return agent;
   }
-  async updateStats(id, update) {
-    const agent = await this.get(id);
+  async updateStats(id2, update) {
+    const agent = await this.get(id2);
     Object.assign(agent.stats, update);
     await this.agentStore.save(agent);
     return agent;
@@ -1190,7 +1192,7 @@ var RunService = class {
   runStore;
   eventBus;
   async create(params) {
-    const run = {
+    const run2 = {
       id: `run_${nanoid(7)}`,
       task_id: params.taskId,
       agent_id: params.agentId,
@@ -1200,42 +1202,42 @@ var RunService = class {
       workspace_path: params.workspacePath,
       prompt: params.persistPrompt ? params.prompt : "[redacted]"
     };
-    await this.runStore.save(run);
-    return run;
+    await this.runStore.save(run2);
+    return run2;
   }
-  async get(id) {
-    return this.runStore.get(id);
+  async get(id2) {
+    return this.runStore.get(id2);
   }
-  async start(id, pid) {
-    const run = await this.runStore.get(id);
-    if (!run) throw new Error(`Run not found: ${id}`);
-    run.status = "running";
-    run.pid = pid;
-    await this.runStore.save(run);
+  async start(id2, pid) {
+    const run2 = await this.runStore.get(id2);
+    if (!run2) throw new Error(`Run not found: ${id2}`);
+    run2.status = "running";
+    run2.pid = pid;
+    await this.runStore.save(run2);
     this.eventBus.emit({
       type: "agent:started",
-      agentId: run.agent_id,
-      taskId: run.task_id,
-      runId: id
+      agentId: run2.agent_id,
+      taskId: run2.task_id,
+      runId: id2
     });
-    return run;
+    return run2;
   }
-  async finish(id, status, tokens, error, failure) {
-    const run = await this.runStore.get(id);
-    if (!run) throw new Error(`Run not found: ${id}`);
-    run.status = status;
-    run.finished_at = (/* @__PURE__ */ new Date()).toISOString();
-    run.tokens = tokens;
-    run.error = error === void 0 ? void 0 : sanitizeText(error);
-    run.failure = failure;
-    await this.runStore.save(run);
+  async finish(id2, status, tokens, error, failure) {
+    const run2 = await this.runStore.get(id2);
+    if (!run2) throw new Error(`Run not found: ${id2}`);
+    run2.status = status;
+    run2.finished_at = (/* @__PURE__ */ new Date()).toISOString();
+    run2.tokens = tokens;
+    run2.error = error === void 0 ? void 0 : sanitizeText(error);
+    run2.failure = failure;
+    await this.runStore.save(run2);
     this.eventBus.emit({
       type: "agent:completed",
-      runId: id,
-      agentId: run.agent_id,
+      runId: id2,
+      agentId: run2.agent_id,
       success: status === "succeeded"
     });
-    return run;
+    return run2;
   }
   async appendEvent(runId, event) {
     await this.runStore.appendEvent(runId, event);
@@ -1273,20 +1275,685 @@ var RunService = class {
     return { error, output };
   }
 };
-var execFile = promisify(execFile$1);
+
+// src/domain/governance/contracts-v3.ts
+var GOVERNANCE_SCHEMA_VERSION = 3;
+var GOVERNANCE_KINDS = ["binding_snapshot", "decomposition_plan", "check_binding", "candidate_evidence", "review_vote", "quorum_policy", "quorum_result", "integration_receipt", "human_approval"];
+var ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+var HASH = /^[a-f0-9]{64}$/;
+var COMMIT = /^[a-f0-9]{40,64}$/;
+var MAX_ITEMS = 256;
+var MAX_TEXT = 128e3;
+function validateGovernanceRecordV3(value) {
+  const o = record(value, "governance record");
+  const kind = one(o.kind, GOVERNANCE_KINDS, "kind");
+  if (kind === "binding_snapshot") return validateBindingSnapshotV3(o);
+  if (kind === "decomposition_plan") return validateDecompositionPlanV3(o);
+  if (kind === "check_binding") return validateCheckBindingV3(o);
+  if (kind === "candidate_evidence") return validateCandidateEvidenceV3(o);
+  if (kind === "review_vote") return validateReviewVoteV3(o);
+  if (kind === "quorum_policy") return validateQuorumPolicyV3(o);
+  if (kind === "quorum_result") return validateQuorumResultV3(o);
+  if (kind === "integration_receipt") return validateIntegrationReceiptV3(o);
+  return validateHumanApprovalV3(o);
+}
+function validateBindingSnapshotV3(value) {
+  const o = exact(value, ["schema_version", "kind", "governance_id", "record_id", "bindings", "created_at"], "binding snapshot");
+  base(o, "binding_snapshot");
+  const bindings = unique(items(o.bindings, "bindings").map((v, i) => {
+    const b = exact(v, ["binding_id", "role", "principal_id", "adapter", "model"], `bindings[${i}]`);
+    return { binding_id: id(b.binding_id), role: one(b.role, ["planner", "candidate", "reviewer", "checker", "integrator"], "role"), principal_id: id(b.principal_id), adapter: id(b.adapter), model: short(b.model, "model", true) };
+  }), (b) => b.binding_id, "binding IDs");
+  if (!bindings.length) throw new Error("bindings must not be empty");
+  return { ...base(o, "binding_snapshot"), bindings, created_at: timestamp(o.created_at) };
+}
+function validateDecompositionPlanV3(value) {
+  const o = exact(value, ["schema_version", "kind", "governance_id", "record_id", "binding_snapshot", "objective", "base_commit", "target_branch", "units", "integration_check_ids", "created_by_binding_id", "created_at"], "decomposition plan");
+  const units = unique(items(o.units, "units").map((v, i) => {
+    const u = exact(v, ["unit_id", "objective", "depends_on", "owned_path_prefixes", "acceptance_criteria", "required_check_ids"], `units[${i}]`);
+    const paths = unique(strings(u.owned_path_prefixes, "owned_path_prefixes").map(safePath), String, "owned paths");
+    if (!paths.length) throw new Error("owned_path_prefixes must not be empty");
+    return { unit_id: id(u.unit_id), objective: short(u.objective, "objective"), depends_on: unique(strings(u.depends_on, "depends_on").map(id), String, "dependencies"), owned_path_prefixes: paths, acceptance_criteria: strings(u.acceptance_criteria, "acceptance_criteria"), required_check_ids: unique(strings(u.required_check_ids, "required_check_ids").map(id), String, "check IDs") };
+  }), (u) => u.unit_id, "unit IDs");
+  if (!units.length) throw new Error("units must not be empty");
+  validateDag(units);
+  return { ...base(o, "decomposition_plan"), binding_snapshot: ref(o.binding_snapshot, "binding_snapshot"), objective: short(o.objective, "objective"), base_commit: commit(o.base_commit), target_branch: branch(o.target_branch), units, integration_check_ids: unique(strings(o.integration_check_ids, "integration_check_ids").map(id), String, "integration check IDs"), created_by_binding_id: id(o.created_by_binding_id), created_at: timestamp(o.created_at) };
+}
+function validateCheckBindingV3(value) {
+  const o = exact(value, ["schema_version", "kind", "governance_id", "record_id", "binding_snapshot", "subject", "check_id", "command", "status", "output_hash", "executed_by_binding_id", "provenance", "started_at", "completed_at"], "check binding");
+  const s = exact(o.subject, ["kind", "id", "commit"], "check subject");
+  const p = exact(o.provenance, ["command_source", "execution_environment"], "check provenance");
+  const started = timestamp(o.started_at);
+  const completed = timestamp(o.completed_at);
+  if (completed < started) throw new Error("completed_at precedes started_at");
+  return { ...base(o, "check_binding"), binding_snapshot: ref(o.binding_snapshot, "binding_snapshot"), subject: { kind: one(s.kind, ["candidate", "integration"], "subject kind"), id: id(s.id), commit: commit(s.commit) }, check_id: id(o.check_id), command: short(o.command, "command"), status: one(o.status, ["passed", "failed"], "status"), output_hash: hash(o.output_hash), executed_by_binding_id: id(o.executed_by_binding_id), provenance: { command_source: one(p.command_source, ["trusted"], "command source"), execution_environment: one(p.execution_environment, ["sandboxed"], "execution environment") }, started_at: started, completed_at: completed };
+}
+function validateCandidateEvidenceV3(value) {
+  const o = exact(value, ["schema_version", "kind", "governance_id", "record_id", "plan", "binding_snapshot", "unit_id", "candidate_id", "produced_by_binding_id", "base_commit", "commit", "diff_hash", "changed_paths", "check_bindings", "summary", "created_at"], "candidate evidence");
+  const baseCommit = commit(o.base_commit), candidateCommit = commit(o.commit);
+  if (baseCommit === candidateCommit) throw new Error("candidate commit must differ from base");
+  return { ...base(o, "candidate_evidence"), plan: ref(o.plan, "decomposition_plan"), binding_snapshot: ref(o.binding_snapshot, "binding_snapshot"), unit_id: id(o.unit_id), candidate_id: id(o.candidate_id), produced_by_binding_id: id(o.produced_by_binding_id), base_commit: baseCommit, commit: candidateCommit, diff_hash: hash(o.diff_hash), changed_paths: unique(strings(o.changed_paths, "changed_paths").map(safePath), String, "changed paths"), check_bindings: refs(o.check_bindings, "check_binding"), summary: short(o.summary, "summary"), created_at: timestamp(o.created_at) };
+}
+function validateReviewVoteV3(value) {
+  const o = exact(value, ["schema_version", "kind", "governance_id", "record_id", "binding_snapshot", "subject", "reviewer_binding_id", "decision", "reason", "cast_at"], "review vote");
+  return { ...base(o, "review_vote"), binding_snapshot: ref(o.binding_snapshot, "binding_snapshot"), subject: subjectRef(o.subject), reviewer_binding_id: id(o.reviewer_binding_id), decision: one(o.decision, ["approve", "reject"], "decision"), reason: short(o.reason, "reason"), cast_at: timestamp(o.cast_at) };
+}
+function validateQuorumPolicyV3(value) {
+  const o = exact(value, ["schema_version", "kind", "governance_id", "record_id", "binding_snapshot", "applies_to", "eligible_reviewer_binding_ids", "minimum_approvals", "maximum_rejections", "require_distinct_principals", "human_approval_required", "created_by_binding_id", "created_at"], "quorum policy");
+  const eligible = unique(strings(o.eligible_reviewer_binding_ids, "eligible reviewers").map(id), String, "eligible reviewers");
+  const minimum = integer(o.minimum_approvals, "minimum_approvals");
+  if (!eligible.length || minimum < 1 || minimum > eligible.length) throw new Error("invalid quorum minimum");
+  return { ...base(o, "quorum_policy"), binding_snapshot: ref(o.binding_snapshot, "binding_snapshot"), applies_to: one(o.applies_to, ["candidate_evidence", "integration_receipt"], "applies_to"), eligible_reviewer_binding_ids: eligible, minimum_approvals: minimum, maximum_rejections: integer(o.maximum_rejections, "maximum_rejections"), require_distinct_principals: bool(o.require_distinct_principals), human_approval_required: bool(o.human_approval_required), created_by_binding_id: id(o.created_by_binding_id), created_at: timestamp(o.created_at) };
+}
+function validateHumanApprovalV3(value) {
+  const o = exact(value, ["schema_version", "kind", "governance_id", "record_id", "subject", "approved_by", "reason", "approved_at"], "human approval");
+  return { ...base(o, "human_approval"), subject: subjectRef(o.subject), approved_by: short(o.approved_by, "approved_by"), reason: short(o.reason, "reason"), approved_at: timestamp(o.approved_at) };
+}
+function validateQuorumResultV3(value) {
+  const o = exact(value, ["schema_version", "kind", "governance_id", "record_id", "policy", "subject", "votes", "human_approval", "approvals", "rejections", "satisfied", "evaluated_at"], "quorum result");
+  const votes = refs(o.votes, "review_vote"), approvals = integer(o.approvals, "approvals"), rejections = integer(o.rejections, "rejections");
+  if (approvals + rejections !== votes.length) throw new Error("quorum counts do not match votes");
+  return { ...base(o, "quorum_result"), policy: ref(o.policy, "quorum_policy"), subject: subjectRef(o.subject), votes, human_approval: o.human_approval === null ? null : ref(o.human_approval, "human_approval"), approvals, rejections, satisfied: bool(o.satisfied), evaluated_at: timestamp(o.evaluated_at) };
+}
+function validateIntegrationReceiptV3(value) {
+  const o = exact(value, ["schema_version", "kind", "governance_id", "record_id", "plan", "binding_snapshot", "integrated_by_binding_id", "target_branch", "base_commit", "candidates", "integrated_commit", "diff_hash", "check_bindings", "integrated_at"], "integration receipt");
+  const candidates = items(o.candidates, "candidates").map((v, i) => {
+    const c = exact(v, ["evidence", "quorum_result"], `candidates[${i}]`);
+    return { evidence: ref(c.evidence, "candidate_evidence"), quorum_result: ref(c.quorum_result, "quorum_result") };
+  });
+  unique(candidates, (c) => c.evidence.record_id, "integration candidates");
+  if (!candidates.length) throw new Error("integration candidates must not be empty");
+  return { ...base(o, "integration_receipt"), plan: ref(o.plan, "decomposition_plan"), binding_snapshot: ref(o.binding_snapshot, "binding_snapshot"), integrated_by_binding_id: id(o.integrated_by_binding_id), target_branch: branch(o.target_branch), base_commit: commit(o.base_commit), candidates, integrated_commit: commit(o.integrated_commit), diff_hash: hash(o.diff_hash), check_bindings: refs(o.check_bindings, "check_binding"), integrated_at: timestamp(o.integrated_at) };
+}
+function base(o, kind) {
+  if (o.schema_version !== 3 || o.kind !== kind) throw new Error(`Expected governance ${kind} schema v3`);
+  return { schema_version: 3, kind, governance_id: id(o.governance_id), record_id: id(o.record_id) };
+}
+function ref(v, kind) {
+  const o = exact(v, ["kind", "record_id", "record_hash"], "reference");
+  if (o.kind !== kind) throw new Error(`Expected ${kind} reference`);
+  return { kind, record_id: id(o.record_id), record_hash: hash(o.record_hash) };
+}
+function refs(v, k) {
+  return unique(items(v, "references").map((x) => ref(x, k)), (x) => x.record_id, "references");
+}
+function subjectRef(v) {
+  const o = record(v, "subject");
+  return o.kind === "candidate_evidence" ? ref(o, "candidate_evidence") : ref(o, "integration_receipt");
+}
+function validateDag(units) {
+  const ids = new Set(units.map((u) => u.unit_id));
+  for (const u of units) for (const d of u.depends_on) if (!ids.has(d) || d === u.unit_id) throw new Error("Invalid unit dependency");
+  const visiting = /* @__PURE__ */ new Set(), done = /* @__PURE__ */ new Set();
+  const visit = (id2) => {
+    if (visiting.has(id2)) throw new Error("Decomposition cycle");
+    if (done.has(id2)) return;
+    visiting.add(id2);
+    for (const d of units.find((u) => u.unit_id === id2).depends_on) visit(d);
+    visiting.delete(id2);
+    done.add(id2);
+  };
+  for (const u of units) visit(u.unit_id);
+}
+function exact(v, keys, label) {
+  const o = record(v, label), set = new Set(keys);
+  for (const k of keys) if (!(k in o)) throw new Error(`${label} missing ${k}`);
+  for (const k of Object.keys(o)) if (!set.has(k)) throw new Error(`${label} unknown field ${k}`);
+  return o;
+}
+function record(v, label) {
+  if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error(`${label} must be an object`);
+  return v;
+}
+function items(v, label) {
+  if (!Array.isArray(v) || v.length > MAX_ITEMS) throw new Error(`${label} must be a bounded array`);
+  return v;
+}
+function strings(v, label) {
+  return items(v, label).map((x) => short(x, label, true));
+}
+function short(v, label, empty = false) {
+  if (typeof v !== "string" || v.length > MAX_TEXT || !empty && !v.trim()) throw new Error(`${label} is invalid`);
+  return v;
+}
+function id(v) {
+  const s = short(v, "id");
+  if (!ID.test(s)) throw new Error("Invalid id");
+  return s;
+}
+function hash(v) {
+  const s = short(v, "hash");
+  if (!HASH.test(s)) throw new Error("Invalid SHA-256 hash");
+  return s;
+}
+function commit(v) {
+  const s = short(v, "commit");
+  if (!COMMIT.test(s)) throw new Error("Invalid commit");
+  return s;
+}
+function validateGovernanceBranchV3(v) {
+  const s = short(v, "branch");
+  if (s.length > 255 || s === "@" || s.startsWith("-") || s.startsWith("/") || s.startsWith("refs/") || s.endsWith("/") || s.endsWith(".") || s.includes("..") || s.includes("//") || s.includes("@{") || /[\\\x00-\x20~^:?*[\]]/.test(s) || s.split("/").some((part) => !part || part.startsWith(".") || part.endsWith(".lock"))) throw new Error("Invalid Git branch name");
+  return s;
+}
+function branch(v) {
+  return validateGovernanceBranchV3(v);
+}
+function timestamp(v) {
+  const s = short(v, "timestamp");
+  if (!Number.isFinite(Date.parse(s)) || new Date(s).toISOString() !== s) throw new Error("Invalid canonical timestamp");
+  return s;
+}
+function integer(v, label) {
+  if (!Number.isSafeInteger(v) || v < 0) throw new Error(`${label} must be a nonnegative integer`);
+  return v;
+}
+function bool(v) {
+  if (typeof v !== "boolean") throw new Error("Expected boolean");
+  return v;
+}
+function one(v, allowed, label) {
+  if (typeof v !== "string" || !allowed.includes(v)) throw new Error(`Invalid ${label}`);
+  return v;
+}
+function safePath(v) {
+  if (v.startsWith("/") || v.includes("\\") || v.split("/").some((p) => !p || p === "." || p === "..")) throw new Error("Unsafe governance path");
+  return v;
+}
+function unique(values, key, label) {
+  const seen = /* @__PURE__ */ new Set();
+  for (const v of values) {
+    const k = key(v);
+    if (seen.has(k)) throw new Error(`Duplicate ${label}`);
+    seen.add(k);
+  }
+  return values;
+}
+var GovernanceStoreV3 = class {
+  constructor(projectRoot, controllerKeyPath) {
+    this.controllerKeyPath = controllerKeyPath;
+    this.projectRoot = path2.resolve(projectRoot);
+    this.root = path2.join(this.projectRoot, ".orchestry", "governance", "v3");
+    if (!path2.isAbsolute(controllerKeyPath) || contains(this.projectRoot, controllerKeyPath)) throw new Error("Governance controller key must use an absolute path outside the repository");
+  }
+  controllerKeyPath;
+  root;
+  projectRoot;
+  async put(input) {
+    const record2 = validateGovernanceRecordV3(sanitizeForPersistence(input));
+    return this.lock(record2.governance_id, async () => {
+      await this.validateReferences(record2);
+      const recordHash = hashCanonical2(record2);
+      const envelope = { storage_version: 1, record_hash: recordHash, record_hmac: await this.sign(recordHash, record2), record: record2 };
+      const file = this.file(record2.governance_id, record2.kind, record2.record_id);
+      const existing = await this.read(record2.governance_id, record2.kind, record2.record_id);
+      if (existing) {
+        if (existing.record_hash !== envelope.record_hash) throw new Error(`Conflicting governance record: ${record2.record_id}`);
+        return existing;
+      }
+      await ensureDir(path2.dirname(file));
+      await fs2.chmod(this.caseRoot(record2.governance_id), 448).catch(() => {
+      });
+      await fs2.mkdir(path2.dirname(file), { recursive: true, mode: 448 });
+      await atomicWrite(file, JSON.stringify(envelope, null, 2));
+      return envelope;
+    });
+  }
+  async read(governanceId, kind, recordId) {
+    safeId(governanceId);
+    safeId(recordId);
+    if (!GOVERNANCE_KINDS.includes(kind)) throw new Error("Invalid governance kind");
+    const value = await readJson(this.file(governanceId, kind, recordId));
+    if (value === null) return null;
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid governance envelope");
+    const o = value;
+    if (Object.keys(o).sort().join(",") !== "record,record_hash,record_hmac,storage_version" || o.storage_version !== 1 || typeof o.record_hash !== "string" || typeof o.record_hmac !== "string") throw new Error("Invalid governance envelope");
+    const record2 = validateGovernanceRecordV3(o.record);
+    const expectedHash = hashCanonical2(record2);
+    const expectedHmac = await this.sign(expectedHash, record2);
+    if (record2.governance_id !== governanceId || record2.kind !== kind || record2.record_id !== recordId || expectedHash !== o.record_hash || !safeEqual(expectedHmac, o.record_hmac)) throw new Error("Governance record integrity check failed");
+    return { storage_version: 1, record_hash: o.record_hash, record_hmac: o.record_hmac, record: record2 };
+  }
+  async list(governanceId, kind) {
+    safeId(governanceId);
+    if (!GOVERNANCE_KINDS.includes(kind)) throw new Error("Invalid governance kind");
+    const dir = path2.join(this.caseRoot(governanceId), "records", kind);
+    let names;
+    try {
+      names = await fs2.readdir(dir);
+    } catch (error) {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    }
+    const records = await Promise.all(names.filter((name) => name.endsWith(".json")).sort().map((name) => this.read(governanceId, kind, name.slice(0, -5))));
+    return records.filter((value) => value !== null);
+  }
+  async validateReferences(record2) {
+    for (const reference of collectReferences(record2)) {
+      const target = await this.read(record2.governance_id, reference.kind, reference.record_id);
+      if (!target || target.record_hash !== reference.record_hash) throw new Error(`Missing or stale governance reference: ${reference.kind}/${reference.record_id}`);
+    }
+  }
+  caseRoot(id2) {
+    return path2.join(this.root, safeId(id2));
+  }
+  file(id2, kind, recordId) {
+    return path2.join(this.caseRoot(id2), "records", kind, `${safeId(recordId)}.json`);
+  }
+  async sign(recordHash, record2) {
+    const key = await this.key();
+    return createHmac("sha256", key).update(canonical({ storage_version: 1, record_hash: recordHash, record: record2 })).digest("hex");
+  }
+  async key() {
+    const [projectRealPath, keyRealPath] = await Promise.all([fs2.realpath(this.projectRoot), fs2.realpath(this.controllerKeyPath).catch((error) => {
+      if (error.code === "ENOENT") throw new Error("Governance controller key is missing");
+      throw error;
+    })]);
+    if (contains(projectRealPath, keyRealPath)) throw new Error("Governance controller key resolves inside the repository");
+    const stat = await fs2.lstat(this.controllerKeyPath).catch((error) => {
+      if (error.code === "ENOENT") throw new Error("Governance controller key is missing");
+      throw error;
+    });
+    if (!stat.isFile() || stat.isSymbolicLink() || process.platform !== "win32" && (stat.mode & 511) !== 384) throw new Error("Governance controller key must be a regular 0600 file");
+    if (process.getuid && stat.uid !== process.getuid()) throw new Error("Governance controller key must be owned by the current user");
+    const key = await fs2.readFile(this.controllerKeyPath);
+    if (key.length < 32) throw new Error("Governance controller key must contain at least 32 bytes");
+    return key;
+  }
+  async lock(governanceId, work) {
+    const root = this.caseRoot(governanceId);
+    await fs2.mkdir(root, { recursive: true, mode: 448 });
+    await fs2.chmod(root, 448).catch(() => {
+    });
+    const lock = path2.join(root, ".governance.lock");
+    const deadline = Date.now() + 5e3;
+    while (true) {
+      try {
+        await fs2.mkdir(lock, { mode: 448 });
+        break;
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        const stat = await fs2.stat(lock).catch(() => null);
+        if (stat && Date.now() - stat.mtimeMs > 3e4) {
+          await fs2.rm(lock, { recursive: true, force: true });
+          continue;
+        }
+        if (Date.now() > deadline) throw new Error(`Governance lock is active: ${governanceId}`);
+        await new Promise((resolve2) => setTimeout(resolve2, 10));
+      }
+    }
+    try {
+      return await work();
+    } finally {
+      await fs2.rm(lock, { recursive: true, force: true });
+    }
+  }
+};
+function hashGovernanceRecordV3(value) {
+  return hashCanonical2(validateGovernanceRecordV3(value));
+}
+function hashCanonical2(value) {
+  return createHash("sha256").update(canonical(value)).digest("hex");
+}
+function canonical(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  const o = value;
+  return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`).join(",")}}`;
+}
+function safeId(value) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) throw new Error("Invalid governance id");
+  return value;
+}
+function safeEqual(left, right) {
+  const a = Buffer.from(left, "hex"), b = Buffer.from(right, "hex");
+  return a.length === 32 && b.length === 32 && timingSafeEqual(a, b);
+}
+function contains(root, candidate) {
+  const relative = path2.relative(root, path2.resolve(candidate));
+  return relative === "" || !relative.startsWith(`..${path2.sep}`) && relative !== ".." && !path2.isAbsolute(relative);
+}
+function collectReferences(value) {
+  const refs2 = [];
+  const walk = (v) => {
+    if (!v || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      v.forEach(walk);
+      return;
+    }
+    const o = v;
+    if (typeof o.kind === "string" && typeof o.record_id === "string" && typeof o.record_hash === "string" && Object.keys(o).length === 3) refs2.push(o);
+    else Object.values(o).forEach(walk);
+  };
+  walk(value);
+  return refs2;
+}
+
+// src/application/governance/governance-service-v3.ts
+var GovernanceServiceV3 = class {
+  constructor(store, git) {
+    this.store = store;
+    this.git = git;
+  }
+  store;
+  git;
+  async savePlan(plan) {
+    const snapshot = await this.required(plan.governance_id, plan.binding_snapshot);
+    const bindings = snapshot.record.bindings;
+    const planner = bindings.find((binding) => binding.binding_id === plan.created_by_binding_id);
+    if (!planner || planner.role !== "planner") throw new Error("Decomposition plan creator is not the bound planner");
+    assertNoParallelScopeOverlap(plan);
+    return this.store.put(plan);
+  }
+  async saveCandidate(candidate) {
+    const [planStored, snapshotStored] = await Promise.all([
+      this.required(candidate.governance_id, candidate.plan),
+      this.required(candidate.governance_id, candidate.binding_snapshot)
+    ]);
+    const plan = planStored.record;
+    const snapshot = snapshotStored.record;
+    if (candidate.plan.record_hash !== hashGovernanceRecordV3(plan) || candidate.binding_snapshot.record_hash !== hashGovernanceRecordV3(snapshot)) throw new Error("Candidate references stale governance inputs");
+    if (!sameRef(candidate.binding_snapshot, plan.binding_snapshot)) throw new Error("Candidate binding snapshot does not match its plan");
+    const unit = plan.units.find((item) => item.unit_id === candidate.unit_id);
+    if (!unit || candidate.base_commit !== plan.base_commit) throw new Error("Candidate does not match its decomposition unit");
+    const producer = snapshot.bindings.find((binding) => binding.binding_id === candidate.produced_by_binding_id);
+    if (!producer || producer.role !== "candidate") throw new Error("Candidate producer is not a candidate binding");
+    const outside = candidate.changed_paths.filter((file) => !unit.owned_path_prefixes.some((prefix) => file === prefix || file.startsWith(`${prefix}/`)));
+    if (outside.length) throw new Error(`Candidate changed paths outside owned scope: ${outside.join(", ")}`);
+    const actual = await this.git.recompute(candidate.base_commit, candidate.commit);
+    if (candidate.diff_hash !== actual.diff_hash || !sameOrdered(candidate.changed_paths, actual.changed_paths)) throw new Error("Candidate Git evidence does not match repository state");
+    const checks = await Promise.all(candidate.check_bindings.map(async (reference) => (await this.required(candidate.governance_id, reference)).record));
+    const checkIds = checks.map((check) => check.check_id);
+    if (!sameSet(checkIds, unit.required_check_ids)) throw new Error("Candidate checks do not exactly cover required check IDs");
+    for (const check of checks) {
+      if (!sameRef(check.binding_snapshot, candidate.binding_snapshot) || !isTrustedCheck(check, snapshot) || check.status !== "passed" || check.subject.kind !== "candidate" || check.subject.id !== candidate.candidate_id || check.subject.commit !== candidate.commit) throw new Error("Candidate check is failed, untrusted, or bound to different evidence");
+    }
+    return this.store.put(candidate);
+  }
+  async saveReviewVote(vote) {
+    const [snapshotStored, subjectStored] = await Promise.all([
+      this.required(vote.governance_id, vote.binding_snapshot),
+      this.required(vote.governance_id, vote.subject)
+    ]);
+    const snapshot = snapshotStored.record;
+    const subject = subjectStored.record;
+    if (!sameRef(vote.binding_snapshot, subject.binding_snapshot)) throw new Error("Review vote binding snapshot does not match its subject");
+    const reviewer = snapshot.bindings.find((binding) => binding.binding_id === vote.reviewer_binding_id);
+    if (!reviewer || reviewer.role !== "reviewer") throw new Error("Review vote is not from a reviewer binding");
+    const authorId = subject.kind === "candidate_evidence" ? subject.produced_by_binding_id : subject.integrated_by_binding_id;
+    const author = snapshot.bindings.find((binding) => binding.binding_id === authorId);
+    if (!author || author.principal_id === reviewer.principal_id) throw new Error("Reviewer cannot review its own principal evidence");
+    return this.store.put(vote);
+  }
+  async evaluateQuorum(input) {
+    const [policyStored, subjectStored, ...voteStored] = await Promise.all([
+      this.required(input.governance_id, input.policy),
+      this.required(input.governance_id, input.subject),
+      ...input.votes.map((vote) => this.required(input.governance_id, vote))
+    ]);
+    const policy = policyStored.record;
+    if (policy.applies_to !== subjectStored.record.kind) throw new Error("Quorum policy does not apply to subject kind");
+    const snapshot = (await this.required(input.governance_id, policy.binding_snapshot)).record;
+    if (!sameRef(policy.binding_snapshot, subjectStored.record.binding_snapshot)) throw new Error("Quorum policy binding snapshot does not match its subject");
+    const votes = voteStored.map((stored) => stored.record);
+    const reviewers = /* @__PURE__ */ new Set();
+    const principals = /* @__PURE__ */ new Set();
+    for (const vote of votes) {
+      if (!sameRef(vote.binding_snapshot, policy.binding_snapshot) || !sameRef(vote.subject, input.subject) || !policy.eligible_reviewer_binding_ids.includes(vote.reviewer_binding_id) || reviewers.has(vote.reviewer_binding_id)) throw new Error("Quorum contains duplicate, ineligible, or mismatched vote");
+      reviewers.add(vote.reviewer_binding_id);
+      const binding = snapshot.bindings.find((item) => item.binding_id === vote.reviewer_binding_id);
+      if (!binding) throw new Error("Quorum reviewer binding is missing");
+      if (policy.require_distinct_principals && principals.has(binding.principal_id)) throw new Error("Quorum reviewers must use distinct principals");
+      principals.add(binding.principal_id);
+    }
+    let human = null;
+    if (input.human_approval) {
+      human = await this.required(input.governance_id, input.human_approval);
+      if (!sameRef(human.record.subject, input.subject)) throw new Error("Human approval targets different evidence");
+    }
+    const approvals = votes.filter((vote) => vote.decision === "approve").length;
+    const rejections = votes.length - approvals;
+    const satisfied = approvals >= policy.minimum_approvals && rejections <= policy.maximum_rejections && (!policy.human_approval_required || human !== null);
+    return this.store.put({ schema_version: 3, kind: "quorum_result", governance_id: input.governance_id, record_id: input.record_id, policy: input.policy, subject: input.subject, votes: input.votes, human_approval: input.human_approval ?? null, approvals, rejections, satisfied, evaluated_at: input.evaluated_at });
+  }
+  async saveIntegration(receipt) {
+    const [planStored, snapshotStored] = await Promise.all([this.required(receipt.governance_id, receipt.plan), this.required(receipt.governance_id, receipt.binding_snapshot)]);
+    const plan = planStored.record;
+    const snapshot = snapshotStored.record;
+    if (receipt.target_branch !== plan.target_branch || receipt.base_commit !== plan.base_commit) throw new Error("Integration does not match decomposition target");
+    if (!sameRef(receipt.binding_snapshot, plan.binding_snapshot)) throw new Error("Integration binding snapshot does not match its plan");
+    const integrator = snapshot.bindings.find((binding) => binding.binding_id === receipt.integrated_by_binding_id);
+    if (!integrator || integrator.role !== "integrator") throw new Error("Integration actor is not the bound integrator");
+    if (receipt.candidates.length !== plan.units.length) throw new Error("Integration must contain exactly one candidate per decomposition unit");
+    const units = /* @__PURE__ */ new Set();
+    const approvedPaths = /* @__PURE__ */ new Set();
+    for (const item of receipt.candidates) {
+      const [candidateStored, quorumStored] = await Promise.all([this.required(receipt.governance_id, item.evidence), this.required(receipt.governance_id, item.quorum_result)]);
+      const candidate = candidateStored.record;
+      const quorum = quorumStored.record;
+      if (!quorum.satisfied || !sameRef(quorum.subject, item.evidence) || !sameRef(candidate.plan, receipt.plan) || !sameRef(candidate.binding_snapshot, receipt.binding_snapshot)) throw new Error("Integration candidate lacks matching plan, snapshot, and satisfied quorum");
+      if (units.has(candidate.unit_id) || !plan.units.some((unit) => unit.unit_id === candidate.unit_id)) throw new Error("Integration has duplicate or unknown decomposition units");
+      units.add(candidate.unit_id);
+      for (const value of candidate.changed_paths) {
+        if (approvedPaths.has(value)) throw new Error(`Integration candidates overlap changed path: ${value}`);
+        approvedPaths.add(value);
+      }
+      const actualCandidate = await this.git.recompute(candidate.base_commit, candidate.commit);
+      if (actualCandidate.diff_hash !== candidate.diff_hash || !sameOrdered(actualCandidate.changed_paths, candidate.changed_paths)) throw new Error("Integration candidate Git evidence is stale");
+      await this.git.assertAncestor(candidate.commit, receipt.integrated_commit);
+      await this.git.assertPathComposition(candidate.commit, receipt.integrated_commit, candidate.changed_paths);
+    }
+    const actual = await this.git.recompute(receipt.base_commit, receipt.integrated_commit);
+    if (actual.diff_hash !== receipt.diff_hash) throw new Error("Integration Git evidence does not match repository state");
+    const extra = actual.changed_paths.filter((value) => !approvedPaths.has(value));
+    if (extra.length) throw new Error(`Integration contains unapproved changed paths: ${extra.join(", ")}`);
+    const checks = await Promise.all(receipt.check_bindings.map(async (reference) => (await this.required(receipt.governance_id, reference)).record));
+    if (!sameSet(checks.map((check) => check.check_id), plan.integration_check_ids) || checks.some((check) => !sameRef(check.binding_snapshot, receipt.binding_snapshot) || !isTrustedCheck(check, snapshot) || check.status !== "passed" || check.subject.kind !== "integration" || check.subject.id !== receipt.record_id || check.subject.commit !== receipt.integrated_commit)) throw new Error("Integration checks are incomplete, failed, untrusted, or stale");
+    return this.store.put(receipt);
+  }
+  async required(governanceId, reference) {
+    const stored = await this.store.read(governanceId, reference.kind, reference.record_id);
+    if (!stored || stored.record_hash !== reference.record_hash) throw new Error(`Missing or stale governance reference: ${reference.kind}/${reference.record_id}`);
+    return stored;
+  }
+};
+function assertNoParallelScopeOverlap(plan) {
+  const depends = new Map(plan.units.map((unit) => [unit.unit_id, new Set(unit.depends_on)]));
+  const reaches = (from, target) => {
+    const seen = /* @__PURE__ */ new Set();
+    const stack = [...depends.get(from) ?? []];
+    while (stack.length) {
+      const next = stack.pop();
+      if (next === target) return true;
+      if (seen.has(next)) continue;
+      seen.add(next);
+      stack.push(...depends.get(next) ?? []);
+    }
+    return false;
+  };
+  for (let i = 0; i < plan.units.length; i++) for (let j = i + 1; j < plan.units.length; j++) {
+    const left = plan.units[i], right = plan.units[j];
+    if (reaches(left.unit_id, right.unit_id) || reaches(right.unit_id, left.unit_id)) continue;
+    const overlap = left.owned_path_prefixes.some((a) => right.owned_path_prefixes.some((b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)));
+    if (overlap) throw new Error(`Parallel decomposition scopes overlap: ${left.unit_id} and ${right.unit_id}`);
+  }
+}
+function sameSet(left, right) {
+  return left.length === right.length && new Set(left).size === left.length && left.every((item) => right.includes(item));
+}
+function sameRef(left, right) {
+  return left.kind === right.kind && left.record_id === right.record_id && left.record_hash === right.record_hash;
+}
+function sameOrdered(left, right) {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
+}
+function isTrustedCheck(check, snapshot) {
+  return check.provenance.command_source === "trusted" && check.provenance.execution_environment === "sandboxed" && snapshot.bindings.some((binding) => binding.binding_id === check.executed_by_binding_id && binding.role === "checker");
+}
+
+// src/application/governance/governed-merge-v3.ts
+var GovernedMergeV3 = class {
+  constructor(projectRoot, store, runner, evidence, quiescence, operationLock) {
+    this.projectRoot = projectRoot;
+    this.store = store;
+    this.evidence = evidence;
+    this.quiescence = quiescence;
+    this.operationLock = operationLock;
+    this.gitRunner = (async () => new HardenedGit(runner, await resolveExecutable("git")))();
+  }
+  projectRoot;
+  store;
+  evidence;
+  quiescence;
+  operationLock;
+  gitRunner;
+  async approve(input) {
+    const lease = await this.operationLock.acquire(input.governance_id);
+    try {
+      await this.quiescence.assertQuiescent(input.governance_id);
+      await lease.assertOwned();
+      if (!input.approved_by.trim() || !input.reason.trim()) throw new Error("Human approval identity and reason are required");
+      const integration = await this.store.read(input.governance_id, "integration_receipt", input.integration_record_id);
+      if (!integration || integration.record_hash !== input.integration_record_hash) throw new Error("Human approval references stale integration evidence");
+      return await this.store.put({ schema_version: 3, kind: "human_approval", governance_id: input.governance_id, record_id: input.record_id, subject: { kind: "integration_receipt", record_id: input.integration_record_id, record_hash: input.integration_record_hash }, approved_by: input.approved_by, reason: input.reason, approved_at: input.approved_at });
+    } finally {
+      await lease.release();
+    }
+  }
+  async merge(input) {
+    const lease = await this.operationLock.acquire(input.governance_id);
+    try {
+      await this.quiescence.assertQuiescent(input.governance_id);
+      await lease.assertOwned();
+      const [integrationStored, approvalStored] = await Promise.all([
+        this.store.read(input.governance_id, "integration_receipt", input.integration_record_id),
+        this.store.read(input.governance_id, "human_approval", input.approval_record_id)
+      ]);
+      if (!integrationStored || !approvalStored) throw new Error("Integration and human approval are required");
+      const integration = integrationStored.record;
+      const approval = approvalStored.record;
+      if (approval.subject.kind !== "integration_receipt" || approval.subject.record_id !== integration.record_id || approval.subject.record_hash !== integrationStored.record_hash) throw new Error("Human approval targets different integration evidence");
+      const planStored = await this.store.read(input.governance_id, "decomposition_plan", integration.plan.record_id);
+      if (!planStored || planStored.record_hash !== integration.plan.record_hash) throw new Error("Integration plan evidence is stale");
+      const plan = planStored.record;
+      if (integration.base_commit !== plan.base_commit || integration.target_branch !== plan.target_branch) throw new Error("Integration does not match its governed plan");
+      if (!sameRef2(integration.binding_snapshot, plan.binding_snapshot) || integration.candidates.length !== plan.units.length) throw new Error("Integration does not contain exactly one candidate per governed unit and snapshot");
+      const snapshotStored = await this.store.read(input.governance_id, "binding_snapshot", integration.binding_snapshot.record_id);
+      if (!snapshotStored || snapshotStored.record_hash !== integration.binding_snapshot.record_hash) throw new Error("Integration binding snapshot is stale");
+      const snapshot = snapshotStored.record;
+      const units = /* @__PURE__ */ new Set();
+      const approvedPaths = /* @__PURE__ */ new Set();
+      for (const item of integration.candidates) {
+        const [candidateStored, quorumStored] = await Promise.all([
+          this.store.read(input.governance_id, "candidate_evidence", item.evidence.record_id),
+          this.store.read(input.governance_id, "quorum_result", item.quorum_result.record_id)
+        ]);
+        if (!candidateStored || candidateStored.record_hash !== item.evidence.record_hash || !quorumStored || quorumStored.record_hash !== item.quorum_result.record_hash) throw new Error("Integration candidate evidence is stale");
+        const candidate2 = candidateStored.record;
+        const quorum = quorumStored.record;
+        if (!sameRef2(candidate2.plan, integration.plan) || !sameRef2(candidate2.binding_snapshot, integration.binding_snapshot) || units.has(candidate2.unit_id) || !plan.units.some((unit) => unit.unit_id === candidate2.unit_id)) throw new Error("Integration candidate plan, snapshot, or decomposition unit is invalid");
+        units.add(candidate2.unit_id);
+        for (const value of candidate2.changed_paths) {
+          if (approvedPaths.has(value)) throw new Error(`Integration candidates overlap changed path: ${value}`);
+          approvedPaths.add(value);
+        }
+        if (quorum.subject.kind !== "candidate_evidence" || quorum.subject.record_id !== candidate2.record_id || quorum.subject.record_hash !== candidateStored.record_hash) throw new Error("Integration candidate quorum targets different evidence");
+        await this.revalidateQuorum(input.governance_id, candidate2, candidateStored.record_hash, quorum);
+        const candidateActual = await this.evidence.recompute(candidate2.base_commit, candidate2.commit);
+        if (candidateActual.diff_hash !== candidate2.diff_hash || !sameOrdered2(candidateActual.changed_paths, candidate2.changed_paths)) throw new Error("Integration candidate Git evidence is stale");
+        await this.evidence.assertAncestor(candidate2.commit, integration.integrated_commit);
+        await this.evidence.assertPathComposition(candidate2.commit, integration.integrated_commit, candidate2.changed_paths);
+      }
+      const checks = await Promise.all(integration.check_bindings.map(async (reference) => {
+        const stored = await this.store.read(input.governance_id, "check_binding", reference.record_id);
+        if (!stored || stored.record_hash !== reference.record_hash) throw new Error("Integration check evidence is stale");
+        return stored.record;
+      }));
+      if (!sameSet2(checks.map((check) => check.check_id), plan.integration_check_ids) || checks.some((check) => !sameRef2(check.binding_snapshot, integration.binding_snapshot) || !isTrustedCheck2(check, snapshot) || check.status !== "passed" || check.subject.kind !== "integration" || check.subject.id !== integration.record_id || check.subject.commit !== integration.integrated_commit)) throw new Error("Integration checks are incomplete, failed, untrusted, or stale");
+      const ref2 = `refs/heads/${integration.target_branch}`;
+      const before = await this.git(["rev-parse", "--verify", ref2]);
+      if (before.trim() !== integration.base_commit) throw new Error("Target branch changed after governance plan was created");
+      const candidate = await this.git(["rev-parse", "--verify", "--end-of-options", `${integration.integrated_commit}^{commit}`]);
+      if (candidate.trim() !== integration.integrated_commit) throw new Error("Integrated commit is unavailable");
+      const actual = await this.evidence.recompute(integration.base_commit, integration.integrated_commit);
+      const extra = actual.changed_paths.filter((value) => !approvedPaths.has(value));
+      if (actual.diff_hash !== integration.diff_hash || extra.length) throw new Error("Final integration Git evidence contains a mismatch or unapproved changed paths");
+      await lease.assertOwned();
+      await this.git(["update-ref", "-m", `ORCH governance ${input.governance_id}`, ref2, integration.integrated_commit, integration.base_commit]);
+      const after = await this.git(["rev-parse", "--verify", ref2]);
+      if (after.trim() !== integration.integrated_commit) throw new Error("Guarded target update did not persist");
+      return { merged: true, commit: integration.integrated_commit };
+    } finally {
+      await lease.release();
+    }
+  }
+  async git(args) {
+    return (await this.gitRunner).run(this.projectRoot, args);
+  }
+  async revalidateQuorum(governanceId, candidate, candidateHash, quorum) {
+    const policyStored = await this.store.read(governanceId, "quorum_policy", quorum.policy.record_id);
+    if (!policyStored || policyStored.record_hash !== quorum.policy.record_hash) throw new Error("Quorum policy evidence is stale");
+    const policy = policyStored.record;
+    if (policy.applies_to !== "candidate_evidence") throw new Error("Quorum policy does not apply to candidate evidence");
+    if (!sameRef2(policy.binding_snapshot, candidate.binding_snapshot)) throw new Error("Quorum policy binding snapshot does not match candidate evidence");
+    const snapshotStored = await this.store.read(governanceId, "binding_snapshot", policy.binding_snapshot.record_id);
+    if (!snapshotStored || snapshotStored.record_hash !== policy.binding_snapshot.record_hash) throw new Error("Quorum binding snapshot is stale");
+    const snapshot = snapshotStored.record;
+    const author = snapshot.bindings.find((binding) => binding.binding_id === candidate.produced_by_binding_id);
+    if (!author || author.role !== "candidate") throw new Error("Candidate author binding is missing or invalid");
+    const reviewers = /* @__PURE__ */ new Set();
+    const principals = /* @__PURE__ */ new Set();
+    let approvals = 0;
+    let rejections = 0;
+    for (const reference of quorum.votes) {
+      const voteStored = await this.store.read(governanceId, "review_vote", reference.record_id);
+      if (!voteStored || voteStored.record_hash !== reference.record_hash) throw new Error("Quorum vote evidence is stale");
+      const vote = voteStored.record;
+      if (!sameRef2(vote.binding_snapshot, policy.binding_snapshot) || vote.subject.kind !== "candidate_evidence" || vote.subject.record_id !== candidate.record_id || vote.subject.record_hash !== candidateHash || !policy.eligible_reviewer_binding_ids.includes(vote.reviewer_binding_id) || reviewers.has(vote.reviewer_binding_id)) throw new Error("Quorum contains duplicate, ineligible, or mismatched vote");
+      const reviewer = snapshot.bindings.find((binding) => binding.binding_id === vote.reviewer_binding_id);
+      if (!reviewer || reviewer.role !== "reviewer" || reviewer.principal_id === author.principal_id) throw new Error("Quorum contains self-review or invalid reviewer");
+      if (policy.require_distinct_principals && principals.has(reviewer.principal_id)) throw new Error("Quorum reviewers do not use distinct principals");
+      reviewers.add(reviewer.binding_id);
+      principals.add(reviewer.principal_id);
+      if (vote.decision === "approve") approvals++;
+      else rejections++;
+    }
+    let hasHumanApproval = false;
+    if (quorum.human_approval) {
+      const stored = await this.store.read(governanceId, "human_approval", quorum.human_approval.record_id);
+      if (!stored || stored.record_hash !== quorum.human_approval.record_hash) throw new Error("Quorum human approval is stale");
+      const human = stored.record;
+      hasHumanApproval = human.subject.kind === "candidate_evidence" && human.subject.record_id === candidate.record_id && human.subject.record_hash === candidateHash;
+    }
+    const satisfied = approvals >= policy.minimum_approvals && rejections <= policy.maximum_rejections && (!policy.human_approval_required || hasHumanApproval);
+    if (!satisfied || !quorum.satisfied || quorum.approvals !== approvals || quorum.rejections !== rejections) throw new Error("Integration candidate quorum is not satisfied");
+  }
+};
+function sameSet2(left, right) {
+  return left.length === right.length && new Set(left).size === left.length && left.every((item) => right.includes(item));
+}
+function sameRef2(left, right) {
+  return left.kind === right.kind && left.record_id === right.record_id && left.record_hash === right.record_hash;
+}
+function sameOrdered2(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+function isTrustedCheck2(check, snapshot) {
+  return check.provenance.command_source === "trusted" && check.provenance.execution_environment === "sandboxed" && snapshot.bindings.some((binding) => binding.binding_id === check.executed_by_binding_id && binding.role === "checker");
+}
 var EXEC_TIMEOUT_MS = 3e3;
+var TEXT_MAX_STDOUT_BYTES = 64 * 1024;
+var IMAGE_MAX_STDOUT_BYTES = 50 * 1024 * 1024;
+var MAX_STDERR_BYTES = 64 * 1024;
+var commandRunner = new CommandRunner(new ProcessManager());
+var executableDescriptors = /* @__PURE__ */ new Map();
 function isClipboardToolAvailable() {
   const platform = process.platform;
   if (platform === "darwin") {
     return true;
   }
   if (platform === "linux") {
-    try {
-      execFileSync("which", ["xclip"], { timeout: EXEC_TIMEOUT_MS, stdio: "ignore" });
-      return true;
-    } catch {
-      return false;
-    }
+    return executableOnPath("xclip");
   }
   if (platform === "win32") {
     return true;
@@ -1327,9 +1994,7 @@ async function getClipboardImage() {
 }
 async function detectMacOS() {
   try {
-    const { stdout } = await execFile("osascript", ["-e", "clipboard info"], {
-      timeout: EXEC_TIMEOUT_MS
-    });
+    const { stdout } = await run("osascript", ["-e", "clipboard info"]);
     if (stdout.includes("\xABclass PNGf\xBB") || stdout.includes("\xABclass TIFF\xBB")) {
       return "image";
     }
@@ -1360,9 +2025,7 @@ async function getImageMacOS() {
         return "error"
       end try
     `;
-    const { stdout } = await execFile("osascript", ["-e", script], {
-      timeout: EXEC_TIMEOUT_MS
-    });
+    const { stdout } = await run("osascript", ["-e", script]);
     if (stdout.trim() !== "ok") return null;
     const data = await readFile(filePath);
     return { data, ext: "png" };
@@ -1381,10 +2044,9 @@ async function getImageMacOS() {
 }
 async function detectLinux() {
   try {
-    const { stdout } = await execFile(
+    const { stdout } = await run(
       "xclip",
-      ["-selection", "clipboard", "-t", "TARGETS", "-o"],
-      { timeout: EXEC_TIMEOUT_MS }
+      ["-selection", "clipboard", "-t", "TARGETS", "-o"]
     );
     const targets = stdout.toLowerCase();
     if (targets.includes("image/png") || targets.includes("image/tiff") || targets.includes("image/jpeg")) {
@@ -1400,12 +2062,12 @@ async function detectLinux() {
 }
 async function getImageLinux() {
   try {
-    const { stdout } = await execFile(
+    const { stdoutBuffer } = await run(
       "xclip",
       ["-selection", "clipboard", "-t", "image/png", "-o"],
-      { timeout: EXEC_TIMEOUT_MS, encoding: "buffer", maxBuffer: 50 * 1024 * 1024 }
+      IMAGE_MAX_STDOUT_BYTES
     );
-    const data = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout, "binary");
+    const data = stdoutBuffer;
     if (data.length === 0) return null;
     return { data, ext: "png" };
   } catch {
@@ -1414,16 +2076,14 @@ async function getImageLinux() {
 }
 async function detectWindows() {
   try {
-    const { stdout: imgCheck } = await execFile(
-      "powershell",
-      ["-NoProfile", "-Command", 'if (Get-Clipboard -Format Image) { "image" } else { "none" }'],
-      { timeout: EXEC_TIMEOUT_MS }
+    const { stdout: imgCheck } = await run(
+      "powershell.exe",
+      ["-NoProfile", "-Command", 'if (Get-Clipboard -Format Image) { "image" } else { "none" }']
     );
     if (imgCheck.trim() === "image") return "image";
-    const { stdout: textCheck } = await execFile(
-      "powershell",
-      ["-NoProfile", "-Command", 'if (Get-Clipboard) { "text" } else { "empty" }'],
-      { timeout: EXEC_TIMEOUT_MS }
+    const { stdout: textCheck } = await run(
+      "powershell.exe",
+      ["-NoProfile", "-Command", 'if (Get-Clipboard) { "text" } else { "empty" }']
     );
     return textCheck.trim() === "text" ? "text" : "empty";
   } catch {
@@ -1444,9 +2104,7 @@ async function getImageWindows() {
         Write-Output 'error'
       }
     `;
-    const { stdout } = await execFile("powershell", ["-NoProfile", "-Command", script], {
-      timeout: EXEC_TIMEOUT_MS
-    });
+    const { stdout } = await run("powershell.exe", ["-NoProfile", "-Command", script]);
     if (stdout.trim() !== "ok") return null;
     const data = await readFile(filePath);
     return { data, ext: "png" };
@@ -1461,6 +2119,44 @@ async function getImageWindows() {
       await rm(dir, { recursive: true });
     } catch {
     }
+  }
+}
+async function run(command, args, maxStdoutBytes = TEXT_MAX_STDOUT_BYTES) {
+  const result = await commandRunner.run({
+    executable: await pinnedExecutable(command),
+    args,
+    env: process.env,
+    timeoutMs: EXEC_TIMEOUT_MS,
+    maxStdoutBytes,
+    maxStderrBytes: MAX_STDERR_BYTES
+  });
+  if (!result.ok) throw new Error(commandFailureMessage(result));
+  return result;
+}
+function pinnedExecutable(command) {
+  let descriptor = executableDescriptors.get(command);
+  if (!descriptor) {
+    descriptor = resolveExecutable(command);
+    executableDescriptors.set(command, descriptor);
+    void descriptor.catch(() => {
+      if (executableDescriptors.get(command) === descriptor) executableDescriptors.delete(command);
+    });
+  }
+  return descriptor;
+}
+function executableOnPath(command) {
+  if (isAbsolute(command)) return canExecute(command);
+  for (const entry of (process.env.PATH ?? "").split(delimiter).filter(Boolean)) {
+    if (canExecute(resolve(entry, command))) return true;
+  }
+  return false;
+}
+function canExecute(filePath) {
+  try {
+    accessSync(filePath, constants.X_OK);
+    return statSync(filePath).isFile();
+  } catch {
+    return false;
   }
 }
 
@@ -1486,7 +2182,7 @@ var IndexManager = class {
     this.dir = config.dir;
     this.ext = config.ext;
     this.itemPath = config.itemPath;
-    this.indexPath = path.join(config.dir, "_index.json");
+    this.indexPath = path2.join(config.dir, "_index.json");
     this.fileFilter = config.fileFilter ?? (() => true);
     if (config.readItem) {
       this.readItemFn = config.readItem;
@@ -1522,31 +2218,31 @@ var IndexManager = class {
     const files = await listFiles(this.dir, this.ext);
     const results = await Promise.all(
       files.filter(this.fileFilter).map(async (file) => {
-        const id = file.replace(this.ext, "");
+        const id2 = file.replace(this.ext, "");
         try {
-          return await this.readItemFn(this.itemPath(id));
+          return await this.readItemFn(this.itemPath(id2));
         } catch {
           return null;
         }
       })
     );
-    const items = [];
+    const items2 = [];
     for (const item of results) {
-      if (item != null) items.push(item);
+      if (item != null) items2.push(item);
     }
     if (this.insideMutex) {
-      await this.writeIndexUnsafe(items);
+      await this.writeIndexUnsafe(items2);
     } else {
-      await this.withMutex(() => this.writeIndexUnsafe(items));
+      await this.withMutex(() => this.writeIndexUnsafe(items2));
     }
-    return items;
+    return items2;
   }
   /**
    * Write the index file atomically.
    * Serialized through the mutex to prevent races with concurrent updateIndex.
    */
-  async writeIndex(items) {
-    return this.withMutex(() => this.writeIndexUnsafe(items));
+  async writeIndex(items2) {
+    return this.withMutex(() => this.writeIndexUnsafe(items2));
   }
   /**
    * Apply a mutation to the index and write it back.
@@ -1563,15 +2259,15 @@ var IndexManager = class {
     });
   }
   /** Internal write without mutex — called only from within withMutex. */
-  async writeIndexUnsafe(items) {
+  async writeIndexUnsafe(items2) {
     await ensureDir(this.dir);
-    await writeJson(this.indexPath, items);
+    await writeJson(this.indexPath, items2);
   }
   /** Promise-chain mutex: serializes all index-mutating operations. */
   withMutex(fn) {
     let release;
-    const next = new Promise((resolve) => {
-      release = resolve;
+    const next = new Promise((resolve2) => {
+      release = resolve2;
     });
     const prev = this.mutex;
     this.mutex = next;
@@ -1592,7 +2288,7 @@ var TaskStore = class {
     this.index = new IndexManager({
       dir: paths.tasksDir,
       ext: ".yml",
-      itemPath: (id) => paths.taskPath(id)
+      itemPath: (id2) => paths.taskPath(id2)
     });
   }
   paths;
@@ -1610,8 +2306,8 @@ var TaskStore = class {
       return bTime < aTime ? -1 : bTime > aTime ? 1 : 0;
     });
   }
-  async get(id) {
-    return readYaml(this.paths.taskPath(id));
+  async get(id2) {
+    return readYaml(this.paths.taskPath(id2));
   }
   async save(task) {
     await ensureDir(this.paths.tasksDir);
@@ -1622,13 +2318,13 @@ var TaskStore = class {
       return filtered;
     });
   }
-  async delete(id) {
+  async delete(id2) {
     try {
-      await fs.unlink(this.paths.taskPath(id));
+      await fs2.unlink(this.paths.taskPath(id2));
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
     }
-    await this.index.updateIndex((idx) => idx.filter((t) => t.id !== id));
+    await this.index.updateIndex((idx) => idx.filter((t) => t.id !== id2));
   }
 };
 function statusPriority(status) {
@@ -1649,7 +2345,7 @@ var AgentStore = class {
     this.index = new IndexManager({
       dir: paths.agentsDir,
       ext: ".yml",
-      itemPath: (id) => paths.agentPath(id)
+      itemPath: (id2) => paths.agentPath(id2)
     });
   }
   paths;
@@ -1657,8 +2353,8 @@ var AgentStore = class {
   async list() {
     return this.index.readIndex();
   }
-  async get(id) {
-    return readYaml(this.paths.agentPath(id));
+  async get(id2) {
+    return readYaml(this.paths.agentPath(id2));
   }
   async getByName(name) {
     const agents = await this.list();
@@ -1673,13 +2369,13 @@ var AgentStore = class {
       return filtered;
     });
   }
-  async delete(id) {
+  async delete(id2) {
     try {
-      await fs.unlink(this.paths.agentPath(id));
+      await fs2.unlink(this.paths.agentPath(id2));
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
     }
-    await this.index.updateIndex((idx) => idx.filter((a) => a.id !== id));
+    await this.index.updateIndex((idx) => idx.filter((a) => a.id !== id2));
   }
 };
 var RunStore = class {
@@ -1687,21 +2383,21 @@ var RunStore = class {
     this.paths = paths;
   }
   paths;
-  async save(run) {
+  async save(run2) {
     await ensureDir(this.paths.runsDir);
-    await writeJson(this.paths.runPath(run.id), run);
+    await writeJson(this.paths.runPath(run2.id), run2);
   }
-  async get(id) {
-    return readJson(this.paths.runPath(id));
+  async get(id2) {
+    return readJson(this.paths.runPath(id2));
   }
   async listAll() {
     return this.listFiltered(() => true);
   }
   async listForTask(taskId) {
-    return this.listFiltered((run) => run.task_id === taskId);
+    return this.listFiltered((run2) => run2.task_id === taskId);
   }
   async listForAgent(agentId) {
-    return this.listFiltered((run) => run.agent_id === agentId);
+    return this.listFiltered((run2) => run2.agent_id === agentId);
   }
   async appendEvent(runId, event) {
     await ensureDir(this.paths.runsDir);
@@ -1728,7 +2424,7 @@ var RunStore = class {
     }
     if (signal?.aborted || Date.now() >= deadline) return;
     const stream = createReadStream(filePath);
-    const { readLines } = await import('./process-manager-BRCBBME3.js');
+    const { readLines } = await import('./process-manager-DX4C5EFA.js');
     try {
       for await (const line of readLines(stream)) {
         if (signal?.aborted) break;
@@ -1754,12 +2450,12 @@ var RunStore = class {
       const batch = files.slice(i, i + BATCH);
       const results = await Promise.all(
         batch.map((file) => {
-          const id = file.endsWith(".json") ? file.slice(0, -5) : file;
-          return readJson(this.paths.runPath(id));
+          const id2 = file.endsWith(".json") ? file.slice(0, -5) : file;
+          return readJson(this.paths.runPath(id2));
         })
       );
-      for (const run of results) {
-        if (run !== null && predicate(run)) all.push(run);
+      for (const run2 of results) {
+        if (run2 !== null && predicate(run2)) all.push(run2);
       }
     }
     return all.sort(
@@ -1784,6 +2480,141 @@ var DEFAULT_STATE = {
   }
 };
 
+// src/infrastructure/storage/state-migrations.ts
+var STATE_SCHEMA_VERSION = 1;
+function stateVersion(value) {
+  const raw = object(value, "orchestrator state");
+  if (raw.version === void 0 || raw.version === 0) return 0;
+  if (raw.version === STATE_SCHEMA_VERSION) return STATE_SCHEMA_VERSION;
+  if (Number.isSafeInteger(raw.version) && raw.version > STATE_SCHEMA_VERSION)
+    throw new Error(`Unsupported future orchestrator state version: ${raw.version}`);
+  throw new Error("Invalid orchestrator state version");
+}
+function migrateState(value) {
+  const version = stateVersion(value);
+  const raw = object(value, "orchestrator state");
+  return validatePersistedState({ ...raw, version: STATE_SCHEMA_VERSION }, version === 0);
+}
+function validatePersistedState(value, legacy = false) {
+  const raw = object(value, "orchestrator state");
+  if (raw.version !== STATE_SCHEMA_VERSION)
+    throw new Error(`Unsupported orchestrator state version: ${String(raw.version)}`);
+  const defaults = structuredClone(DEFAULT_STATE);
+  const runningRaw = optionalObject(raw.running, "running");
+  const running = {};
+  for (const [key, entry] of Object.entries(runningRaw)) {
+    const item = object(entry, `running.${key}`);
+    running[key] = {
+      run_id: string(item.run_id, `running.${key}.run_id`),
+      agent_id: string(item.agent_id, `running.${key}.agent_id`),
+      task_id: string(item.task_id, `running.${key}.task_id`),
+      pid: integer2(item.pid, `running.${key}.pid`, 1),
+      started_at: string(item.started_at, `running.${key}.started_at`),
+      last_event_at: string(item.last_event_at, `running.${key}.last_event_at`)
+    };
+  }
+  const claimedRaw = optionalArray(raw.claimed);
+  const claimed = claimedRaw.map((item, index) => string(item, `claimed[${index}]`));
+  const retryRaw = optionalArray(raw.retry_queue);
+  const retry_queue = retryRaw.map((entry, index) => {
+    const item = object(entry, `retry_queue[${index}]`);
+    return {
+      task_id: string(item.task_id, `retry_queue[${index}].task_id`),
+      attempt: integer2(item.attempt, `retry_queue[${index}].attempt`, 0),
+      due_at: string(item.due_at, `retry_queue[${index}].due_at`),
+      error: string(item.error, `retry_queue[${index}].error`)
+    };
+  });
+  const statsRaw = optionalObject(raw.stats, "stats");
+  const tokensRaw = optionalObject(statsRaw.total_tokens, "stats.total_tokens");
+  const number = (value2, fallback, label) => value2 === void 0 ? fallback : integer2(value2, label, 0);
+  const state = {
+    version: STATE_SCHEMA_VERSION,
+    onboardingCompleted: typeof raw.onboardingCompleted === "boolean" ? raw.onboardingCompleted : false,
+    running,
+    claimed,
+    retry_queue,
+    stats: {
+      total_runs: number(statsRaw.total_runs, defaults.stats.total_runs, "stats.total_runs"),
+      total_tasks_completed: number(
+        statsRaw.total_tasks_completed,
+        defaults.stats.total_tasks_completed,
+        "stats.total_tasks_completed"
+      ),
+      total_tasks_failed: number(
+        statsRaw.total_tasks_failed,
+        defaults.stats.total_tasks_failed,
+        "stats.total_tasks_failed"
+      ),
+      total_tokens: {
+        input: number(tokensRaw.input, defaults.stats.total_tokens.input, "stats.total_tokens.input"),
+        output: number(tokensRaw.output, defaults.stats.total_tokens.output, "stats.total_tokens.output"),
+        reasoning: number(
+          tokensRaw.reasoning,
+          defaults.stats.total_tokens.reasoning,
+          "stats.total_tokens.reasoning"
+        ),
+        total: number(tokensRaw.total, defaults.stats.total_tokens.total, "stats.total_tokens.total"),
+        cache_read: number(
+          tokensRaw.cache_read,
+          defaults.stats.total_tokens.cache_read,
+          "stats.total_tokens.cache_read"
+        ),
+        cache_write: number(
+          tokensRaw.cache_write,
+          defaults.stats.total_tokens.cache_write,
+          "stats.total_tokens.cache_write"
+        )
+      },
+      total_runtime_ms: number(
+        statsRaw.total_runtime_ms,
+        defaults.stats.total_runtime_ms,
+        "stats.total_runtime_ms"
+      )
+    }
+  };
+  if (raw.pid !== void 0) state.pid = integer2(raw.pid, "pid", 1);
+  if (raw.started_at !== void 0) state.started_at = string(raw.started_at, "started_at");
+  return state;
+}
+function validateStateMigrationJournal(value) {
+  const raw = object(value, "state migration journal");
+  if (raw.schema_version !== 1 || raw.from_version !== 0 || raw.to_version !== 1)
+    throw new Error("Invalid state migration journal");
+  return {
+    schema_version: 1,
+    from_version: 0,
+    to_version: 1,
+    state: validatePersistedState(raw.state)
+  };
+}
+function deserializeState(value) {
+  return { ...value, claimed: new Set(value.claimed) };
+}
+function object(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error(`${label} must be an object`);
+  return value;
+}
+function optionalObject(value, label, legacy) {
+  if (value === void 0 || value === null) return {};
+  return object(value, label);
+}
+function optionalArray(value, label, legacy) {
+  if (value === void 0 || value === null) return [];
+  if (!Array.isArray(value)) return [];
+  return value;
+}
+function string(value, label) {
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  return value;
+}
+function integer2(value, label, minimum) {
+  if (!Number.isSafeInteger(value) || value < minimum)
+    throw new Error(`${label} must be an integer >= ${minimum}`);
+  return value;
+}
+
 // src/infrastructure/storage/state-store.ts
 var StateStore = class {
   constructor(paths) {
@@ -1791,32 +2622,49 @@ var StateStore = class {
   }
   paths;
   async read() {
+    await this.recoverMigration();
     const raw = await readJson(this.paths.statePath);
     if (!raw) return structuredClone(DEFAULT_STATE);
-    const defaults = structuredClone(DEFAULT_STATE);
-    return {
-      version: raw.version ?? defaults.version,
-      pid: raw.pid,
-      started_at: raw.started_at,
-      onboardingCompleted: typeof raw.onboardingCompleted === "boolean" ? raw.onboardingCompleted : false,
-      running: raw.running && typeof raw.running === "object" ? raw.running : defaults.running,
-      claimed: Array.isArray(raw.claimed) ? new Set(raw.claimed) : new Set(defaults.claimed),
-      retry_queue: Array.isArray(raw.retry_queue) ? raw.retry_queue : defaults.retry_queue,
-      stats: {
-        total_runs: raw.stats?.total_runs ?? defaults.stats.total_runs,
-        total_tasks_completed: raw.stats?.total_tasks_completed ?? defaults.stats.total_tasks_completed,
-        total_tasks_failed: raw.stats?.total_tasks_failed ?? defaults.stats.total_tasks_failed,
-        total_tokens: {
-          ...defaults.stats.total_tokens,
-          ...raw.stats?.total_tokens ?? {}
-        },
-        total_runtime_ms: raw.stats?.total_runtime_ms ?? defaults.stats.total_runtime_ms
-      }
-    };
+    const version = stateVersion(raw);
+    const persisted = migrateState(raw);
+    if (version === 0) await this.persistMigration(persisted);
+    return deserializeState(persisted);
   }
   async write(state) {
-    const serializable = { ...state, claimed: Array.from(state.claimed) };
+    const serializable = validatePersistedState({ ...state, claimed: Array.from(state.claimed) });
     await writeJson(this.paths.statePath, serializable);
+  }
+  get migrationPath() {
+    return path2.join(path2.dirname(this.paths.statePath), "state.migration.pending.json");
+  }
+  async persistMigration(state) {
+    const journal = {
+      schema_version: 1,
+      from_version: 0,
+      to_version: 1,
+      state
+    };
+    await writeJson(this.migrationPath, journal);
+    await writeJson(this.paths.statePath, state);
+    await fs2.rm(this.migrationPath, { force: true });
+  }
+  async recoverMigration() {
+    const rawJournal = await readJson(this.migrationPath);
+    if (!rawJournal) return;
+    const journal = validateStateMigrationJournal(rawJournal);
+    const current = await readJson(this.paths.statePath);
+    if (current) {
+      const version = stateVersion(current);
+      if (version === 1) {
+        const validated = validatePersistedState(current);
+        if (JSON.stringify(validated) !== JSON.stringify(journal.state))
+          throw new Error("State migration journal conflicts with canonical state");
+        await fs2.rm(this.migrationPath, { force: true });
+        return;
+      }
+    }
+    await writeJson(this.paths.statePath, journal.state);
+    await fs2.rm(this.migrationPath, { force: true });
   }
 };
 
@@ -1946,8 +2794,8 @@ function normalizeConfig(config) {
     }
   };
 }
-var GLOBAL_DIR = path.join(homedir(), ".orchestry");
-var GLOBAL_CONFIG_PATH = path.join(GLOBAL_DIR, "global.yml");
+var GLOBAL_DIR = path2.join(homedir(), ".orchestry");
+var GLOBAL_CONFIG_PATH = path2.join(GLOBAL_DIR, "global.yml");
 var GlobalConfigStore = class {
   async read() {
     const data = await readYaml(GLOBAL_CONFIG_PATH);
@@ -2025,7 +2873,7 @@ var ContextStore = class _ContextStore {
   }
   async delete(key) {
     try {
-      await fs.unlink(this.paths.contextPath(key));
+      await fs2.unlink(this.paths.contextPath(key));
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
     }
@@ -2059,7 +2907,7 @@ var ContextStore = class _ContextStore {
   /** Delete just the file (no index update). Used by lazy expiry cleanup. */
   async deleteFile(key) {
     try {
-      await fs.unlink(this.paths.contextPath(key));
+      await fs2.unlink(this.paths.contextPath(key));
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
     }
@@ -2075,7 +2923,7 @@ var MessageStore = class {
     this.index = new IndexManager({
       dir: paths.messagesDir,
       ext: ".json",
-      itemPath: (id) => paths.messagePath(id),
+      itemPath: (id2) => paths.messagePath(id2),
       fileFilter: (fileName) => fileName !== "_index.json"
     });
   }
@@ -2090,8 +2938,8 @@ var MessageStore = class {
       return filtered;
     });
   }
-  async get(id) {
-    return readJson(this.paths.messagePath(id));
+  async get(id2) {
+    return readJson(this.paths.messagePath(id2));
   }
   async list() {
     const all = await this.index.readIndex();
@@ -2106,25 +2954,25 @@ var MessageStore = class {
       return m.to_agent_id === agentId;
     });
   }
-  async markDelivered(id) {
-    const msg = await this.get(id);
+  async markDelivered(id2) {
+    const msg = await this.get(id2);
     if (!msg) return;
     msg.status = "delivered";
     msg.delivered_at = (/* @__PURE__ */ new Date()).toISOString();
-    await writeJson(this.paths.messagePath(id), msg);
+    await writeJson(this.paths.messagePath(id2), msg);
     await this.index.updateIndex((idx) => {
-      const filtered = idx.filter((m) => m.id !== id);
+      const filtered = idx.filter((m) => m.id !== id2);
       filtered.push(msg);
       return filtered;
     });
   }
-  async delete(id) {
+  async delete(id2) {
     try {
-      await fs.unlink(this.paths.messagePath(id));
+      await fs2.unlink(this.paths.messagePath(id2));
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
     }
-    await this.index.updateIndex((idx) => idx.filter((m) => m.id !== id));
+    await this.index.updateIndex((idx) => idx.filter((m) => m.id !== id2));
   }
   async purgeExpired() {
     const all = await this.list();
@@ -2138,7 +2986,7 @@ var MessageStore = class {
     await Promise.all(
       toDelete.map(async (m) => {
         try {
-          await fs.unlink(this.paths.messagePath(m.id));
+          await fs2.unlink(this.paths.messagePath(m.id));
         } catch (err) {
           if (err.code !== "ENOENT") throw err;
         }
@@ -2166,7 +3014,7 @@ var GoalStore = class {
     this.index = new IndexManager({
       dir: paths.goalsDir,
       ext: ".yml",
-      itemPath: (id) => paths.goalPath(id)
+      itemPath: (id2) => paths.goalPath(id2)
     });
   }
   paths;
@@ -2184,8 +3032,8 @@ var GoalStore = class {
       return bTime < aTime ? -1 : bTime > aTime ? 1 : 0;
     });
   }
-  async get(id) {
-    return readYaml(this.paths.goalPath(id));
+  async get(id2) {
+    return readYaml(this.paths.goalPath(id2));
   }
   async save(goal) {
     await ensureDir(this.paths.goalsDir);
@@ -2196,13 +3044,13 @@ var GoalStore = class {
       return filtered;
     });
   }
-  async delete(id) {
+  async delete(id2) {
     try {
-      await fs.unlink(this.paths.goalPath(id));
+      await fs2.unlink(this.paths.goalPath(id2));
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
     }
-    await this.index.updateIndex((idx) => idx.filter((g) => g.id !== id));
+    await this.index.updateIndex((idx) => idx.filter((g) => g.id !== id2));
   }
 };
 var TeamStore = class {
@@ -2214,8 +3062,8 @@ var TeamStore = class {
     await ensureDir(this.paths.teamsDir);
     await writeYaml(this.paths.teamPath(team.id), team);
   }
-  async get(id) {
-    return readYaml(this.paths.teamPath(id));
+  async get(id2) {
+    return readYaml(this.paths.teamPath(id2));
   }
   async getByName(name) {
     const teams = await this.list();
@@ -2229,9 +3077,9 @@ var TeamStore = class {
     );
     return results.filter((t) => t !== null);
   }
-  async delete(id) {
+  async delete(id2) {
     try {
-      await fs.unlink(this.paths.teamPath(id));
+      await fs2.unlink(this.paths.teamPath(id2));
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
     }
@@ -2418,13 +3266,13 @@ var GoalService = class {
   async list(filter) {
     return this.goalStore.list(filter);
   }
-  async get(id) {
-    const goal = await this.goalStore.get(id);
-    if (!goal) throw new GoalNotFoundError(id);
+  async get(id2) {
+    const goal = await this.goalStore.get(id2);
+    if (!goal) throw new GoalNotFoundError(id2);
     return goal;
   }
-  async updateStatus(id, newStatus, opts) {
-    const goal = await this.get(id);
+  async updateStatus(id2, newStatus, opts) {
+    const goal = await this.get(id2);
     const oldStatus = goal.status;
     if (!VALID_TRANSITIONS[oldStatus].includes(newStatus)) {
       const err = new InvalidArgumentsError(`Cannot transition goal from '${oldStatus}' to '${newStatus}'`);
@@ -2432,7 +3280,7 @@ var GoalService = class {
       throw err;
     }
     if (newStatus === "achieved" && this.taskService) {
-      const childTasks = await this.taskService.list({ goalId: id });
+      const childTasks = await this.taskService.list({ goalId: id2 });
       const pending = childTasks.filter(
         (t) => !isTerminal(t.status) && !t.labels?.includes(AUTONOMOUS_LABEL)
       );
@@ -2446,13 +3294,13 @@ var GoalService = class {
           );
           if (running.length > 0) {
             const summary = running.map((t) => `${t.id} (in_progress)`).join(", ");
-            const err = new GoalHasPendingTasksError(id, running.length, summary);
+            const err = new GoalHasPendingTasksError(id2, running.length, summary);
             await this.recordGoalFailure(goal, err.message, "force achieved blocked by running tasks");
             throw err;
           }
         } else {
           const summary = pending.map((t) => `${t.id} (${t.status})`).join(", ");
-          const err = new GoalHasPendingTasksError(id, pending.length, summary);
+          const err = new GoalHasPendingTasksError(id2, pending.length, summary);
           await this.recordGoalFailure(goal, err.message, "achieved blocked by pending tasks");
           throw err;
         }
@@ -2472,11 +3320,11 @@ var GoalService = class {
     }
     goal.updated_at = (/* @__PURE__ */ new Date()).toISOString();
     await this.goalStore.save(goal);
-    this.eventBus.emit({ type: "goal:status_changed", goalId: id, from: oldStatus, to: newStatus });
+    this.eventBus.emit({ type: "goal:status_changed", goalId: id2, from: oldStatus, to: newStatus });
     if (oldPhase && goal.orchestration && oldPhase !== goal.orchestration.phase) {
       this.eventBus.emit({
         type: "goal:phase_changed",
-        goalId: id,
+        goalId: id2,
         from: oldPhase,
         to: goal.orchestration.phase,
         cycle: goal.orchestration.cycle
@@ -2494,8 +3342,8 @@ var GoalService = class {
     }
     return goal;
   }
-  async update(id, fields) {
-    const goal = await this.get(id);
+  async update(id2, fields) {
+    const goal = await this.get(id2);
     const oldAssignee = goal.assignee;
     if (fields.title !== void 0) {
       if (!fields.title.trim()) throw new InvalidArgumentsError("Goal title cannot be empty");
@@ -2509,7 +3357,7 @@ var GoalService = class {
     }
     goal.updated_at = (/* @__PURE__ */ new Date()).toISOString();
     await this.goalStore.save(goal);
-    this.eventBus.emit({ type: "goal:updated", goalId: id });
+    this.eventBus.emit({ type: "goal:updated", goalId: id2 });
     const newAssignee = goal.assignee;
     if (newAssignee !== oldAssignee) {
       const ops = [];
@@ -2519,11 +3367,11 @@ var GoalService = class {
     }
     return goal;
   }
-  async delete(id) {
-    const goal = await this.get(id);
+  async delete(id2) {
+    const goal = await this.get(id2);
     const { assignee } = goal;
-    await this.goalStore.delete(id);
-    this.eventBus.emit({ type: "goal:deleted", goalId: id });
+    await this.goalStore.delete(id2);
+    this.eventBus.emit({ type: "goal:deleted", goalId: id2 });
     if (assignee) {
       await this.maybeDisableAutonomous(assignee);
     }
@@ -2650,9 +3498,9 @@ var TeamService = class {
     }
     return team;
   }
-  async get(id) {
-    const team = await this.teamStore.get(id);
-    if (!team) throw new TeamNotFoundError(id);
+  async get(id2) {
+    const team = await this.teamStore.get(id2);
+    if (!team) throw new TeamNotFoundError(id2);
     return team;
   }
   async list() {
@@ -2696,7 +3544,7 @@ var TeamService = class {
   }
   async removeTask(teamId, taskId) {
     const team = await this.get(teamId);
-    team.task_pool = team.task_pool.filter((id) => id !== taskId);
+    team.task_pool = team.task_pool.filter((id2) => id2 !== taskId);
     team.updated_at = (/* @__PURE__ */ new Date()).toISOString();
     await this.teamStore.save(team);
     return team;
@@ -2731,7 +3579,10 @@ var TeamService = class {
 
 // src/container.ts
 async function buildLightContainer(context) {
-  const paths = new Paths(context.projectRoot);
+  const externalRoots = context.stateRoot && context.workspaceRoot ? { stateRoot: context.stateRoot, workspaceRoot: context.workspaceRoot } : (await import('./paths-A3DU4YL7.js')).externalOrchestryRoots(context.projectRoot);
+  context.stateRoot = externalRoots.stateRoot;
+  context.workspaceRoot = externalRoots.workspaceRoot;
+  const paths = new Paths(context.projectRoot, externalRoots.stateRoot, externalRoots.workspaceRoot);
   const configStore = new ConfigStore(paths);
   const globalConfigStore = new GlobalConfigStore();
   const [, config] = await Promise.all([
@@ -2782,7 +3633,8 @@ async function buildFullContainer(context) {
   const globalConfig = await light.globalConfigStore.read();
   light.globalConfig = globalConfig;
   const [
-    { ProcessManager },
+    { ProcessManager: ProcessManager2 },
+    { CommandRunner: CommandRunner2, resolveExecutable: resolveExecutable2 },
     { AdapterRegistry: AdapterRegistry2 },
     { ClaudeAdapter },
     { CodexAdapter },
@@ -2799,49 +3651,61 @@ async function buildFullContainer(context) {
     { DoctorService },
     { WorkflowArtifactStore: WorkflowArtifactStore2 },
     { WorkflowEngine: WorkflowEngine2 },
+    { WorkflowSafeguards },
     { NativeWorkflowRoleResolver, NativeWorkflowGitGateway }
   ] = await Promise.all([
-    import('./process-manager-BRCBBME3.js'),
+    import('./process-manager-DX4C5EFA.js'),
+    import('./command-runner-AV42AFFS.js'),
     import('./registry-JXXRLJ5J.js'),
-    import('./claude-WXXFWVHV.js'),
-    import('./codex-76Q2VLU7.js'),
-    import('./cursor-NT7PQ4FZ.js'),
-    import('./shell-NETW4YGX.js'),
-    import('./opencode-OIBR56TL.js'),
-    import('./pi-Y7GCJNN6.js'),
-    import('./grok-CSU34ZYL.js'),
-    import('./antigravity-R57MABEO.js'),
-    import('./workspace-manager-NGJ6YVTB.js'),
-    import('./template-engine-ZZWWQC5M.js'),
+    import('./claude-EL2UUOW2.js'),
+    import('./codex-6QLBPS27.js'),
+    import('./cursor-Y53ETVVX.js'),
+    import('./shell-NO6ZM425.js'),
+    import('./opencode-5TSF6URM.js'),
+    import('./pi-GCPIMQHV.js'),
+    import('./grok-5PXP5JU5.js'),
+    import('./antigravity-P7UECLLC.js'),
+    import('./workspace-manager-SGCEFAO3.js'),
+    import('./template-engine-CLAUG4MB.js'),
     import('./skill-loader-4GSQSW7Q.js'),
-    import('./orchestrator-OTG2FJWD.js'),
-    import('./doctor-service-WPXAUB6S.js'),
-    import('./artifact-store-WCXCFJG2.js'),
-    import('./engine-FEFY2KX6.js'),
-    import('./native-adapters-B34254ZQ.js')
+    import('./orchestrator-ESDZI3RM.js'),
+    import('./doctor-service-Q3CPX6FZ.js'),
+    import('./artifact-store-KVMQWB4I.js'),
+    import('./engine-A3JKYRPC.js'),
+    import('./safeguards-OYONLEGJ.js'),
+    import('./native-adapters-Y7TD6IR5.js')
   ]);
-  const processManager = new ProcessManager();
+  const processManager = new ProcessManager2(path2.join(light.paths.root, "process-groups.json"));
+  const commandRunner2 = new CommandRunner2(processManager);
   const templateEngine = new LiquidTemplateEngine();
   const skillLoader = new SkillLoader2();
   const workspaceManager = new WorkspaceManager(
     context.projectRoot,
-    light.paths.root,
-    processManager
+    light.paths.workspacesRoot,
+    commandRunner2
   );
   const adapterRegistry = new AdapterRegistry2();
-  adapterRegistry.register(new ClaudeAdapter(processManager));
-  adapterRegistry.register(new CodexAdapter(processManager));
-  adapterRegistry.register(new CursorAdapter(processManager));
-  adapterRegistry.register(new ShellAdapter(processManager));
-  adapterRegistry.register(new OpenCodeAdapter(processManager));
-  adapterRegistry.register(new PiAdapter(processManager));
-  adapterRegistry.register(new GrokAdapter(processManager));
-  adapterRegistry.register(new AntigravityAdapter(processManager));
-  const doctorService = new DoctorService(adapterRegistry, processManager, context.projectRoot);
-  const workflowStore = new WorkflowArtifactStore2(context.projectRoot);
+  adapterRegistry.register(new ClaudeAdapter(processManager, commandRunner2));
+  adapterRegistry.register(new CodexAdapter(processManager, commandRunner2));
+  adapterRegistry.register(new CursorAdapter(processManager, commandRunner2));
+  adapterRegistry.register(new ShellAdapter(processManager, commandRunner2));
+  adapterRegistry.register(new OpenCodeAdapter(processManager, commandRunner2));
+  adapterRegistry.register(new PiAdapter(processManager, commandRunner2));
+  adapterRegistry.register(new GrokAdapter(processManager, commandRunner2));
+  adapterRegistry.register(new AntigravityAdapter(processManager, commandRunner2));
+  const [gitExecutable, nodeExecutable, npmExecutable, npxExecutable] = await Promise.all([
+    resolveExecutable2("git"),
+    resolveExecutable2("node"),
+    resolveExecutable2("npm"),
+    resolveExecutable2("npx")
+  ]);
+  const doctorService = new DoctorService(adapterRegistry, commandRunner2, { git: gitExecutable, node: nodeExecutable }, context.projectRoot);
+  const workflowStore = new WorkflowArtifactStore2(light.paths.root, { rootIsStateRoot: true });
+  const workflowSafeguards = new WorkflowSafeguards(context.projectRoot, light.paths.root, light.paths.workspacesRoot, commandRunner2, processManager);
   const workflowEngine = new WorkflowEngine2(workflowStore, {
-    roles: new NativeWorkflowRoleResolver(processManager),
-    git: new NativeWorkflowGitGateway(context.projectRoot)
+    roles: new NativeWorkflowRoleResolver(processManager, commandRunner2, workflowSafeguards),
+    git: new NativeWorkflowGitGateway(context.projectRoot, commandRunner2, light.paths.workspacesRoot, gitExecutable, workflowSafeguards),
+    safeguards: workflowSafeguards
   });
   const orchestrator = new Orchestrator2({
     taskStore: light.taskStore,
@@ -2852,6 +3716,9 @@ async function buildFullContainer(context) {
     workspaceManager,
     templateEngine,
     processManager,
+    commandRunner: commandRunner2,
+    reviewExecutables: { npm: npmExecutable, npx: npxExecutable, node: nodeExecutable },
+    executionSafeguards: workflowSafeguards,
     eventBus: light.eventBus,
     taskService: light.taskService,
     agentService: light.agentService,
@@ -2867,20 +3734,21 @@ async function buildFullContainer(context) {
   return {
     ...light,
     processManager,
+    commandRunner: commandRunner2,
     adapterRegistry,
-    workspaceManager,
     templateEngine,
     skillLoader,
     doctorService,
     orchestrator,
     workflowStore,
-    workflowEngine
+    workflowEngine,
+    workflowSafeguards
   };
 }
 async function buildContainer(context) {
   return buildFullContainer(context);
 }
 
-export { AGENT_SHOP_TEMPLATES, AgentService, EventBus, MODEL_TIER_MAP, RunService, SUPPORTED_ADAPTERS, TaskService, buildContainer, buildFullContainer, buildLightContainer, defaultModelForAdapter, detectClipboardType, getClipboardImage, getShopTemplateByKey, isAdapterKind, isClipboardToolAvailable, isMcpSkill, isModelTier, resolveModel, templateToAgentInput };
+export { AGENT_SHOP_TEMPLATES, AgentService, EventBus, GOVERNANCE_KINDS, GOVERNANCE_SCHEMA_VERSION, GovernanceServiceV3, GovernanceStoreV3, GovernedMergeV3, MODEL_TIER_MAP, RunService, SUPPORTED_ADAPTERS, TaskService, assertNoParallelScopeOverlap, buildContainer, buildFullContainer, buildLightContainer, defaultModelForAdapter, detectClipboardType, getClipboardImage, getShopTemplateByKey, hashGovernanceRecordV3, isAdapterKind, isClipboardToolAvailable, isMcpSkill, isModelTier, resolveModel, templateToAgentInput, validateBindingSnapshotV3, validateCandidateEvidenceV3, validateCheckBindingV3, validateDecompositionPlanV3, validateGovernanceBranchV3, validateGovernanceRecordV3, validateHumanApprovalV3, validateIntegrationReceiptV3, validateQuorumPolicyV3, validateQuorumResultV3, validateReviewVoteV3 };
 //# sourceMappingURL=index.js.map
 //# sourceMappingURL=index.js.map

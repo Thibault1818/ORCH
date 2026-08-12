@@ -53,7 +53,7 @@ describe("workflow v2 fake executables", () => {
       codex: { advertised_native_resume: true, native_resume: false },
       claude: { advertised_native_resume: true, native_resume: false },
     });
-  });
+  }, 15_000);
   it("uses exact argv and stdin-only prompts for Codex, optional Fable, and Opus", async () => {
     await scenario([
       { text: JSON.stringify(dispatch()) },

@@ -19,8 +19,8 @@ export interface AdapterTestResult {
 export type WorkflowCapabilityRole = 'supervisor' | 'implementer' | 'adviser' | 'reviewer';
 
 export interface AdapterCapabilityDescriptor {
-  adapter: 'codex' | 'claude' | 'fable' | 'grok' | 'antigravity';
-  command: 'codex' | 'claude' | 'grok' | 'agy';
+  adapter: 'codex' | 'claude' | 'opencode' | 'fable' | 'grok' | 'antigravity';
+  command: 'codex' | 'claude' | 'opencode' | 'grok' | 'agy';
   installed: boolean;
   version: string | null;
   transport: 'stdin' | 'unsupported';
@@ -51,6 +51,11 @@ export interface ExecuteParams {
   security?: {
     allowPermissionBypass?: boolean;
     allowShellAdapter?: boolean;
+  };
+  execution: {
+    owner: string;
+    sandbox: unknown;
+    allowedExecutables: import('../process/command-runner.js').ExecutableDescriptor[];
   };
   persistPrompts?: boolean;
   signal?: AbortSignal;

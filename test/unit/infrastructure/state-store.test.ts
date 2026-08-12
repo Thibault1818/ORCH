@@ -164,4 +164,60 @@ describe('StateStore', () => {
     expect(state.stats.total_tokens.cache_read).toBe(0);
     expect(state.stats.total_tokens.cache_write).toBe(0);
   });
+
+  it('atomically migrates unversioned state and is idempotent', async () => {
+    const file = path.join(tmpDir, '.orchestry', 'state.json');
+    await fs.writeFile(file, JSON.stringify({
+      running: {
+        tsk_1: {
+          run_id: 'run_1', agent_id: 'agt_1', task_id: 'tsk_1', pid: 123,
+          started_at: '2026-08-01T00:00:00Z', last_event_at: '2026-08-01T00:00:01Z',
+        },
+      },
+      claimed: ['tsk_1'],
+      retry_queue: [{ task_id: 'tsk_2', attempt: 1, due_at: 'later', error: 'retry' }],
+      stats: { total_runs: 2, total_tokens: { input: 10, output: 5, total: 15 } },
+    }));
+
+    expect(await store.read()).toMatchObject({ version: 1, claimed: new Set(['tsk_1']) });
+    const first = await fs.readFile(file, 'utf8');
+    expect(JSON.parse(first)).toMatchObject({
+      version: 1,
+      stats: { total_tokens: { reasoning: 0, cache_read: 0, cache_write: 0 } },
+    });
+    await store.read();
+    expect(await fs.readFile(file, 'utf8')).toBe(first);
+  });
+
+  it('recovers an interrupted state migration journal', async () => {
+    const dir = path.join(tmpDir, '.orchestry');
+    const migrated = {
+      version: 1,
+      onboardingCompleted: false,
+      running: {},
+      claimed: ['tsk_recovered'],
+      retry_queue: [],
+      stats: structuredClone(DEFAULT_STATE.stats),
+    };
+    await fs.writeFile(path.join(dir, 'state.json'), JSON.stringify({ version: 0, claimed: [] }));
+    await fs.writeFile(path.join(dir, 'state.migration.pending.json'), JSON.stringify({
+      schema_version: 1, from_version: 0, to_version: 1, state: migrated,
+    }));
+
+    expect((await store.read()).claimed).toEqual(new Set(['tsk_recovered']));
+    await expect(fs.access(path.join(dir, 'state.migration.pending.json'))).rejects.toThrow();
+  });
+
+  it('rejects future versions and malformed nested state', async () => {
+    const file = path.join(tmpDir, '.orchestry', 'state.json');
+    await fs.writeFile(file, JSON.stringify({ version: 2 }));
+    await expect(store.read()).rejects.toThrow('future orchestrator state version');
+
+    await fs.writeFile(file, JSON.stringify({
+      version: 1,
+      running: { tsk_bad: { run_id: 'run_1', agent_id: 'agt_1', task_id: 'tsk_bad', pid: '123' } },
+      claimed: [], retry_queue: [], stats: {},
+    }));
+    await expect(store.read()).rejects.toThrow('running.tsk_bad.pid');
+  });
 });

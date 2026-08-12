@@ -77,9 +77,17 @@ orch workflow resume <job-id> --reason "continue after review"
 orch workflow logs <job-id>
 orch workflow artifacts <job-id>
 orch workflow cancel <job-id>
+
+# Merge never happens from a model verdict alone. Inspect status/artifacts,
+# then type the exact commit challenge in an interactive terminal.
+orch workflow approve <job-id> --reason "reviewed exact diff and checks"
+
+# Discover OpenCode models and record transport-only local-model evidence.
+orch provider list
+orch provider qualify opencode --model ollama/qwen-coder
 ```
 
-The TTY wizard selects a preset, mode, semantic-role bindings, Adviser budget, and trusted checks. The standard path offers only locally verified/trusted-catalog profiles or `CLI default`; CLI default omits `--model`. Custom values require `--allow-unverified-model`, are marked `UNVERIFIED`, and still require final confirmation unless `--yes` was explicit. A negative or empty confirmation creates no job or worktree and makes no model call. The roster snapshot is immutable after launch; to change a binding, pause at a safe boundary and run `orch workflow binding-rotate <job-id> <role> --adapter <cli> --model <model> --effort <level> --reason "..."`. Status reports exact attempts, successes, failures, durations, and known/estimated/unknown tokens by semantic role and adapter; legacy provider aggregates are shown separately and never added to modern receipts. Canonical artifacts and session references live under `.orchestry/workflows/<job-id>/` with restrictive permissions and secret redaction. Grok and Antigravity workflow transports remain disabled because safe stdin behavior has not been empirically proven; fake CLI tests do not establish provider compatibility.
+The TTY wizard selects a preset, mode, semantic-role bindings, Adviser budget, and trusted checks. Codex and Claude remain the default governed pairing. OpenCode can be selected as an Implementer only with an explicit `provider/model`; it runs with `--pure`, an isolated HOME/XDG tree, disabled sharing, and a generated provider allowlist. Local models are discovered through OpenCode and remain `transport_only` until separate tool, context, and reliability qualification exists. Custom values require `--allow-unverified-model`. A negative or empty confirmation creates no job or clone and makes no model call. The roster snapshot is immutable after launch; to change a binding, pause at a safe boundary and run `orch workflow binding-rotate <job-id> <role> --adapter <cli> --model <model> --effort <level> --reason "..."`. Status reports exact attempts, successes, failures, durations, and known/estimated/unknown tokens by semantic role and adapter; legacy provider aggregates are shown separately and never added to modern receipts. Canonical artifacts and session references live in project-specific external controller state with restrictive permissions and secret redaction. Grok and Antigravity workflow transports remain disabled because safe stdin behavior has not been empirically proven; fake CLI tests do not establish provider compatibility. Real-project execution is supported on macOS after `orch workflow doctor` attests the current executable, endpoint, and sandbox policy; Linux and Windows fail closed until equivalent containment backends exist.
 
 <br/>
 

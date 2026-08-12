@@ -27,11 +27,13 @@
 import { describe, it, expect, vi } from 'vitest';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs/promises';
 import type { ChildProcess } from 'node:child_process';
 import type { SpawnResult, IProcessManager } from '../../src/infrastructure/process/process-manager.js';
 import { Orchestrator } from '../../src/application/orchestrator.js';
 import { PiAdapter } from '../../src/infrastructure/adapters/pi.js';
 import { AdapterRegistry } from '../../src/infrastructure/adapters/registry.js';
+import { attachAdapterCommandRunner } from '../unit/infrastructure/adapter-command-runner.js';
 import type { OrchestratorEvent } from '../../src/domain/events.js';
 import {
   buildDeps,
@@ -97,7 +99,7 @@ describe('Pi adapter — end-to-end through Orchestrator', () => {
       name: 'pi-engineer',
       adapter: 'pi',
       status: 'idle',
-      // approval_policy=auto comes from makeAgent default — review auto-approves.
+      // Generic tasks always require explicit human approval.
     });
     const task = makeTask({
       id: 'tsk_pi',
@@ -112,7 +114,7 @@ describe('Pi adapter — end-to-end through Orchestrator', () => {
 
     // ── 3. Real PiAdapter wired into a real AdapterRegistry ────────────────
     const adapterRegistry = new AdapterRegistry();
-    adapterRegistry.register(new PiAdapter(processManager));
+    adapterRegistry.register(new PiAdapter(processManager, attachAdapterCommandRunner(processManager, proc as unknown as ChildProcess)));
 
     const deps = buildDeps({
       taskStore,
@@ -202,7 +204,10 @@ describe('Pi adapter — end-to-end through Orchestrator', () => {
       }],
     }) + '\n');
 
-    // ── 6. Wait for the state machine to settle on `done` ──────────────────
+    // ── 6. Wait for review, then explicitly approve ────────────────────────
+    await waitFor(async () => (await taskStore.get('tsk_pi'))?.status === 'review');
+    await fs.mkdir('/tmp/project/.orchestry', { recursive: true });
+    await orch.approveTask('tsk_pi');
     const finalTask = await waitFor(async () => {
       const t = await taskStore.get('tsk_pi');
       return t?.status === 'done' ? t : null;

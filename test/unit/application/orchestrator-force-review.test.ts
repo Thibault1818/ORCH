@@ -13,7 +13,7 @@ import {
 } from './helpers.js';
 
 describe('forceTaskToReview clears agent.current_task', () => {
-  async function setup(opts: { mergeResult?: any; mergeError?: Error }) {
+  async function setup(opts: { mergeResult?: any; mergeError?: Error; labels?: string[] }) {
     const taskId = 'tsk_1';
     const agentId = 'agt_1';
     const runId = 'run_1';
@@ -24,6 +24,7 @@ describe('forceTaskToReview clears agent.current_task', () => {
       attempts: 1,
       workspace: 'worktree',
       proof: { branch: 'orch/tsk_1', files_changed: ['a.ts'] },
+      labels: opts.labels ?? [],
     });
     const agent = makeAgent({
       id: agentId,
@@ -73,7 +74,7 @@ describe('forceTaskToReview clears agent.current_task', () => {
     const orch = new Orchestrator(deps);
     await (orch as any).loadState();
 
-    return { orch, agentStore, taskStore, taskId, agentId, runId };
+    return { orch, agentStore, taskStore, workspaceManager, taskId, agentId, runId };
   }
 
   it('clears current_task when merge conflict triggers forceTaskToReview', async () => {
@@ -101,7 +102,7 @@ describe('forceTaskToReview clears agent.current_task', () => {
   });
 
   it('task status is review after forceTaskToReview', async () => {
-    const { orch, taskStore, taskId, runId, agentId } = await setup({
+    const { orch, taskStore, workspaceManager, taskId, runId, agentId } = await setup({
       mergeResult: { success: false, conflictInfo: 'conflict' },
     });
 
@@ -109,5 +110,27 @@ describe('forceTaskToReview clears agent.current_task', () => {
 
     const updatedTask = await taskStore.get(taskId);
     expect(updatedTask!.status).toBe('review');
+  });
+
+  it('preserves governed branches and never auto-merges or auto-approves them', async () => {
+    const { orch, taskStore, workspaceManager, taskId, runId, agentId } = await setup({
+      mergeResult: { success: true },
+      labels: ['governed', 'autonomous'],
+    });
+    await (orch as any)._handleRunSuccess(taskId, runId, agentId, undefined, 'done', ['a.ts']);
+    const updatedTask = await taskStore.get(taskId);
+    expect(updatedTask!.status).toBe('review');
+    expect(updatedTask!.proof?.agent_summary).toContain('GOVERNED');
+    expect(workspaceManager.mergeBack).not.toHaveBeenCalled();
+    expect(workspaceManager.cleanup).not.toHaveBeenCalled();
+  });
+
+  it('never merges a generic branch before explicit approval', async () => {
+    const { orch, taskStore, workspaceManager, taskId, runId, agentId } = await setup({});
+    await (orch as any)._handleRunSuccess(taskId, runId, agentId, undefined, 'done', ['a.ts']);
+    expect((await taskStore.get(taskId))!.status).toBe('review');
+    expect(workspaceManager.inspect).toHaveBeenCalledOnce();
+    expect(workspaceManager.mergeBack).not.toHaveBeenCalled();
+    expect(workspaceManager.cleanup).not.toHaveBeenCalled();
   });
 });

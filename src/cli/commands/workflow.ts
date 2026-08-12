@@ -1,8 +1,6 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import type { Command } from "commander";
 import type { Container } from "../../container.js";
 import type {
@@ -42,6 +40,7 @@ interface WorkflowCommandDependencies {
   isTTY?: () => boolean;
   prompt?: WorkflowPrompt;
   readStdin?: () => Promise<string>;
+  confirmApproval?: (challenge: string) => Promise<string>;
 }
 
 interface StartOptions {
@@ -163,6 +162,7 @@ export function registerWorkflowCommand(
             throw new Error(
               "No meaningful deterministic check was found; configure an explicit trusted check before starting the workflow",
             );
+          if (!options.dryRun) await container.workflowSafeguards?.assertReady();
           const capabilities = await detect();
           validateRequestedCapabilities(options, capabilities);
           const basePreset = resolveWorkflowPreset(
@@ -390,6 +390,32 @@ export function registerWorkflowCommand(
     });
 
   workflow
+    .command("approve <job-id>")
+    .description("Approve the exact reviewed revision and run the guarded merge")
+    .requiredOption("--reason <reason>", "Audit reason for approving the merge")
+    .action(async (id: string, options: { reason: string }) => {
+      const job = await container.workflowStore.readJob(id);
+      if (!job?.current_commit || job.phase !== "awaiting_approval")
+        throw new Error(`Workflow ${id} is not awaiting approval`);
+      const expected = `approve ${job.current_commit.slice(0, 12)}`;
+      let answer: string;
+      if (dependencies.confirmApproval) {
+        answer = await dependencies.confirmApproval(expected);
+      } else {
+        const tty = dependencies.isTTY?.() ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+        if (!tty) throw new Error("Workflow approval requires an interactive terminal");
+        const owned = createReadlineWorkflowPrompt();
+        try { answer = await owned.prompt(`Type '${expected}' to approve the exact reviewed commit: `); }
+        finally { owned.close(); }
+      }
+      if (answer.trim() !== expected) throw new Error("Approval challenge did not match the reviewed commit");
+      await container.workflowEngine.approve(id, options.reason);
+      const result = await container.workflowEngine.run(id);
+      print(container, result);
+      if (result.phase === "failed") process.exitCode = 1;
+    });
+
+  workflow
     .command("pause <job-id>")
     .description("Pause a workflow")
     .action(async (id: string) => {
@@ -558,13 +584,7 @@ export function registerWorkflowCommand(
     .action(async (id: string) => {
       const passport = await container.workflowStore.readPassport(id);
       if (!passport) throw new Error(`Workflow job not found: ${id}`);
-      const root = path.join(
-        container.context.projectRoot,
-        ".orchestry",
-        "workflows",
-        id,
-        "artifacts",
-      );
+      const root = path.join(container.workflowStore.rootPath, id, "artifacts");
       const artifacts = passport.artifacts.map((item) => ({
         ...item,
         path: path.join(root, item.filename),
@@ -582,7 +602,12 @@ export function registerWorkflowCommand(
         version: process.version,
         compatible: Number(process.versions.node.split(".")[0]) >= 20,
       };
-      const git = await gitVersion();
+      const safeguardReport = container.workflowSafeguards
+        ? await container.workflowSafeguards.runDoctor()
+        : { checks: [], ready: true };
+      const git = safeguardReport.checks.find((check) => check.name === "git-hardening")?.passed
+        ? safeguardReport.checks.find((check) => check.name === "git-hardening")!.detail
+        : "unavailable";
       const capabilities = await (
         dependencies.detectCapabilities ?? defaultCapabilityDetector
       )();
@@ -598,6 +623,7 @@ export function registerWorkflowCommand(
         ...(node.compatible ? [] : ["Node.js 20 or newer is required"]),
         ...(git === "unavailable" ? ["Git is unavailable"] : []),
         ...configuredPresetBlockers(preset, capabilities),
+        ...safeguardReport.checks.filter((check) => !check.passed).map((check) => `${check.name}: ${check.detail}`),
       ];
       const descriptors = Object.fromEntries(
         Object.entries(capabilities).map(([name, item]) => [
@@ -614,11 +640,8 @@ export function registerWorkflowCommand(
         evaluated_preset: preset.name,
         ready: blockers.length === 0,
         blockers,
-        configuration: path.join(
-          container.context.projectRoot,
-          ".orchestry",
-          "config.yml",
-        ),
+        safeguards: safeguardReport,
+        configuration: container.paths.configPath,
       });
     });
 }
@@ -657,7 +680,7 @@ function explicitOverrides(
     adapter || model || selectedEffort
       ? {
           adapter: adapter ?? fallback.adapter,
-          model: model ?? fallback.model,
+           model: model ?? (adapter && adapter !== fallback.adapter ? "" : fallback.model),
           effort: selectedEffort ?? fallback.effort,
         }
       : undefined;
@@ -1033,7 +1056,12 @@ function roleFor(
   if (phase.startsWith("codex")) return "supervisor";
   if (phase === "fable_consultation") return "adviser";
   if (phase === "opus_execution") return "implementer";
-  if (phase === "verification" || phase === "merge_ready") return "reviewer";
+  if (
+    phase === "verification" ||
+    phase === "awaiting_approval" ||
+    phase === "merge_ready"
+  )
+    return "reviewer";
   return null;
 }
 function bindingFor(
@@ -1066,11 +1094,4 @@ async function defaultCapabilityDetector(): Promise<WorkflowCapabilities> {
   const { detectWorkflowCapabilities } =
     await import("../../infrastructure/workflow/native-adapters.js");
   return detectWorkflowCapabilities();
-}
-async function gitVersion(): Promise<string> {
-  try {
-    return (await promisify(execFile)("git", ["--version"])).stdout.trim();
-  } catch {
-    return "unavailable";
-  }
 }

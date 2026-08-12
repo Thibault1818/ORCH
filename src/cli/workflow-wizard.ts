@@ -3,7 +3,7 @@ import type { Readable, Writable } from 'node:stream';
 import type { AdapterCapabilityDescriptor, WorkflowCapabilityRole } from '../infrastructure/adapters/interface.js';
 import type { WorkflowLaunchPreset, WorkflowPresetAgent, WorkflowPresetEffort } from '../domain/workflow/presets.js';
 
-export type WorkflowCapabilities = Record<'codex' | 'claude' | 'fable' | 'grok' | 'antigravity', AdapterCapabilityDescriptor>;
+export type WorkflowCapabilities = Record<'codex' | 'claude' | 'opencode' | 'fable' | 'grok' | 'antigravity', AdapterCapabilityDescriptor>;
 export type WorkflowPrompt = (question: string) => Promise<string>;
 
 export interface WorkflowWizardInput {

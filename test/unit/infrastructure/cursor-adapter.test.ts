@@ -5,6 +5,7 @@ import type { AgentEvent, ExecuteParams } from '../../../src/infrastructure/adap
 import { AdapterErrorKind } from '../../../src/domain/errors.js';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
+import { adapterExecution, attachAdapterCommandRunner } from './adapter-command-runner.js';
 
 // Top-level mock so vi.mock hoisting applies to the whole module.
 // execFile is intercepted; by default both cursor-agent and agent binaries fail
@@ -45,12 +46,12 @@ function createMockProcess() {
 }
 
 function createMockProcessManager(proc: ReturnType<typeof createMockProcess>): IProcessManager {
-  return {
+  return attachAdapterCommandRunner({
     isAlive: vi.fn(() => true),
     kill: vi.fn(),
     killWithGrace: vi.fn(async () => {}),
     spawn: vi.fn(() => ({ process: proc as any, pid: proc.pid })),
-  };
+  }, proc as any, 'cursor-agent 1.0.0');
 }
 
 function makeParams(overrides?: Partial<ExecuteParams>): ExecuteParams {
@@ -58,6 +59,7 @@ function makeParams(overrides?: Partial<ExecuteParams>): ExecuteParams {
     prompt: 'cursor prompt',
     workspace: '/tmp/cursor-ws',
     config: { adapter: 'cursor' },
+    execution: adapterExecution,
     ...overrides,
   };
 }
@@ -290,10 +292,9 @@ describe('CursorAdapter', () => {
     it('returns ok: false with errorKind ADAPTER_NOT_FOUND when no cursor binary is found', async () => {
       const proc = createMockProcess();
       const pm = createMockProcessManager(proc);
+      vi.mocked((pm as any).resolveExecutable).mockRejectedValue(new Error('Executable not found'));
       const adapter = new CursorAdapter(pm);
 
-      // The module-level mock already makes execFile fail with ENOENT for all commands,
-      // so findCommand() returns null and test() returns ADAPTER_NOT_FOUND directly.
       const result = await adapter.test();
 
       expect(result.ok).toBe(false);

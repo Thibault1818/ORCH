@@ -82,6 +82,10 @@ interface ReviewResult {
 }
 interface TaskProof {
     branch?: string;
+    base_commit?: string;
+    reviewed_commit?: string;
+    reviewed_diff_hash?: string;
+    target_branch?: string;
     pr_url?: string;
     files_changed: string[];
     test_results?: string;
@@ -240,7 +244,7 @@ interface RunEvent {
 type RunEventType = 'agent_output' | 'file_changed' | 'command_run' | 'tool_call' | 'error' | 'done';
 
 declare const WORKFLOW_SCHEMA_VERSION: 2;
-type ProducingRole = 'fable' | 'codex' | 'opus' | 'orchestrator';
+type ProducingRole = 'fable' | 'codex' | 'opus' | 'orchestrator' | 'human';
 type CodexAction = 'DISPATCH_OPUS' | 'ACCEPT' | 'CORRECT_OPUS' | 'CONSULT_FABLE' | 'PAUSE' | 'STOP';
 type FablePurpose = 'COMPARE_BOUNDED_OPTIONS' | 'GENERATE_NONCRITICAL_ALTERNATIVES' | 'CHALLENGE_REVERSIBLE_PLAN';
 interface FableFallbackV1 {
@@ -302,6 +306,17 @@ interface CheckResults {
         output: string;
     }>;
 }
+interface HumanApprovalV1 {
+    schema_version: 1;
+    job_id: string;
+    target_branch: string;
+    base_commit: string;
+    reviewed_commit: string;
+    reviewed_diff_hash: string;
+    check_results_hash: string;
+    reason: string;
+    approved_at: string;
+}
 type CodexDecisionStage = 'pre_opus' | 'post_opus' | 'after_fable_pre' | 'after_fable_post';
 declare function validateCodexDecision(value: unknown, stage: CodexDecisionStage): CodexDecisionV2;
 declare function validateFableQuery(value: unknown): FableQueryV1;
@@ -309,6 +324,7 @@ declare function validateFableAdvice(value: unknown): FableAdviceV1;
 declare function validateFableFallbackRecord(value: unknown): FableFallbackRecordV1;
 declare function validateOpusResult(value: unknown): OpusResult;
 declare function validateCheckResults(value: unknown): CheckResults;
+declare function validateHumanApproval(value: unknown): HumanApprovalV1;
 
 declare const SEMANTIC_ROLES: readonly ["supervisor", "implementer", "adviser", "reviewer"];
 type SemanticRole = typeof SEMANTIC_ROLES[number];
@@ -352,7 +368,7 @@ declare function hashRosterSnapshot(value: WorkflowRosterSnapshot): string;
 declare function validateRosterAgent(value: unknown, label?: string): RosterAgent;
 declare function hashRosterAgent(value: RosterAgent): string;
 
-type WorkflowPhase = 'codex_pre_opus' | 'fable_consultation' | 'codex_after_fable' | 'opus_execution' | 'codex_post_opus' | 'verification' | 'merge_ready' | 'done' | 'blocked' | 'paused' | 'cancelled' | 'failed';
+type WorkflowPhase = 'codex_pre_opus' | 'fable_consultation' | 'codex_after_fable' | 'opus_execution' | 'codex_post_opus' | 'verification' | 'awaiting_approval' | 'merge_ready' | 'done' | 'blocked' | 'paused' | 'cancelled' | 'failed';
 declare const WORKFLOW_PHASE_TRANSITIONS: Readonly<Record<WorkflowPhase, readonly WorkflowPhase[]>>;
 declare function canTransitionWorkflow(from: WorkflowPhase, to: WorkflowPhase): boolean;
 declare function transitionWorkflow(from: WorkflowPhase, to: WorkflowPhase): WorkflowPhase;
@@ -1275,12 +1291,17 @@ interface ITeamStore {
 
 declare class Paths {
     private readonly projectRoot;
-    constructor(projectRoot: string);
+    private readonly stateRoot;
+    private readonly externalWorkspaceRoot;
+    constructor(projectRoot: string, stateRoot?: string, externalWorkspaceRoot?: string);
     /** Root .orchestry/ directory */
     get root(): string;
+    get projectConfigRoot(): string;
+    get workspacesRoot(): string;
     get configPath(): string;
     get statePath(): string;
     get lockPath(): string;
+    get processRegistryPath(): string;
     get tasksDir(): string;
     get agentsDir(): string;
     get runsDir(): string;
@@ -1461,11 +1482,123 @@ declare class MessageService {
 }
 
 /**
- * Agent adapter interface.
+ * Process management utilities.
  *
- * Every AI tool (Claude, Codex, Shell, etc.) implements this contract.
- * execute() returns an AsyncGenerator for pull-based streaming of events.
+ * Handles spawning subprocesses, PID checks, graceful kill.
  */
+
+interface ManagedSpawnOptions extends SpawnOptions {
+    owner?: string;
+    ownerTag?: string;
+}
+interface SpawnResult {
+    process: ChildProcess;
+    pid: number;
+    owner?: string;
+    ownerTag?: string;
+}
+interface IProcessManager {
+    isAlive(pid: number): boolean;
+    kill(pid: number, signal?: NodeJS.Signals): void;
+    killWithGrace(pid: number, graceMs?: number): Promise<void>;
+    spawn(command: string, args: string[], options?: ManagedSpawnOptions): SpawnResult;
+    active?(owner: string): number[];
+    awaitQuiescent?(owner: string, timeoutMs?: number): Promise<void>;
+}
+
+type CommandTermination = 'exited' | 'spawn_error' | 'timed_out' | 'stdout_limit' | 'stderr_limit' | 'integrity_error';
+interface ExecutableDescriptor {
+    path: string;
+    realpath: string;
+    sha256: string;
+}
+interface CommandRequest {
+    executable: string | ExecutableDescriptor;
+    executableDescriptor?: ExecutableDescriptor;
+    args?: readonly string[];
+    cwd?: string;
+    stdin?: string | Uint8Array;
+    stdio?: 'inherit';
+    env?: Readonly<NodeJS.ProcessEnv>;
+    timeoutMs: number;
+    maxStdoutBytes: number;
+    maxStderrBytes: number;
+    killGraceMs?: number;
+    owner?: unknown;
+    ownerTag?: unknown;
+    sandbox?: unknown;
+    macosSandbox?: unknown;
+    allowedExecutables?: readonly ExecutableDescriptor[];
+}
+interface CommandResult {
+    executable: string;
+    executableDescriptor: ExecutableDescriptor;
+    args: string[];
+    cwd: string | null;
+    pid: number | null;
+    ok: boolean;
+    termination: CommandTermination;
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+    stdoutBuffer: Buffer;
+    stdout: string;
+    stderr: string;
+    stdoutBytes: number;
+    stderrBytes: number;
+    stdoutTruncated: boolean;
+    stderrTruncated: boolean;
+    durationMs: number;
+    spawnError: {
+        message: string;
+        code: string | null;
+    } | null;
+    integrityError: string | null;
+    sandbox: {
+        executableDescriptor: ExecutableDescriptor;
+        profile: string;
+        proxyAddress: {
+            host: string;
+            port: number;
+        };
+    } | null;
+}
+interface StreamingCommandRequest {
+    executable: string | ExecutableDescriptor;
+    executableDescriptor?: ExecutableDescriptor;
+    args?: readonly string[];
+    cwd?: string;
+    stdin?: string | Uint8Array;
+    keepStdinOpen?: boolean;
+    env?: Readonly<NodeJS.ProcessEnv>;
+    timeoutMs?: number;
+    killGraceMs?: number;
+    owner?: unknown;
+    ownerTag?: unknown;
+    sandbox?: unknown;
+    macosSandbox?: unknown;
+    allowedExecutables?: readonly ExecutableDescriptor[];
+    signal?: AbortSignal;
+}
+interface StreamingCommandCompletion {
+    ok: boolean;
+    termination: CommandTermination;
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+    spawnError: {
+        message: string;
+        code: string | null;
+    } | null;
+    integrityError: string | null;
+}
+interface StreamingCommandHandle extends SpawnResult {
+    executableDescriptor: ExecutableDescriptor;
+    completion: Promise<StreamingCommandCompletion>;
+}
+interface ICommandRunner {
+    run(request: CommandRequest): Promise<CommandResult>;
+    start(request: StreamingCommandRequest): StreamingCommandHandle;
+    resolveExecutable?(command: string, pathValue?: string): Promise<ExecutableDescriptor>;
+}
 
 interface AdapterTestResult {
     ok: boolean;
@@ -1483,6 +1616,11 @@ interface ExecuteParams {
     security?: {
         allowPermissionBypass?: boolean;
         allowShellAdapter?: boolean;
+    };
+    execution: {
+        owner: string;
+        sandbox: unknown;
+        allowedExecutables: ExecutableDescriptor[];
     };
     persistPrompts?: boolean;
     signal?: AbortSignal;
@@ -1558,29 +1696,6 @@ declare class AdapterRegistry {
     has(kind: string): boolean;
 }
 
-/**
- * Process management utilities.
- *
- * Handles spawning subprocesses, PID checks, graceful kill.
- */
-
-interface SpawnResult {
-    process: ChildProcess;
-    pid: number;
-}
-interface IProcessManager {
-    isAlive(pid: number): boolean;
-    kill(pid: number, signal?: NodeJS.Signals): void;
-    killWithGrace(pid: number, graceMs?: number): Promise<void>;
-    spawn(command: string, args: string[], options?: SpawnOptions): SpawnResult;
-}
-
-/**
- * Git merge strategy for worktree branches.
- *
- * Encapsulates `git merge --no-ff` execution and conflict handling.
- */
-
 type MergeResult = {
     success: true;
 } | {
@@ -1595,10 +1710,20 @@ type MergeResult = {
 interface PrepareResult {
     path: string;
     branch?: string;
+    baseCommit?: string;
+    targetBranch?: string;
+}
+interface WorkspaceEvidence {
+    baseCommit: string;
+    commit: string;
+    diffHash: string;
+    changedFiles: string[];
+    targetBranch: string;
 }
 interface IWorkspaceManager {
     prepare(task: Task, agent: Agent, config: OrchestratorConfig): Promise<PrepareResult>;
-    mergeBack(branch: string): Promise<MergeResult>;
+    inspect(branch: string): Promise<WorkspaceEvidence>;
+    mergeBack(branch: string, expected: WorkspaceEvidence): Promise<MergeResult>;
     cleanup(taskId: string, branch?: string): Promise<void>;
     validate(workspacePath: string, projectRoot: string): void;
     /** Get files changed on a worktree branch relative to its merge-base. */
@@ -1694,6 +1819,140 @@ declare class SkillLoader implements ISkillLoader {
     private loadOne;
 }
 
+interface RoleUsage {
+    input_chars?: number;
+    output_chars?: number;
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_read?: number;
+    cache_write?: number;
+    duration_ms?: number;
+    compactions?: number;
+}
+interface RoleAttemptEvent {
+    attempt_key: string;
+    status: "started" | "succeeded" | "failed";
+    usage?: RoleUsage;
+    error?: unknown;
+}
+interface RoleResult<T> {
+    value: T;
+    session_id?: string;
+    session_mode?: "new" | "native_resume" | "passport_handoff" | "none";
+    resumed?: boolean;
+    resume_failed?: boolean;
+    usage?: RoleUsage;
+}
+interface FableCallOptions {
+    workspace: string;
+    model: string;
+    max_turns: 1;
+    effort: "low";
+    timeout_ms: number;
+    max_input_bytes: number;
+    max_output_bytes: number;
+}
+interface CodexDecisionEvidence {
+    evidence: GitEvidence | null;
+    checks: CheckResults | null;
+    opus: OpusResult | null;
+    fable_advice: FableAdviceV1 | null;
+}
+interface CodexRolePort {
+    decide(passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<CodexDecisionV2>>;
+    available(): Promise<{
+        available: boolean;
+        detail: string;
+    }>;
+}
+interface FableRolePort {
+    consult(jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<FableAdviceV1>>;
+    available(): Promise<{
+        available: boolean;
+        detail: string;
+    }>;
+}
+interface OpusRolePort {
+    execute(passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: "new" | "native_resume" | "passport_handoff", observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<OpusResult>>;
+    available(): Promise<{
+        available: boolean;
+        detail: string;
+    }>;
+}
+interface WorkflowRoleResolver {
+    availability(binding: RosterAgent, role: SemanticRole): Promise<{
+        available: boolean;
+        detail: string;
+    }>;
+    decide(binding: RosterAgent, passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<CodexDecisionV2>>;
+    execute(binding: RosterAgent, passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: "new" | "native_resume" | "passport_handoff", observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<OpusResult>>;
+    consult(binding: RosterAgent, jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<FableAdviceV1>>;
+}
+interface GitEvidence {
+    branch: string;
+    worktree: string;
+    commit: string;
+    diff: string;
+    diff_hash: string;
+    files_changed: string[];
+    insertions: number;
+    deletions: number;
+    risk_signals: string[];
+}
+interface WorkflowGitPort {
+    validateChecks(commands: string[], root?: string): Promise<string[]>;
+    prepare(jobId: string): Promise<{
+        branch: string;
+        worktree: string;
+        target_branch: string;
+        base_commit: string;
+    }>;
+    inspect(branch: string, worktree: string): Promise<GitEvidence>;
+    runChecks(worktree: string, commit: string, commands: string[]): Promise<CheckResults>;
+    currentCommit(branch: string): Promise<string>;
+    isMerged(branch: string, commit: string, targetBranch: string, baseCommit: string): Promise<boolean>;
+    merge(branch: string, expectedCommit: string, targetBranch: string, baseCommit: string): Promise<{
+        success: boolean;
+        detail: string;
+    }>;
+}
+interface WorkflowRolePorts {
+    codex: CodexRolePort;
+    fable: FableRolePort;
+    opus: OpusRolePort;
+    git: WorkflowGitPort;
+    safeguards: WorkflowRuntimePorts['safeguards'];
+}
+interface WorkflowRuntimePorts {
+    roles: WorkflowRoleResolver;
+    git: WorkflowGitPort;
+    safeguards: {
+        assertReady(): Promise<unknown>;
+        assertQuiescent(owner: string): Promise<void>;
+    };
+}
+declare class LegacyWorkflowRoleResolver implements WorkflowRoleResolver {
+    private readonly ports;
+    constructor(ports: Pick<WorkflowRolePorts, "codex" | "fable" | "opus">);
+    availability(binding: RosterAgent, role: SemanticRole): Promise<{
+        available: boolean;
+        detail: string;
+    }>;
+    decide(_binding: RosterAgent, passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<CodexDecisionV2>>;
+    execute(_binding: RosterAgent, passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: "new" | "native_resume" | "passport_handoff", observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<OpusResult>>;
+    consult(_binding: RosterAgent, jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<FableAdviceV1>>;
+}
+
+interface WorkflowExecutionSafeguards {
+    assertReady(): Promise<unknown>;
+    assertQuiescent(owner: string): Promise<void>;
+    executableAllowlist(extra?: readonly string[]): Promise<ExecutableDescriptor[]>;
+    proxyEndpoint(): Promise<{
+        host: string;
+        port: number;
+    }>;
+}
+
 interface OrchestratorDeps {
     taskStore: ITaskStore;
     agentStore: IAgentStore;
@@ -1703,6 +1962,16 @@ interface OrchestratorDeps {
     workspaceManager: IWorkspaceManager;
     templateEngine: ITemplateEngine;
     processManager: IProcessManager;
+    commandRunner: ICommandRunner;
+    reviewExecutables: {
+        npm: ExecutableDescriptor;
+        npx: ExecutableDescriptor;
+        node: ExecutableDescriptor;
+    };
+    executionSafeguards: WorkflowExecutionSafeguards & {
+        assertReady(): Promise<unknown>;
+        assertQuiescent(owner: string): Promise<void>;
+    };
     eventBus: EventBus;
     taskService: TaskService;
     agentService: AgentService;
@@ -1895,6 +2164,7 @@ declare class Orchestrator {
      * If any fail, stay in review with results attached.
      */
     private runAutoReview;
+    approveTask(taskId: string): Promise<void>;
     /**
      * Force a task to 'review' status with a summary prefix.
      * Used when merge-back fails (conflict or infrastructure error).
@@ -1943,6 +2213,7 @@ declare const ARTIFACT_FILES: {
     readonly opus_report: "opus-report-r%REV%-i%ITER%-a%SEQ%.json";
     readonly opus_diff: "opus-r%REV%-i%ITER%-a%SEQ%.diff";
     readonly test_results: "test-results-r%REV%-i%ITER%-a%SEQ%.json";
+    readonly human_approval: "human-approval-r%REV%-i%ITER%-a%SEQ%.json";
 };
 type ArtifactName = keyof typeof ARTIFACT_FILES;
 interface StoredArtifact<T = unknown> {
@@ -1963,7 +2234,11 @@ interface ArtifactWrite<T> {
 }
 declare class WorkflowArtifactStore {
     private readonly root;
-    constructor(projectRoot: string);
+    private readonly migrations;
+    constructor(projectRoot: string, options?: {
+        rootIsStateRoot?: boolean;
+    });
+    get rootPath(): string;
     createJob(job: WorkflowJobV1, passport: WorkflowPassportV1, sessions: WorkflowSessionsV1): Promise<void>;
     writeArtifact<T>(input: ArtifactWrite<T>): Promise<StoredArtifact<T>>;
     writeTextArtifact(input: Omit<ArtifactWrite<string>, "validate">): Promise<StoredArtifact<string>>;
@@ -1997,6 +2272,9 @@ declare class WorkflowArtifactStore {
     private latestArtifact;
     private artifactForInvocation;
     private write;
+    private ensureMigration;
+    private migrateOrRecover;
+    private applyMigration;
     private recoverTransition;
     private applyTransition;
     private recoverPassport;
@@ -2009,125 +2287,6 @@ declare class WorkflowArtifactStore {
     private lock;
 }
 declare function hashCanonical(value: unknown): string;
-
-interface RoleUsage {
-    input_chars?: number;
-    output_chars?: number;
-    input_tokens?: number;
-    output_tokens?: number;
-    cache_read?: number;
-    cache_write?: number;
-    duration_ms?: number;
-    compactions?: number;
-}
-interface RoleAttemptEvent {
-    attempt_key: string;
-    status: "started" | "succeeded" | "failed";
-    usage?: RoleUsage;
-    error?: unknown;
-}
-interface RoleResult<T> {
-    value: T;
-    session_id?: string;
-    session_mode?: "new" | "native_resume" | "passport_handoff" | "none";
-    resumed?: boolean;
-    resume_failed?: boolean;
-    usage?: RoleUsage;
-}
-interface FableCallOptions {
-    workspace: string;
-    model: string;
-    max_turns: 1;
-    effort: "low";
-    timeout_ms: number;
-    max_input_bytes: number;
-    max_output_bytes: number;
-}
-interface CodexDecisionEvidence {
-    evidence: GitEvidence | null;
-    checks: CheckResults | null;
-    opus: OpusResult | null;
-    fable_advice: FableAdviceV1 | null;
-}
-interface CodexRolePort {
-    decide(passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<CodexDecisionV2>>;
-    available(): Promise<{
-        available: boolean;
-        detail: string;
-    }>;
-}
-interface FableRolePort {
-    consult(jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<FableAdviceV1>>;
-    available(): Promise<{
-        available: boolean;
-        detail: string;
-    }>;
-}
-interface OpusRolePort {
-    execute(passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: "new" | "native_resume" | "passport_handoff", observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<OpusResult>>;
-    available(): Promise<{
-        available: boolean;
-        detail: string;
-    }>;
-}
-interface WorkflowRoleResolver {
-    availability(binding: RosterAgent, role: SemanticRole): Promise<{
-        available: boolean;
-        detail: string;
-    }>;
-    decide(binding: RosterAgent, passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<CodexDecisionV2>>;
-    execute(binding: RosterAgent, passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: "new" | "native_resume" | "passport_handoff", observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<OpusResult>>;
-    consult(binding: RosterAgent, jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<FableAdviceV1>>;
-}
-interface GitEvidence {
-    branch: string;
-    worktree: string;
-    commit: string;
-    diff: string;
-    diff_hash: string;
-    files_changed: string[];
-    insertions: number;
-    deletions: number;
-    risk_signals: string[];
-}
-interface WorkflowGitPort {
-    validateChecks(commands: string[], root?: string): Promise<string[]>;
-    prepare(jobId: string): Promise<{
-        branch: string;
-        worktree: string;
-        target_branch: string;
-        base_commit: string;
-    }>;
-    inspect(branch: string, worktree: string): Promise<GitEvidence>;
-    runChecks(worktree: string, commit: string, commands: string[]): Promise<CheckResults>;
-    currentCommit(branch: string): Promise<string>;
-    isMerged(branch: string, commit: string, targetBranch: string, baseCommit: string): Promise<boolean>;
-    merge(branch: string, expectedCommit: string, targetBranch: string, baseCommit: string): Promise<{
-        success: boolean;
-        detail: string;
-    }>;
-}
-interface WorkflowRolePorts {
-    codex: CodexRolePort;
-    fable: FableRolePort;
-    opus: OpusRolePort;
-    git: WorkflowGitPort;
-}
-interface WorkflowRuntimePorts {
-    roles: WorkflowRoleResolver;
-    git: WorkflowGitPort;
-}
-declare class LegacyWorkflowRoleResolver implements WorkflowRoleResolver {
-    private readonly ports;
-    constructor(ports: Pick<WorkflowRolePorts, "codex" | "fable" | "opus">);
-    availability(binding: RosterAgent, role: SemanticRole): Promise<{
-        available: boolean;
-        detail: string;
-    }>;
-    decide(_binding: RosterAgent, passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<CodexDecisionV2>>;
-    execute(_binding: RosterAgent, passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: "new" | "native_resume" | "passport_handoff", observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<OpusResult>>;
-    consult(_binding: RosterAgent, jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions, observer?: (event: RoleAttemptEvent) => Promise<void>): Promise<RoleResult<FableAdviceV1>>;
-}
 
 declare const DEFAULT_WORKFLOW_CONFIG: WorkflowConfig;
 interface StartWorkflowInput {
@@ -2144,6 +2303,7 @@ declare class WorkflowEngine {
     private readonly store;
     private readonly roles;
     private readonly git;
+    private readonly safeguards;
     constructor(store: WorkflowArtifactStore, ports: WorkflowRuntimePorts | WorkflowRolePorts);
     start(input: StartWorkflowInput): Promise<string>;
     run(jobId: string): Promise<WorkflowJobV2>;
@@ -2154,6 +2314,7 @@ declare class WorkflowEngine {
         reason?: string;
     }): Promise<WorkflowJobV2>;
     cancel(jobId: string): Promise<WorkflowJobV2>;
+    approve(jobId: string, reason: string): Promise<WorkflowJobV2>;
     private step;
     private codexDecision;
     private routeConsultation;
@@ -2211,6 +2372,255 @@ declare function validateExplicitChecks(projectRoot: string, checks: readonly st
 /** Reject shell syntax and commands outside the bounded deterministic grammar. */
 declare function validateDeterministicCheckCommands(checks: readonly string[]): string[];
 
+declare const GOVERNANCE_SCHEMA_VERSION: 3;
+declare const GOVERNANCE_KINDS: readonly ["binding_snapshot", "decomposition_plan", "check_binding", "candidate_evidence", "review_vote", "quorum_policy", "quorum_result", "integration_receipt", "human_approval"];
+type GovernanceRecordKindV3 = typeof GOVERNANCE_KINDS[number];
+type GovernanceActorRoleV3 = 'planner' | 'candidate' | 'reviewer' | 'checker' | 'integrator';
+interface Base {
+    schema_version: 3;
+    kind: GovernanceRecordKindV3;
+    governance_id: string;
+    record_id: string;
+}
+interface GovernanceRefV3<K extends GovernanceRecordKindV3 = GovernanceRecordKindV3> {
+    kind: K;
+    record_id: string;
+    record_hash: string;
+}
+interface GovernanceActorBindingV3 {
+    binding_id: string;
+    role: GovernanceActorRoleV3;
+    principal_id: string;
+    adapter: string;
+    model: string;
+}
+interface GovernanceCheckProvenanceV3 {
+    command_source: 'trusted';
+    execution_environment: 'sandboxed';
+}
+interface BindingSnapshotV3 extends Base {
+    kind: 'binding_snapshot';
+    bindings: GovernanceActorBindingV3[];
+    created_at: string;
+}
+interface DecompositionUnitV3 {
+    unit_id: string;
+    objective: string;
+    depends_on: string[];
+    owned_path_prefixes: string[];
+    acceptance_criteria: string[];
+    required_check_ids: string[];
+}
+interface DecompositionPlanV3 extends Base {
+    kind: 'decomposition_plan';
+    binding_snapshot: GovernanceRefV3<'binding_snapshot'>;
+    objective: string;
+    base_commit: string;
+    target_branch: string;
+    units: DecompositionUnitV3[];
+    integration_check_ids: string[];
+    created_by_binding_id: string;
+    created_at: string;
+}
+interface CheckBindingV3 extends Base {
+    kind: 'check_binding';
+    binding_snapshot: GovernanceRefV3<'binding_snapshot'>;
+    subject: {
+        kind: 'candidate' | 'integration';
+        id: string;
+        commit: string;
+    };
+    check_id: string;
+    command: string;
+    status: 'passed' | 'failed';
+    output_hash: string;
+    executed_by_binding_id: string;
+    provenance: GovernanceCheckProvenanceV3;
+    started_at: string;
+    completed_at: string;
+}
+interface CandidateEvidenceV3 extends Base {
+    kind: 'candidate_evidence';
+    plan: GovernanceRefV3<'decomposition_plan'>;
+    binding_snapshot: GovernanceRefV3<'binding_snapshot'>;
+    unit_id: string;
+    candidate_id: string;
+    produced_by_binding_id: string;
+    base_commit: string;
+    commit: string;
+    diff_hash: string;
+    changed_paths: string[];
+    check_bindings: GovernanceRefV3<'check_binding'>[];
+    summary: string;
+    created_at: string;
+}
+type ReviewSubjectRefV3 = GovernanceRefV3<'candidate_evidence'> | GovernanceRefV3<'integration_receipt'>;
+interface ReviewVoteV3 extends Base {
+    kind: 'review_vote';
+    binding_snapshot: GovernanceRefV3<'binding_snapshot'>;
+    subject: ReviewSubjectRefV3;
+    reviewer_binding_id: string;
+    decision: 'approve' | 'reject';
+    reason: string;
+    cast_at: string;
+}
+interface QuorumPolicyV3 extends Base {
+    kind: 'quorum_policy';
+    binding_snapshot: GovernanceRefV3<'binding_snapshot'>;
+    applies_to: 'candidate_evidence' | 'integration_receipt';
+    eligible_reviewer_binding_ids: string[];
+    minimum_approvals: number;
+    maximum_rejections: number;
+    require_distinct_principals: boolean;
+    human_approval_required: boolean;
+    created_by_binding_id: string;
+    created_at: string;
+}
+interface HumanApprovalV3 extends Base {
+    kind: 'human_approval';
+    subject: ReviewSubjectRefV3;
+    approved_by: string;
+    reason: string;
+    approved_at: string;
+}
+interface QuorumResultV3 extends Base {
+    kind: 'quorum_result';
+    policy: GovernanceRefV3<'quorum_policy'>;
+    subject: ReviewSubjectRefV3;
+    votes: GovernanceRefV3<'review_vote'>[];
+    human_approval: GovernanceRefV3<'human_approval'> | null;
+    approvals: number;
+    rejections: number;
+    satisfied: boolean;
+    evaluated_at: string;
+}
+interface IntegrationReceiptV3 extends Base {
+    kind: 'integration_receipt';
+    plan: GovernanceRefV3<'decomposition_plan'>;
+    binding_snapshot: GovernanceRefV3<'binding_snapshot'>;
+    integrated_by_binding_id: string;
+    target_branch: string;
+    base_commit: string;
+    candidates: Array<{
+        evidence: GovernanceRefV3<'candidate_evidence'>;
+        quorum_result: GovernanceRefV3<'quorum_result'>;
+    }>;
+    integrated_commit: string;
+    diff_hash: string;
+    check_bindings: GovernanceRefV3<'check_binding'>[];
+    integrated_at: string;
+}
+type GovernanceRecordV3 = BindingSnapshotV3 | DecompositionPlanV3 | CheckBindingV3 | CandidateEvidenceV3 | ReviewVoteV3 | QuorumPolicyV3 | QuorumResultV3 | IntegrationReceiptV3 | HumanApprovalV3;
+interface StoredGovernanceRecordV3<T extends GovernanceRecordV3 = GovernanceRecordV3> {
+    storage_version: 1;
+    record_hash: string;
+    record_hmac: string;
+    record: T;
+}
+declare function validateGovernanceRecordV3(value: unknown): GovernanceRecordV3;
+declare function validateBindingSnapshotV3(value: unknown): BindingSnapshotV3;
+declare function validateDecompositionPlanV3(value: unknown): DecompositionPlanV3;
+declare function validateCheckBindingV3(value: unknown): CheckBindingV3;
+declare function validateCandidateEvidenceV3(value: unknown): CandidateEvidenceV3;
+declare function validateReviewVoteV3(value: unknown): ReviewVoteV3;
+declare function validateQuorumPolicyV3(value: unknown): QuorumPolicyV3;
+declare function validateHumanApprovalV3(value: unknown): HumanApprovalV3;
+declare function validateQuorumResultV3(value: unknown): QuorumResultV3;
+declare function validateIntegrationReceiptV3(value: unknown): IntegrationReceiptV3;
+declare function validateGovernanceBranchV3(v: unknown): string;
+
+declare class GovernanceStoreV3 {
+    private readonly controllerKeyPath;
+    private readonly root;
+    private readonly projectRoot;
+    constructor(projectRoot: string, controllerKeyPath: string);
+    put<T extends GovernanceRecordV3>(input: T): Promise<StoredGovernanceRecordV3<T>>;
+    read(governanceId: string, kind: GovernanceRecordKindV3, recordId: string): Promise<StoredGovernanceRecordV3 | null>;
+    list(governanceId: string, kind: GovernanceRecordKindV3): Promise<StoredGovernanceRecordV3[]>;
+    private validateReferences;
+    private caseRoot;
+    private file;
+    private sign;
+    private key;
+    private lock;
+}
+declare function hashGovernanceRecordV3(value: GovernanceRecordV3): string;
+
+interface RecomputedGitEvidenceV3 {
+    base_commit: string;
+    commit: string;
+    diff_hash: string;
+    changed_paths: string[];
+}
+declare class GitEvidenceVerifierV3 {
+    private readonly projectRoot;
+    private readonly git;
+    constructor(projectRoot: string, runner: ICommandRunner);
+    recompute(baseCommit: string, commit: string): Promise<RecomputedGitEvidenceV3>;
+    assertAncestor(ancestor: string, descendant: string): Promise<void>;
+    assertPathComposition(candidate: string, integration: string, paths: readonly string[]): Promise<void>;
+}
+interface ProjectOperationLeaseV3 {
+    token: string;
+    assertOwned(): Promise<void>;
+    release(): Promise<void>;
+}
+interface ProjectOperationLockV3 {
+    acquire(owner: string): Promise<ProjectOperationLeaseV3>;
+}
+
+declare class GovernanceServiceV3 {
+    private readonly store;
+    private readonly git;
+    constructor(store: GovernanceStoreV3, git: GitEvidenceVerifierV3);
+    savePlan(plan: DecompositionPlanV3): Promise<StoredGovernanceRecordV3<DecompositionPlanV3>>;
+    saveCandidate(candidate: CandidateEvidenceV3): Promise<StoredGovernanceRecordV3<CandidateEvidenceV3>>;
+    saveReviewVote(vote: ReviewVoteV3): Promise<StoredGovernanceRecordV3<ReviewVoteV3>>;
+    evaluateQuorum(input: {
+        governance_id: string;
+        record_id: string;
+        policy: GovernanceRefV3<'quorum_policy'>;
+        subject: ReviewSubjectRefV3;
+        votes: GovernanceRefV3<'review_vote'>[];
+        human_approval?: GovernanceRefV3<'human_approval'> | null;
+        evaluated_at: string;
+    }): Promise<StoredGovernanceRecordV3<QuorumResultV3>>;
+    saveIntegration(receipt: IntegrationReceiptV3): Promise<StoredGovernanceRecordV3<IntegrationReceiptV3>>;
+    private required;
+}
+declare function assertNoParallelScopeOverlap(plan: DecompositionPlanV3): void;
+
+declare class GovernedMergeV3 {
+    private readonly projectRoot;
+    private readonly store;
+    private readonly evidence;
+    private readonly quiescence;
+    private readonly operationLock;
+    private readonly gitRunner;
+    constructor(projectRoot: string, store: GovernanceStoreV3, runner: ICommandRunner, evidence: GitEvidenceVerifierV3, quiescence: {
+        assertQuiescent(owner: string): Promise<void>;
+    }, operationLock: ProjectOperationLockV3);
+    approve(input: {
+        governance_id: string;
+        record_id: string;
+        integration_record_id: string;
+        integration_record_hash: string;
+        approved_by: string;
+        reason: string;
+        approved_at: string;
+    }): Promise<StoredGovernanceRecordV3<HumanApprovalV3>>;
+    merge(input: {
+        governance_id: string;
+        integration_record_id: string;
+        approval_record_id: string;
+    }): Promise<{
+        merged: true;
+        commit: string;
+    }>;
+    private git;
+    private revalidateQuorum;
+}
+
 /**
  * Clipboard service for detecting and extracting images from the system clipboard.
  *
@@ -2254,10 +2664,63 @@ declare function getClipboardImage(): Promise<ClipboardImage | null>;
  */
 interface CliContext {
     projectRoot: string;
+    stateRoot?: string;
+    workspaceRoot?: string;
     json: boolean;
     quiet: boolean;
     noColor: boolean;
     ascii: boolean;
+}
+
+interface EndpointProxyTarget {
+    host: string;
+    port: number;
+}
+interface EndpointProxyAddress {
+    host: string;
+    port: number;
+}
+
+interface SafeguardCheck {
+    name: string;
+    passed: boolean;
+    detail: string;
+}
+interface SafeguardReport {
+    schema_version: 1;
+    project_root: string;
+    state_root: string;
+    workspace_root: string;
+    platform: string;
+    checked_at: string;
+    policy_hash: string;
+    executables: ExecutableDescriptor[];
+    endpoints: EndpointProxyTarget[];
+    checks: SafeguardCheck[];
+    ready: boolean;
+}
+declare class WorkflowSafeguards {
+    private readonly projectRoot;
+    private readonly stateRoot;
+    private readonly workspaceRoot;
+    private readonly runner;
+    private readonly processes;
+    private readonly proxyCache;
+    constructor(projectRoot: string, stateRoot: string, workspaceRoot: string, runner: ICommandRunner, processes: IProcessManager);
+    get attestationPath(): string;
+    endpoints(): Promise<EndpointProxyTarget[]>;
+    proxyEndpoint(): Promise<EndpointProxyAddress>;
+    private proxyForEndpoints;
+    executableAllowlist(extra?: readonly string[]): Promise<ExecutableDescriptor[]>;
+    runDoctor(): Promise<SafeguardReport>;
+    assertReady(): Promise<SafeguardReport>;
+    assertQuiescent(owner: string): Promise<void>;
+    private adversarialSandboxProbe;
+    private discoverExecutables;
+    private assertExecutablesAttested;
+    private readVerifiedAttestation;
+    private writeAttestation;
+    private key;
 }
 
 /**
@@ -2381,15 +2844,21 @@ interface DoctorReport {
     adaptersReady: number;
     adaptersTotal: number;
 }
+interface DoctorExecutables {
+    git?: ExecutableDescriptor;
+    node?: ExecutableDescriptor;
+}
 declare class DoctorService {
     private readonly adapterRegistry;
-    private readonly processManager;
+    private readonly commandRunner;
+    private readonly executables;
     private readonly cwd;
-    constructor(adapterRegistry: AdapterRegistry, processManager: IProcessManager, projectRoot?: string);
+    constructor(adapterRegistry: AdapterRegistry, commandRunner: ICommandRunner, executables: DoctorExecutables, projectRoot?: string);
     runAll(): Promise<DoctorReport>;
     private checkCommand;
     private checkGitignore;
     private checkGitRepo;
+    private gitRepoFailure;
 }
 
 /**
@@ -2428,14 +2897,15 @@ interface LightContainer {
 /** Full container — everything from light + orchestrator, adapters, workspace, template. */
 interface Container extends LightContainer {
     processManager: IProcessManager;
+    commandRunner: ICommandRunner;
     adapterRegistry: AdapterRegistry;
-    workspaceManager: IWorkspaceManager;
     templateEngine: ITemplateEngine;
     skillLoader: ISkillLoader;
     doctorService: DoctorService;
     orchestrator: Orchestrator;
     workflowStore: WorkflowArtifactStore;
     workflowEngine: WorkflowEngine;
+    workflowSafeguards: WorkflowSafeguards;
 }
 /**
  * Build a light container (stores + services).
@@ -2454,4 +2924,4 @@ declare function buildFullContainer(context: CliContext): Promise<Container>;
  */
 declare function buildContainer(context: CliContext): Promise<Container>;
 
-export { AGENT_SHOP_TEMPLATES, ARTIFACT_FILES, type AdapterErrorHint, AdapterErrorKind, type AdapterKind, AdapterRegistry, type AdapterTestResult, type Agent, type AgentConfig, type AgentEvent, type AgentLastError, AgentNotFoundError, AgentService, type AgentShopTemplate, type AgentStats, type AgentStatus, type AgentUsage, type ApprovalPolicy, type ArtifactReference, type BindingRotation, type CheckResults, type ClipboardContentType, type ClipboardImage, type CodexAction, type CodexDecisionStage, type CodexDecisionV2, type CodexRolePort, type ConsultationOrigin, type ConsultationStatus, type Container, type CreateAgentInput, type CreateGoalInput, type CreateTaskInput, DEFAULT_WORKFLOW_CONFIG, ERROR_HINTS, EventBus, type EventPayload, type ExecuteParams, type FableAdviceV1, type FableFallbackReason, type FableFallbackRecordV1, type FableFallbackV1, type FablePurpose, type FableQueryV1, type FableRolePort, type FailurePhase, type Goal, GoalHasPendingTasksError, type GoalOrchestrationPhase, type GoalOrchestrationState, type GoalStatus, type GoalTaskRole, type IAgentAdapter, type ISkillLoader, LegacyWorkflowRoleResolver, type LightContainer, MODEL_TIER_MAP, type ModelTier, NotInitializedError, type OpusResult, type OpusRolePort, Orchestrator, type OrchestratorConfig, type OrchestratorEvent, type OrchestratorEventType, type OrchestratorState, OrchestryError, type PersistedFailure, type ProducingRole, type ProjectConfig, ROLE_PERMISSIONS, type ReasoningEffort, type RetryEntry, type RolePermissions, type RoleProfile, type RosterAgent, type RosterInput, type RosterProfileSnapshot, type Run, type RunEvent, type RunEventType, RunService, type RunStatus, type RunningEntry, SEMANTIC_ROLES, SUPPORTED_ADAPTERS, type SameAsSupervisor, type SchedulingConfig, type SemanticRole, type SessionMode, type SessionRotation, SkillLoader, type StartWorkflowInput, type Task, TaskNotFoundError, type TaskProof, TaskService, type TaskStatus, type TokenUsage, type ValidatedWorkflowPassportV2, WORKFLOW_PHASE_TRANSITIONS, WORKFLOW_SCHEMA_VERSION, type WorkflowArtifactMetadataV1, type WorkflowArtifactMetadataV2, WorkflowArtifactStore, type WorkflowConfig, type WorkflowConfigOverrides, type WorkflowDecision, type WorkflowEffectReceiptV2, WorkflowEngine, type WorkflowEventV1, type WorkflowEventV2, type WorkflowGitPort, type WorkflowInvocationReceiptV1, type WorkflowInvocationReceiptV2, type WorkflowJobV1, type WorkflowJobV2, type WorkflowLlmAttemptV1, type WorkflowMode, type WorkflowPassportV1, type WorkflowPassportV2, type WorkflowPhase, type WorkflowRolePorts, type WorkflowRoleResolver, type WorkflowRosterSnapshot, type WorkflowRuntimePorts, type WorkflowSessionsV1, type WorkflowSessionsV2, WorkspaceError, type WorkspaceMode, buildContainer, buildFullContainer, buildLightContainer, canTransition, canTransitionWorkflow, classifyAdapterError, createRosterSnapshot, createTokenUsage, defaultModelForAdapter, detectClipboardType, discoverDeterministicChecks, getClipboardImage, getShopTemplateByKey, hashCanonical, hashRosterAgent, hashRosterSnapshot, isAdapterKind, isBlocked, isClipboardToolAvailable, isDispatchable, isMcpSkill, isModelTier, isTerminal, isTerminalWorkflowPhase, legacyRosterSnapshot, resolveFailureStatus, resolveModel, templateToAgentInput, transitionWorkflow, validateCheckResults, validateCodexDecision, validateDeterministicCheckCommands, validateExplicitChecks, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult, validateRosterAgent, validateRosterSnapshot };
+export { AGENT_SHOP_TEMPLATES, ARTIFACT_FILES, type AdapterErrorHint, AdapterErrorKind, type AdapterKind, AdapterRegistry, type AdapterTestResult, type Agent, type AgentConfig, type AgentEvent, type AgentLastError, AgentNotFoundError, AgentService, type AgentShopTemplate, type AgentStats, type AgentStatus, type AgentUsage, type ApprovalPolicy, type ArtifactReference, type BindingRotation, type BindingSnapshotV3, type CandidateEvidenceV3, type CheckBindingV3, type CheckResults, type ClipboardContentType, type ClipboardImage, type CodexAction, type CodexDecisionStage, type CodexDecisionV2, type CodexRolePort, type ConsultationOrigin, type ConsultationStatus, type Container, type CreateAgentInput, type CreateGoalInput, type CreateTaskInput, DEFAULT_WORKFLOW_CONFIG, type DecompositionPlanV3, type DecompositionUnitV3, ERROR_HINTS, EventBus, type EventPayload, type ExecuteParams, type FableAdviceV1, type FableFallbackReason, type FableFallbackRecordV1, type FableFallbackV1, type FablePurpose, type FableQueryV1, type FableRolePort, type FailurePhase, GOVERNANCE_KINDS, GOVERNANCE_SCHEMA_VERSION, type Goal, GoalHasPendingTasksError, type GoalOrchestrationPhase, type GoalOrchestrationState, type GoalStatus, type GoalTaskRole, type GovernanceActorBindingV3, type GovernanceActorRoleV3, type GovernanceCheckProvenanceV3, type GovernanceRecordKindV3, type GovernanceRecordV3, type GovernanceRefV3, GovernanceServiceV3, GovernanceStoreV3, GovernedMergeV3, type HumanApprovalV1, type HumanApprovalV3, type IAgentAdapter, type ISkillLoader, type IntegrationReceiptV3, LegacyWorkflowRoleResolver, type LightContainer, MODEL_TIER_MAP, type ModelTier, NotInitializedError, type OpusResult, type OpusRolePort, Orchestrator, type OrchestratorConfig, type OrchestratorEvent, type OrchestratorEventType, type OrchestratorState, OrchestryError, type PersistedFailure, type ProducingRole, type ProjectConfig, type QuorumPolicyV3, type QuorumResultV3, ROLE_PERMISSIONS, type ReasoningEffort, type RetryEntry, type ReviewSubjectRefV3, type ReviewVoteV3, type RolePermissions, type RoleProfile, type RosterAgent, type RosterInput, type RosterProfileSnapshot, type Run, type RunEvent, type RunEventType, RunService, type RunStatus, type RunningEntry, SEMANTIC_ROLES, SUPPORTED_ADAPTERS, type SameAsSupervisor, type SchedulingConfig, type SemanticRole, type SessionMode, type SessionRotation, SkillLoader, type StartWorkflowInput, type StoredGovernanceRecordV3, type Task, TaskNotFoundError, type TaskProof, TaskService, type TaskStatus, type TokenUsage, type ValidatedWorkflowPassportV2, WORKFLOW_PHASE_TRANSITIONS, WORKFLOW_SCHEMA_VERSION, type WorkflowArtifactMetadataV1, type WorkflowArtifactMetadataV2, WorkflowArtifactStore, type WorkflowConfig, type WorkflowConfigOverrides, type WorkflowDecision, type WorkflowEffectReceiptV2, WorkflowEngine, type WorkflowEventV1, type WorkflowEventV2, type WorkflowGitPort, type WorkflowInvocationReceiptV1, type WorkflowInvocationReceiptV2, type WorkflowJobV1, type WorkflowJobV2, type WorkflowLlmAttemptV1, type WorkflowMode, type WorkflowPassportV1, type WorkflowPassportV2, type WorkflowPhase, type WorkflowRolePorts, type WorkflowRoleResolver, type WorkflowRosterSnapshot, type WorkflowRuntimePorts, type WorkflowSessionsV1, type WorkflowSessionsV2, WorkspaceError, type WorkspaceMode, assertNoParallelScopeOverlap, buildContainer, buildFullContainer, buildLightContainer, canTransition, canTransitionWorkflow, classifyAdapterError, createRosterSnapshot, createTokenUsage, defaultModelForAdapter, detectClipboardType, discoverDeterministicChecks, getClipboardImage, getShopTemplateByKey, hashCanonical, hashGovernanceRecordV3, hashRosterAgent, hashRosterSnapshot, isAdapterKind, isBlocked, isClipboardToolAvailable, isDispatchable, isMcpSkill, isModelTier, isTerminal, isTerminalWorkflowPhase, legacyRosterSnapshot, resolveFailureStatus, resolveModel, templateToAgentInput, transitionWorkflow, validateBindingSnapshotV3, validateCandidateEvidenceV3, validateCheckBindingV3, validateCheckResults, validateCodexDecision, validateDecompositionPlanV3, validateDeterministicCheckCommands, validateExplicitChecks, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateGovernanceBranchV3, validateGovernanceRecordV3, validateHumanApproval, validateHumanApprovalV3, validateIntegrationReceiptV3, validateOpusResult, validateQuorumPolicyV3, validateQuorumResultV3, validateReviewVoteV3, validateRosterAgent, validateRosterSnapshot };

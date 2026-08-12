@@ -1,4 +1,20 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs/promises';
+import { describe, it, expect, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({
+  run: vi.fn(async (request: { args: string[] }) => {
+    await fs.writeFile(request.args.at(-1)!, 'edited', 'utf8');
+    return { ok: true, exitCode: 0 };
+  }),
+  resolveExecutable: vi.fn(async () => ({ path: '/bin/vi', realpath: '/bin/vi', sha256: '0'.repeat(64) })),
+}));
+
+vi.mock('../../../src/infrastructure/process/command-runner.js', () => ({
+  CommandRunner: class { run = mocks.run; },
+  commandFailureMessage: () => 'editor failed',
+  resolveExecutable: mocks.resolveExecutable,
+}));
+
 import { toEditorContent, fromEditorContent } from '../../../src/cli/editor.js';
 
 describe('toEditorContent', () => {
@@ -59,10 +75,9 @@ describe('fromEditorContent', () => {
 });
 
 describe('openInEditor temp directory cleanup', () => {
-  it('imports rm from node:fs/promises for directory cleanup', async () => {
-    // Verify the module exports rm in its import list
-    const editorModule = await import('../../../src/cli/editor.js');
-    // The function exists — if rm wasn't imported, the finally block would throw
-    expect(typeof editorModule.openInEditor).toBe('function');
+  it('runs the editor with inherited stdio through CommandRunner', async () => {
+    const { openInEditor } = await import('../../../src/cli/editor.js');
+    await expect(openInEditor('initial')).resolves.toBe('edited');
+    expect(mocks.run).toHaveBeenCalledWith(expect.objectContaining({ stdio: 'inherit' }));
   });
 });

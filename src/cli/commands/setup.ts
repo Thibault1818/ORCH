@@ -4,8 +4,10 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import type { Command } from 'commander';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { CommandRunner, resolveExecutable } from '../../infrastructure/process/command-runner.js';
+import { ProcessManager } from '../../infrastructure/process/process-manager.js';
+
+const commandRunner = new CommandRunner(new ProcessManager());
 
 export function registerSetupCommand(program: Command): void {
   program.command('setup [integration]')
@@ -37,7 +39,22 @@ export function registerSetupCommand(program: Command): void {
       console.log(`Installed Claude integration: ${destination}`);
     });
 }
-async function version(command: string): Promise<string> { try { return (await promisify(execFile)(command, ['--version'])).stdout.trim(); } catch { return 'unavailable'; } }
+async function version(command: string): Promise<string> {
+  try {
+    const executable = await resolveExecutable(command);
+    const result = await commandRunner.run({
+      executable,
+      args: ['--version'],
+      env: process.env,
+      timeoutMs: 5_000,
+      maxStdoutBytes: 64 * 1024,
+      maxStderrBytes: 64 * 1024,
+    });
+    return result.ok ? result.stdout.trim() : 'unavailable';
+  } catch {
+    return 'unavailable';
+  }
+}
 
 async function confirm(question: string): Promise<boolean> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) return false;

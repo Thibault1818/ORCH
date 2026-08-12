@@ -6,6 +6,7 @@ import { AdapterErrorKind } from '../../../src/domain/errors.js';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
+import { adapterExecution, attachAdapterCommandRunner } from './adapter-command-runner.js';
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -38,12 +39,12 @@ function createMockProcess(): MockProcess {
 }
 
 function createMockProcessManager(proc: MockProcess): IProcessManager {
-  return {
+  return attachAdapterCommandRunner({
     isAlive: vi.fn(() => true),
     kill: vi.fn(),
     killWithGrace: vi.fn(async () => {}),
     spawn: vi.fn(() => ({ process: proc as unknown as ChildProcess, pid: proc.pid })),
-  };
+  }, proc as unknown as ChildProcess, 'pi 1.0.0');
 }
 
 function makeParams(overrides?: Partial<ExecuteParams>): ExecuteParams {
@@ -51,6 +52,7 @@ function makeParams(overrides?: Partial<ExecuteParams>): ExecuteParams {
     prompt: 'pi prompt',
     workspace: '/tmp/pi-ws',
     config: { adapter: 'pi' },
+    execution: adapterExecution,
     ...overrides,
   };
 }
@@ -380,22 +382,10 @@ describe('PiAdapter', () => {
       expect(result.version).toBe('pi 1.0.0');
     });
 
-    it('returns SPAWN_FAILED when pi is missing', async () => {
-      const { execFile } = await import('node:child_process');
-      vi.mocked(execFile).mockImplementationOnce(
-        (
-          _cmd: unknown,
-          _args: unknown,
-          cb: (err: Error | null, stdout: string, stderr: string) => void,
-        ) => {
-          const err = new Error('spawn pi ENOENT');
-          (err as NodeJS.ErrnoException).code = 'ENOENT';
-          cb(err, '', '');
-          return {} as ReturnType<typeof execFile>;
-        },
-      );
+    it('returns SPAWN_FAILED when the runner cannot resolve pi', async () => {
       const proc = createMockProcess();
       const pm = createMockProcessManager(proc);
+      vi.mocked((pm as any).resolveExecutable).mockRejectedValueOnce(new Error('spawn pi ENOENT'));
       const adapter = new PiAdapter(pm);
 
       const result = await adapter.test();

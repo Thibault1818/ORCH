@@ -8,7 +8,10 @@
 import { writeFile, readFile, unlink, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { CommandRunner, commandFailureMessage, resolveExecutable } from '../infrastructure/process/command-runner.js';
+import { ProcessManager } from '../infrastructure/process/process-manager.js';
+
+const commandRunner = new CommandRunner(new ProcessManager());
 
 export interface OpenInEditorOptions {
   /** File extension for the temp file (default: '.yml') */
@@ -37,15 +40,21 @@ export async function openInEditor(
 
   try {
     const parts = editor.split(/\s+/);
-    const child = spawn(parts[0]!, [...parts.slice(1), filePath], { stdio: 'inherit' });
-
-    await new Promise<void>((resolve, reject) => {
-      child.on('close', (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`Editor exited with code ${code}`));
-      });
-      child.on('error', reject);
+    const executable = await resolveExecutable(parts[0]!);
+    const result = await commandRunner.run({
+      executable,
+      args: [...parts.slice(1), filePath],
+      env: process.env,
+      stdio: 'inherit',
+      timeoutMs: 2_147_483_647,
+      maxStdoutBytes: 1,
+      maxStderrBytes: 1,
     });
+    if (!result.ok) {
+      throw new Error(result.termination === 'exited'
+        ? `Editor exited with code ${result.exitCode}`
+        : commandFailureMessage(result));
+    }
 
     return await readFile(filePath, 'utf8');
   } finally {

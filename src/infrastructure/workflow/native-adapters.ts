@@ -1,8 +1,7 @@
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import type {
   CheckResults,
   CodexDecisionStage,
@@ -16,7 +15,9 @@ import type {
   RosterAgent,
   SemanticRole,
 } from "../../domain/workflow/roster.js";
-import type { IProcessManager } from "../process/process-manager.js";
+import { ProcessManager, type IProcessManager } from "../process/process-manager.js";
+import { CommandRunner, commandFailureMessage, requireExecutable, resolveExecutable, type ExecutableDescriptor, type ICommandRunner } from "../process/command-runner.js";
+import { HardenedGit } from "../git/hardened-git.js";
 import { buildChildEnv } from "../adapters/utils.js";
 import type {
   AdapterCapabilityDescriptor,
@@ -35,12 +36,11 @@ import type {
   WorkflowRoleResolver,
 } from "../../application/workflow/ports.js";
 import { hashCanonical } from "./artifact-store.js";
+import { WorkflowDriverRegistry } from "./driver-registry.js";
 import { validateExplicitChecks } from "../../application/workflow/check-discovery.js";
 
-const execFileAsync = promisify(execFile);
-
 export class NativeCodexWorkflowAdapter implements CodexRolePort {
-  constructor(private readonly pm: IProcessManager) {}
+  constructor(private readonly pm: IProcessManager, private readonly runner?: ICommandRunner, private readonly safeguards?: WorkflowExecutionSafeguards) {}
   decide(
     passport: WorkflowPassportV2,
     stage: CodexDecisionStage,
@@ -135,6 +135,9 @@ export class NativeCodexWorkflowAdapter implements CodexRolePort {
     return observedCall(observe, async () => {
       const output = await spawnCapture(
         this.pm,
+        this.runner,
+        this.safeguards,
+        passport.job_id,
         "codex",
         args,
         cwd,
@@ -173,7 +176,7 @@ export class NativeCodexWorkflowAdapter implements CodexRolePort {
 }
 
 export class NativeFableWorkflowAdapter implements FableRolePort {
-  constructor(private readonly pm: IProcessManager) {}
+  constructor(private readonly pm: IProcessManager, private readonly runner?: ICommandRunner, private readonly safeguards?: WorkflowExecutionSafeguards) {}
   consult(
     jobId: string,
     consultationId: string,
@@ -190,6 +193,7 @@ export class NativeFableWorkflowAdapter implements FableRolePort {
         question: query.question,
         verification_method: query.verification_method,
       },
+      jobId,
       options,
       observe,
     );
@@ -204,6 +208,7 @@ export class NativeFableWorkflowAdapter implements FableRolePort {
   private async call<T>(
     instruction: string,
     projection: unknown,
+    jobId: string,
     options: FableCallOptions,
     observe: (event: RoleAttemptEvent) => Promise<void>,
   ): Promise<RoleResult<T>> {
@@ -213,7 +218,10 @@ export class NativeFableWorkflowAdapter implements FableRolePort {
     );
     const result = await observedCall(observe, () =>
       claudeCall(
-        this.pm,
+         this.pm,
+         this.runner,
+         this.safeguards,
+         jobId,
         prompt,
         options.workspace,
         options.model,
@@ -233,7 +241,7 @@ export class NativeFableWorkflowAdapter implements FableRolePort {
 }
 
 export class NativeOpusWorkflowAdapter implements OpusRolePort {
-  constructor(private readonly pm: IProcessManager) {}
+  constructor(private readonly pm: IProcessManager, private readonly runner?: ICommandRunner, private readonly safeguards?: WorkflowExecutionSafeguards) {}
   async execute(
     passport: WorkflowPassportV2,
     prompt: string,
@@ -272,7 +280,10 @@ export class NativeOpusWorkflowAdapter implements OpusRolePort {
     try {
       result = await observedCall(observe, () =>
         claudeCall(
-          this.pm,
+           this.pm,
+           this.runner,
+           this.safeguards,
+           passport.job_id,
           bounded(instruction, passport.config.max_input_bytes),
           workspace,
           profile.model,
@@ -289,7 +300,10 @@ export class NativeOpusWorkflowAdapter implements OpusRolePort {
       const handoff = `Task passport projection:\n${taskContext}\n\nDo not modify files outside allowed_file_scope when it is non-empty.\n\nThis is a new process using a compact passport handoff, not a resumed native session.\n${JSON.stringify(project(passport))}\n\n${prompt}\n\nImplement, test, and commit on the current worktree branch. End with strict JSON: job_id, status completed|partial|failed, files_changed, commands_run, tests_reported, deviations, unresolved, summary.`;
       result = await observedCall(observe, () =>
         claudeCall(
-          this.pm,
+         this.pm,
+         this.runner,
+         this.safeguards,
+         passport.job_id,
           bounded(handoff, passport.config.max_input_bytes),
           workspace,
           profile.model,
@@ -320,28 +334,54 @@ export class NativeOpusWorkflowAdapter implements OpusRolePort {
   }
 }
 
-export class NativeWorkflowRoleResolver implements WorkflowRoleResolver {
-  private readonly codex: NativeCodexWorkflowAdapter;
-  private readonly adviser: NativeFableWorkflowAdapter;
-  private readonly implementer: NativeOpusWorkflowAdapter;
+export class NativeOpenCodeWorkflowAdapter implements OpusRolePort {
+  constructor(private readonly pm: IProcessManager, private readonly runner?: ICommandRunner, private readonly safeguards?: WorkflowExecutionSafeguards) {}
 
-  constructor(pm: IProcessManager) {
-    this.codex = new NativeCodexWorkflowAdapter(pm);
-    this.adviser = new NativeFableWorkflowAdapter(pm);
-    this.implementer = new NativeOpusWorkflowAdapter(pm);
+  async execute(
+    passport: WorkflowPassportV2,
+    prompt: string,
+    workspace: string,
+    sessionId: string | null,
+    _mode: "new" | "native_resume" | "passport_handoff",
+    observe: (event: RoleAttemptEvent) => Promise<void> = async () => {},
+  ): Promise<RoleResult<OpusResult>> {
+    const profile = passport.config.profiles.opus;
+    if (!profile.model || !profile.model.includes("/"))
+      throw new Error("OpenCode workflow implementers require an explicit provider/model");
+    const recovery = sessionId ? `This is a new OpenCode process using a compact passport handoff.\n${JSON.stringify(project(passport))}\n\n` : "";
+    const instruction = bounded(`${recovery}${prompt}\n\nImplement and commit only in the current worktree. End with strict JSON: job_id, status completed|partial|failed, files_changed, commands_run, tests_reported, deviations, unresolved, summary.`, passport.config.max_input_bytes);
+    const result = await observedCall(observe, () => openCodeCall(this.pm, this.runner, this.safeguards, passport.job_id, instruction, workspace, profile.model, profile.timeout_ms, passport.config.max_output_bytes));
+    return {
+      value: parseJson<OpusResult>(result.text, result.usage),
+      session_id: result.sessionId,
+      session_mode: sessionId ? "passport_handoff" : "new",
+      resumed: false,
+      resume_failed: sessionId !== null,
+      usage: result.usage,
+    };
+  }
+
+  async available() {
+    const result = await capability("opencode");
+    return { available: result.available && result.unsupported_options.length === 0, detail: result.detail };
+  }
+}
+
+export class NativeWorkflowRoleResolver implements WorkflowRoleResolver {
+  private readonly registry: WorkflowDriverRegistry;
+
+  constructor(value: IProcessManager | WorkflowDriverRegistry, runner?: ICommandRunner, safeguards?: WorkflowExecutionSafeguards) {
+    if (!(value instanceof WorkflowDriverRegistry) && (!runner || !safeguards)) throw new Error('Native workflow execution requires a command runner and safeguards');
+    this.registry = value instanceof WorkflowDriverRegistry ? value : createNativeWorkflowDriverRegistry(value, runner!, safeguards!);
   }
 
   async availability(binding: RosterAgent, role: SemanticRole) {
-    if (!supports(binding, role))
-      return {
-        available: false,
-        detail: `Unsupported ${role} binding: ${binding.adapter}`,
-      };
-    return role === "supervisor" || role === "reviewer"
-      ? this.codex.available()
-      : role === "implementer"
-        ? this.implementer.available()
-        : this.adviser.available();
+    const driver = role === "implementer"
+      ? this.registry.get(binding.adapter, "implementer")
+      : role === "adviser"
+        ? this.registry.get(binding.adapter, "adviser")
+        : this.registry.get(binding.adapter, role);
+    return driver ? driver.available() : { available: false, detail: `Unsupported ${role} binding: ${binding.adapter}` };
   }
 
   decide(
@@ -352,13 +392,9 @@ export class NativeWorkflowRoleResolver implements WorkflowRoleResolver {
     threadId: string | null,
     observer?: (event: RoleAttemptEvent) => Promise<void>,
   ) {
-    assertSupported(
-      binding,
-      stage === "post_opus" || stage === "after_fable_post"
-        ? "reviewer"
-        : "supervisor",
-    );
-    return this.codex.decide(
+    const role = stage === "post_opus" || stage === "after_fable_post" ? "reviewer" : "supervisor";
+    const driver = this.registry.require(binding.adapter, role);
+    return driver.decide(
       withProfile(passport, "codex", binding),
       stage,
       evidence,
@@ -376,8 +412,8 @@ export class NativeWorkflowRoleResolver implements WorkflowRoleResolver {
     mode: "new" | "native_resume" | "passport_handoff",
     observer?: (event: RoleAttemptEvent) => Promise<void>,
   ) {
-    assertSupported(binding, "implementer");
-    return this.implementer.execute(
+    const driver = this.registry.require(binding.adapter, "implementer");
+    return driver.execute(
       withProfile(passport, "opus", binding),
       prompt,
       workspace,
@@ -395,8 +431,8 @@ export class NativeWorkflowRoleResolver implements WorkflowRoleResolver {
     options: FableCallOptions,
     observer?: (event: RoleAttemptEvent) => Promise<void>,
   ) {
-    assertSupported(binding, "adviser");
-    return this.adviser.consult(
+    const driver = this.registry.require(binding.adapter, "adviser");
+    return driver.consult(
       jobId,
       consultationId,
       query,
@@ -410,38 +446,63 @@ export class NativeWorkflowRoleResolver implements WorkflowRoleResolver {
   }
 }
 
+export function createNativeWorkflowDriverRegistry(pm: IProcessManager, runner: ICommandRunner, safeguards: WorkflowExecutionSafeguards): WorkflowDriverRegistry {
+  const codex = new NativeCodexWorkflowAdapter(pm, runner, safeguards);
+  const adviser = new NativeFableWorkflowAdapter(pm, runner, safeguards);
+  const implementer = new NativeOpusWorkflowAdapter(pm, runner, safeguards);
+  const openCode = new NativeOpenCodeWorkflowAdapter(pm, runner, safeguards);
+  return new WorkflowDriverRegistry()
+    .register("codex", "supervisor", codex)
+    .register("codex", "reviewer", codex)
+    .register("claude", "implementer", implementer)
+    .register("opencode", "implementer", openCode)
+    .register("claude", "adviser", adviser)
+    .register("fable", "adviser", adviser);
+}
+
 export class NativeWorkflowGitGateway implements WorkflowGitPort {
-  constructor(private readonly projectRoot: string) {}
+  private readonly runner: ICommandRunner;
+  private readonly gitRunner: Promise<HardenedGit>;
+  constructor(
+    private readonly projectRoot: string,
+    runner: ICommandRunner,
+    private readonly workspaceRoot = path.join(os.tmpdir(), "orchestry-workspaces"),
+    gitExecutable: ExecutableDescriptor,
+    private readonly executionSafeguards: WorkflowExecutionSafeguards,
+  ) {
+    const commandRunner = runner;
+    this.runner = commandRunner;
+    this.gitRunner = (async () => new HardenedGit(
+      commandRunner,
+      gitExecutable ?? await resolveExecutable("git"),
+      { configRoot: path.join(this.workspaceRoot, ".git-runtime") },
+    ))();
+  }
   validateChecks(commands: string[], root = this.projectRoot) {
     return validateExplicitChecks(root, commands);
   }
   async prepare(jobId: string) {
     const branch = `orchestry/workflow/${jobId}`;
     const target_branch = (
-      await git(this.projectRoot, ["branch", "--show-current"])
+      await this.git(this.projectRoot, ["branch", "--show-current"])
     ).trim();
     if (!target_branch) throw new Error("Controller must be on a named branch");
     const base_commit = (
-      await git(this.projectRoot, ["rev-parse", "HEAD"])
+      await this.git(this.projectRoot, ["rev-parse", "HEAD"])
     ).trim();
-    const worktree = path.join(
-      this.projectRoot,
-      ".orchestry",
-      "workspaces",
-      jobId,
-    );
+    const worktree = path.join(this.workspaceRoot, jobId);
     await fs.mkdir(path.dirname(worktree), { recursive: true, mode: 0o700 });
     try {
       const existingBranch = (
-        await git(worktree, ["branch", "--show-current"])
+        await this.git(worktree, ["branch", "--show-current"])
       ).trim();
       const existingCommit = (
-        await git(worktree, ["rev-parse", "HEAD"])
+        await this.git(worktree, ["rev-parse", "HEAD"])
       ).trim();
-      const status = (await git(worktree, ["status", "--porcelain"])).trim();
+      const status = (await this.git(worktree, ["status", "--porcelain"])).trim();
       if (existingBranch !== branch || existingCommit !== base_commit || status)
         throw new Error(
-          "Existing workflow worktree does not match the expected clean base",
+          "Existing workflow clone does not match the expected clean base",
         );
       return { branch, worktree, target_branch, base_commit };
     } catch (error) {
@@ -449,24 +510,11 @@ export class NativeWorkflowGitGateway implements WorkflowGitPort {
         throw error;
     }
     try {
-      await git(this.projectRoot, [
-        "worktree",
-        "add",
-        worktree,
-        "-b",
-        branch,
-        base_commit,
-      ]);
-    } catch {
-      const branchCommit = await git(this.projectRoot, ["rev-parse", branch])
-        .then((value) => value.trim())
-        .catch(() => null);
-      if (branchCommit !== base_commit)
-        throw new Error(
-          "Existing workflow branch does not match the expected base",
-        );
-      await git(this.projectRoot, ["worktree", "prune"]);
-      await git(this.projectRoot, ["worktree", "add", worktree, branch]);
+      await this.git(this.workspaceRoot, ["clone", "--local", "--no-hardlinks", this.projectRoot, worktree], { fileProtocol: "always" });
+      await this.git(worktree, ["checkout", "-b", branch, base_commit]);
+    } catch (error) {
+      await fs.rm(worktree, { recursive: true, force: true });
+      throw error;
     }
     await fs.rm(path.join(worktree, ".orchestry"), {
       recursive: true,
@@ -475,22 +523,22 @@ export class NativeWorkflowGitGateway implements WorkflowGitPort {
     return { branch, worktree, target_branch, base_commit };
   }
   async inspect(branch: string, worktree: string): Promise<GitEvidence> {
-    const status = (await git(worktree, ["status", "--porcelain"])).trim();
+    const status = (await this.git(worktree, ["status", "--porcelain"])).trim();
     if (status)
       throw new Error(
         "Opus worktree contains uncommitted changes; review requires a committed snapshot",
       );
-    const commit = (await git(worktree, ["rev-parse", "HEAD"])).trim();
+    const commit = (await this.git(worktree, ["rev-parse", "HEAD"])).trim();
     const base = (
-      await git(this.projectRoot, ["merge-base", "HEAD", branch])
+      await this.git(worktree, ["merge-base", `origin/${await this.targetBranch(worktree)}`, branch])
     ).trim();
-    const diff = await git(
-      this.projectRoot,
+    const diff = await this.git(
+      worktree,
       ["diff", "--binary", `${base}...${commit}`],
-      16 * 1024 * 1024,
+      { maxStdoutBytes: 16 * 1024 * 1024 },
     );
     const files = (
-      await git(this.projectRoot, [
+      await this.git(worktree, [
         "diff",
         "--name-only",
         `${base}...${commit}`,
@@ -499,7 +547,7 @@ export class NativeWorkflowGitGateway implements WorkflowGitPort {
       .trim()
       .split("\n")
       .filter(Boolean);
-    const stat = await git(this.projectRoot, [
+    const stat = await this.git(worktree, [
       "diff",
       "--numstat",
       `${base}...${commit}`,
@@ -532,23 +580,57 @@ export class NativeWorkflowGitGateway implements WorkflowGitPort {
     commands: string[],
   ): Promise<CheckResults> {
     const trusted = await this.validateChecks(commands, worktree);
+    const proxy = await this.executionSafeguards.proxyEndpoint();
+    const allowedExecutables = await this.executionSafeguards.executableAllowlist();
     const checks: CheckResults["checks"] = [];
     for (const command of trusted) {
       const [executable, ...args] = command.split(" ");
+      let executionRoot: string | null = null;
       try {
-        const { stdout, stderr } = await execFileAsync(executable!, args, {
+        const [absolute, beforeHead, beforeStatus] = await Promise.all([
+          resolveCheckExecutable(executable!, worktree),
+          this.git(worktree, ["rev-parse", "HEAD"]),
+          this.git(worktree, ["status", "--porcelain"]),
+        ]);
+        if (beforeHead.trim() !== commit || beforeStatus.trim())
+          throw new Error("Check worktree is not the exact clean reviewed commit");
+        executionRoot = await fs.mkdtemp(path.join(os.tmpdir(), "orch-check-"));
+        await Promise.all([
+          fs.mkdir(path.join(executionRoot, "home"), { mode: 0o700 }),
+          fs.mkdir(path.join(executionRoot, "xdg-config"), { mode: 0o700 }),
+          fs.mkdir(path.join(executionRoot, "xdg-cache"), { mode: 0o700 }),
+          fs.mkdir(path.join(executionRoot, "tmp"), { mode: 0o700 }),
+        ]);
+        const result = await this.runner.run({
+          executable: absolute,
+          args,
           cwd: worktree,
-          env: buildChildEnv(),
-          maxBuffer: 4 * 1024 * 1024,
+          env: checkEnvironment(executionRoot, worktree, absolute),
+          timeoutMs: 15 * 60_000,
+          maxStdoutBytes: 4 * 1024 * 1024,
+          maxStderrBytes: 4 * 1024 * 1024,
+          owner: path.basename(worktree),
+          allowedExecutables,
+           sandbox: { workspace: worktree, proxyAddress: proxy, writableWorkspace: true, readOnlyFiles: allowedExecutables.map((value) => value.realpath) },
         });
-        checks.push({ command, passed: true, output: `${stdout}${stderr}` });
+        const [afterHead, afterStatus] = await Promise.all([
+          this.git(worktree, ["rev-parse", "HEAD"]),
+          this.git(worktree, ["status", "--porcelain"]),
+        ]);
+        const unchanged = afterHead.trim() === commit && !afterStatus.trim();
+        checks.push({
+          command,
+          passed: result.ok && unchanged,
+          output: `${result.stdout}${result.stderr}${unchanged ? "" : "\nCheck mutated the reviewed worktree"}${result.ok ? "" : `\n${commandFailureMessage(result)}`}`,
+        });
       } catch (error) {
-        const e = error as Error & { stdout?: string; stderr?: string };
         checks.push({
           command,
           passed: false,
-          output: `${e.stdout ?? ""}${e.stderr ?? e.message}`,
+          output: error instanceof Error ? error.message : String(error),
         });
+      } finally {
+        if (executionRoot) await fs.rm(executionRoot, { recursive: true, force: true });
       }
     }
     return {
@@ -559,7 +641,7 @@ export class NativeWorkflowGitGateway implements WorkflowGitPort {
     };
   }
   async currentCommit(branch: string) {
-    return (await git(this.projectRoot, ["rev-parse", branch])).trim();
+    return (await this.git(this.cloneForBranch(branch), ["rev-parse", branch])).trim();
   }
   async isMerged(
     _branch: string,
@@ -569,26 +651,26 @@ export class NativeWorkflowGitGateway implements WorkflowGitPort {
   ) {
     try {
       const currentBranch = (
-        await git(this.projectRoot, ["branch", "--show-current"])
+        await this.git(this.projectRoot, ["branch", "--show-current"])
       ).trim();
       if (currentBranch !== targetBranch) return false;
-      await git(this.projectRoot, [
+      await this.git(this.projectRoot, [
         "merge-base",
         "--is-ancestor",
         baseCommit,
         targetBranch,
       ]);
-      await git(this.projectRoot, [
+      await this.git(this.projectRoot, [
         "merge-base",
         "--is-ancestor",
         commit,
         targetBranch,
       ]);
       const reviewedTree = (
-        await git(this.projectRoot, ["rev-parse", `${commit}^{tree}`])
+        await this.git(this.cloneForBranch(_branch), ["rev-parse", `${commit}^{tree}`])
       ).trim();
       const targetTree = (
-        await git(this.projectRoot, ["rev-parse", `${targetBranch}^{tree}`])
+        await this.git(this.projectRoot, ["rev-parse", `${targetBranch}^{tree}`])
       ).trim();
       return reviewedTree === targetTree;
     } catch {
@@ -608,7 +690,7 @@ export class NativeWorkflowGitGateway implements WorkflowGitPort {
           detail: "Refusing to merge a non-workflow branch",
         };
       const currentBranch = (
-        await git(this.projectRoot, ["branch", "--show-current"])
+        await this.git(this.projectRoot, ["branch", "--show-current"])
       ).trim();
       if (currentBranch !== targetBranch)
         return {
@@ -616,46 +698,91 @@ export class NativeWorkflowGitGateway implements WorkflowGitPort {
           detail: `Controller branch changed from ${targetBranch} to ${currentBranch}`,
         };
       const targetCommit = (
-        await git(this.projectRoot, ["rev-parse", "HEAD"])
+        await this.git(this.projectRoot, ["rev-parse", "HEAD"])
       ).trim();
       if (targetCommit !== baseCommit)
         return {
           success: false,
           detail: "Target branch changed since workflow start",
         };
-      const branchCommit = (
-        await git(this.projectRoot, ["rev-parse", branch])
-      ).trim();
+      const branchCommit = (await this.git(this.cloneForBranch(branch), ["rev-parse", branch])).trim();
       if (branchCommit !== expectedCommit)
         return {
           success: false,
           detail: "Workflow branch changed after review",
         };
       const status = (
-        await git(this.projectRoot, ["status", "--porcelain"])
+        await this.git(this.projectRoot, ["status", "--porcelain"])
       ).trim();
       if (status)
         return { success: false, detail: "Controller worktree is dirty" };
-      await git(this.projectRoot, [
+      const integrationRef = `refs/orchestry/integration/${path.basename(branch)}`;
+      await this.git(this.projectRoot, ["fetch", "--no-tags", this.cloneForBranch(branch), `${expectedCommit}:${integrationRef}`], { fileProtocol: "always" });
+      await this.git(this.projectRoot, [
         "merge",
         "--no-ff",
-        expectedCommit,
+        integrationRef,
         "-m",
         `Merge reviewed ${branch}`,
       ]);
       return { success: true, detail: "merged" };
     } catch (error) {
-      await git(this.projectRoot, ["merge", "--abort"]).catch(() => "");
+      await this.git(this.projectRoot, ["merge", "--abort"]).catch(() => "");
       return {
         success: false,
         detail: error instanceof Error ? error.message : String(error),
       };
     }
   }
+
+  private cloneForBranch(branch: string): string {
+    if (!branch.startsWith("orchestry/workflow/")) throw new Error("Invalid workflow branch");
+    return path.join(this.workspaceRoot, branch.slice("orchestry/workflow/".length));
+  }
+
+  private async targetBranch(worktree: string): Promise<string> {
+    const value = (await this.git(worktree, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).trim();
+    return value.replace(/^origin\//, "");
+  }
+
+  private async git(cwd: string, args: readonly string[], options: { fileProtocol?: "user" | "always"; maxStdoutBytes?: number } = {}): Promise<string> {
+    return (await this.gitRunner).run(cwd, args, options);
+  }
+}
+
+async function resolveCheckExecutable(command: string, worktree: string): Promise<string> {
+  if (["tsc", "vitest", "jest", "eslint", "biome"].includes(command)) {
+    const local = path.join(worktree, "node_modules", ".bin", command);
+    try { return await requireExecutable(local); } catch { /* use the approved PATH fallback */ }
+  }
+  return requireExecutable(command);
+}
+
+function checkEnvironment(root: string, worktree: string, executable: string): NodeJS.ProcessEnv {
+  const home = path.join(root, "home");
+  const pathEntries = [path.join(worktree, "node_modules", ".bin"), path.dirname(executable), path.dirname(process.execPath), "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+  return {
+    ...buildChildEnv(),
+    PATH: [...new Set(pathEntries)].join(path.delimiter),
+    HOME: home,
+    XDG_CONFIG_HOME: path.join(root, "xdg-config"),
+    XDG_CACHE_HOME: path.join(root, "xdg-cache"),
+    TMPDIR: path.join(root, "tmp"),
+    NPM_CONFIG_CACHE: path.join(root, "npm-cache"),
+    NPM_CONFIG_USERCONFIG: path.join(root, "npmrc"),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+    CI: "1",
+    NO_COLOR: "1",
+  };
 }
 
 async function claudeCall(
   pm: IProcessManager,
+  runner: ICommandRunner | undefined,
+  safeguards: WorkflowExecutionSafeguards | undefined,
+  owner: string,
   prompt: string,
   cwd: string,
   model: string,
@@ -690,6 +817,9 @@ async function claudeCall(
     );
   const output = await spawnCapture(
     pm,
+    runner,
+    safeguards,
+    owner,
     "claude",
     args,
     cwd,
@@ -721,48 +851,90 @@ async function claudeCall(
     },
   };
 }
+async function openCodeCall(pm: IProcessManager, runner: ICommandRunner | undefined, safeguards: WorkflowExecutionSafeguards | undefined, owner: string, prompt: string, cwd: string, model: string, timeout: number, maxOutput: number) {
+  const args = ["run", "--format", "json", "--pure", "--model", model];
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "orch-opencode-"));
+  const home = path.join(root, "home");
+  const xdgConfig = path.join(root, "xdg-config");
+  const xdgData = path.join(root, "xdg-data");
+  const xdgCache = path.join(root, "xdg-cache");
+  await Promise.all([home, xdgConfig, xdgData, xdgCache].map((dir) => fs.mkdir(dir, { recursive: true, mode: 0o700 })));
+  const configPath = path.join(root, "opencode.json");
+  await fs.writeFile(configPath, JSON.stringify({ $schema: "https://opencode.ai/config.json", model, small_model: model, share: "disabled", enabled_providers: [model.split("/")[0]], plugin: [], mcp: {} }), { mode: 0o600 });
+  let output: string;
+  try {
+    output = await spawnCapture(pm, runner, safeguards, owner, "opencode", args, cwd, prompt, maxOutput, timeout, {
+      HOME: home,
+      XDG_CONFIG_HOME: xdgConfig,
+      XDG_DATA_HOME: xdgData,
+      XDG_CACHE_HOME: xdgCache,
+      OPENCODE_CONFIG: configPath,
+      OPENCODE_DISABLE_MODELS_FETCH: "1",
+      OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
+      OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1",
+      OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+    });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+  let text = "";
+  let sessionId: string | undefined;
+  let usage: Record<string, number> = {};
+  for (const line of output.split("\n").filter(Boolean).map(parseObject)) {
+    const part = object(line.part);
+    if (line.type === "text" && typeof part.text === "string") text += part.text;
+    if (typeof line.sessionID === "string") sessionId = line.sessionID;
+    if (line.type === "step_finish") usage = usageObject(part.tokens);
+  }
+  if (!text) throw new Error("OpenCode returned no result");
+  return { text, sessionId, usage: { input_tokens: usage.input, output_tokens: usage.output, duration_ms: undefined } };
+}
 async function spawnCapture(
   pm: IProcessManager,
+  runner: ICommandRunner | undefined,
+  safeguards: WorkflowExecutionSafeguards | undefined,
+  owner: string,
   command: string,
   args: string[],
   cwd: string,
   input: string,
   maxBytes: number,
   timeoutMs: number,
+  extraEnv?: Record<string, string>,
 ): Promise<string> {
-  const { process: child, pid } = pm.spawn(command, args, {
+  const effectiveRunner = runner ?? new CommandRunner(pm);
+  const executable = effectiveRunner.resolveExecutable
+    ? await effectiveRunner.resolveExecutable(command)
+    : await resolveExecutable(command);
+  const allowedExecutables = safeguards ? await safeguards.executableAllowlist([command]) : [executable];
+  const sandbox = safeguards ? {
+    workspace: cwd,
+    proxyAddress: await safeguards.proxyEndpoint(),
+    writableWorkspace: true,
+    readOnlyPaths: allowedExecutables.map((value) => value.realpath),
+  } : undefined;
+  const result = await effectiveRunner.run({
+    executable,
+    args,
     cwd,
-    env: buildChildEnv(),
-    stdio: ["pipe", "pipe", "pipe"],
+    stdin: input,
+    env: buildChildEnv(undefined, extraEnv),
+    timeoutMs,
+    maxStdoutBytes: maxBytes,
+    maxStderrBytes: 64_000,
+    owner,
+    allowedExecutables,
+    ...(sandbox ? { sandbox } : {}),
   });
-  let stdout = "";
-  let stderr = "";
-  let exceeded = false;
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    void pm.killWithGrace(pid, 1_000);
-  }, timeoutMs);
-  child.stdout?.on("data", (chunk: Buffer) => {
-    stdout += chunk.toString();
-    if (Buffer.byteLength(stdout) > maxBytes) {
-      exceeded = true;
-      void pm.killWithGrace(pid, 1_000);
-    }
-  });
-  child.stderr?.on("data", (chunk: Buffer) => {
-    if (stderr.length < 64_000) stderr += chunk.toString();
-  });
-  child.stdin?.end(input);
-  const code = await new Promise<number>((resolve, reject) => {
-    child.on("close", (value) => resolve(value ?? 1));
-    child.on("error", reject);
-  }).finally(() => clearTimeout(timer));
-  if (timedOut) throw new Error(`${command} timed out after ${timeoutMs}ms`);
-  if (exceeded)
-    throw new Error(`${command} output exceeded configured maximum`);
-  if (code !== 0) throw new Error(`${command} exited ${code}: ${stderr}`);
-  return stdout;
+  if (!result.ok) throw new Error(commandFailureMessage(result));
+  return result.stdout;
+}
+
+export interface WorkflowExecutionSafeguards {
+  assertReady(): Promise<unknown>;
+  assertQuiescent(owner: string): Promise<void>;
+  executableAllowlist(extra?: readonly string[]): Promise<ExecutableDescriptor[]>;
+  proxyEndpoint(): Promise<{ host: string; port: number }>;
 }
 async function observedCall<T extends { usage?: RoleResult<unknown>["usage"] }>(
   observe: (event: RoleAttemptEvent) => Promise<void>,
@@ -796,25 +968,27 @@ async function observedCall<T extends { usage?: RoleResult<unknown>["usage"] }>(
     throw error;
   }
 }
-export async function detectWorkflowCapabilities(): Promise<
+export async function detectWorkflowCapabilities(runner?: ICommandRunner): Promise<
   Record<
-    "codex" | "claude" | "fable" | "grok" | "antigravity",
+    "codex" | "claude" | "opencode" | "fable" | "grok" | "antigravity",
     AdapterCapabilityDescriptor
   >
 > {
-  const [codex, claude, fable, grok, antigravity] = await Promise.all([
-    capability("codex"),
-    capability("claude", "opus"),
-    capability("claude", "fable"),
-    capability("grok"),
-    capability("agy"),
+  const [codex, claude, opencode, fable, grok, antigravity] = await Promise.all([
+    capability("codex", "opus", runner),
+    capability("claude", "opus", runner),
+    capability("opencode", "opus", runner),
+    capability("claude", "fable", runner),
+    capability("grok", "opus", runner),
+    capability("agy", "opus", runner),
   ]);
-  return { codex, claude, fable, grok, antigravity };
+  return { codex, claude, opencode, fable, grok, antigravity };
 }
 
 async function capability(
-  command: "codex" | "claude" | "grok" | "agy",
+  command: "codex" | "claude" | "opencode" | "grok" | "agy",
   role: "opus" | "fable" = "opus",
+  providedRunner?: ICommandRunner,
 ): Promise<AdapterCapabilityDescriptor> {
   const adapter =
     command === "agy"
@@ -824,15 +998,14 @@ async function capability(
         : command;
   try {
     const env = buildChildEnv();
-    const [{ stdout: version }, { stdout: help }] = await Promise.all([
-      execFileAsync(command, ["--version"], { env, timeout: 5_000 }),
-      execFileAsync(command, ["--help"], {
-        env,
-        timeout: 5_000,
-        maxBuffer: 1024 * 1024,
-      }),
+    const runner = providedRunner ?? new CommandRunner(new ProcessManager());
+    const executable = runner.resolveExecutable ? await runner.resolveExecutable(command) : await resolveExecutable(command);
+    const helpArgs = command === "opencode" ? ["run", "--help"] : ["--help"];
+    const [{ stdout: version, stderr: versionError }, { stdout: help, stderr: helpError }] = await Promise.all([
+      runner.run({ executable, args: ["--version"], env, timeoutMs: 5_000, maxStdoutBytes: 1024 * 1024, maxStderrBytes: 1024 * 1024 }),
+      runner.run({ executable, args: helpArgs, env, timeoutMs: 5_000, maxStdoutBytes: 1024 * 1024, maxStderrBytes: 1024 * 1024 }),
     ]);
-    return describeCapability(adapter, command, role, version.trim(), help);
+    return describeCapability(adapter, command, role, `${version}${versionError}`.trim(), `${help}${helpError}`);
   } catch {
     return unavailableCapability(adapter, command);
   }
@@ -867,6 +1040,8 @@ function describeCapability(
         : claudeBase
       : command === "codex"
         ? ["exec", "--json", "--sandbox", "--model"]
+        : command === "opencode"
+          ? ["--format", "--model", "--pure"]
         : [];
   const unsupported = required.filter((flag) => !help.includes(flag));
   const advertisedResume =
@@ -877,12 +1052,14 @@ function describeCapability(
     advertisedResume &&
     role !== "fable" &&
     process.env.ORCHESTRY_ENABLE_NATIVE_RESUME === "1";
-  const secureTransport = command === "codex" || command === "claude";
+  const secureTransport = command === "codex" || command === "claude" || command === "opencode";
   const compatibleRoles: WorkflowCapabilityRole[] =
     command === "codex"
       ? ["supervisor", "reviewer"]
       : command === "claude" && role === "opus"
         ? ["implementer"]
+        : command === "opencode"
+          ? ["implementer"]
         : command === "claude"
           ? ["adviser"]
           : [];
@@ -922,6 +1099,8 @@ function describeCapability(
     structured_output:
       command === "codex"
         ? { supported: help.includes("--json"), format: "jsonl" }
+        : command === "opencode"
+          ? { supported: help.includes("--format"), format: "jsonl" }
         : command === "claude"
           ? {
               supported: help.includes("--output-format"),
@@ -943,7 +1122,7 @@ function describeCapability(
     resume: { advertised: advertisedResume, enabled: nativeResume },
     role_compatibility: roleCompatibility,
     models: {
-      cli_default: secureTransport,
+      cli_default: secureTransport && command !== "opencode",
       verified:
         command === "claude" && role === "opus"
           ? [{ id: "opus", source: "trusted_catalog" }]
@@ -974,7 +1153,7 @@ function unavailableCapability(
     installed: false,
     version: null,
     transport:
-      command === "codex" || command === "claude" ? "stdin" : "unsupported",
+      command === "codex" || command === "claude" || command === "opencode" ? "stdin" : "unsupported",
     structured_output: { supported: false, format: null },
     sandbox: { supported: false, mode: null },
     tools: { configurable: false, mode: "unknown" },
@@ -991,14 +1170,6 @@ function unavailableCapability(
     advertised_native_resume: false,
     native_resume: false,
   };
-}
-async function git(cwd: string, args: string[], maxBuffer = 4 * 1024 * 1024) {
-  const { stdout } = await execFileAsync("git", args, {
-    cwd,
-    env: buildChildEnv(),
-    maxBuffer,
-  });
-  return stdout;
 }
 function parseObject(line: string): Record<string, unknown> {
   try {
@@ -1078,16 +1249,6 @@ function project(passport: WorkflowPassportV2) {
     session_references: passport.session_references,
     session_modes: passport.session_modes,
   };
-}
-function supports(binding: RosterAgent, role: SemanticRole): boolean {
-  if (role === "supervisor" || role === "reviewer")
-    return binding.adapter === "codex";
-  if (role === "implementer") return binding.adapter === "claude";
-  return binding.adapter === "claude" || binding.adapter === "fable";
-}
-function assertSupported(binding: RosterAgent, role: SemanticRole): void {
-  if (!supports(binding, role))
-    throw new Error(`Unsupported ${role} binding: ${binding.adapter}`);
 }
 function withProfile(
   passport: WorkflowPassportV2,

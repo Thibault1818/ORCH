@@ -5,6 +5,7 @@ import type { AgentEvent, ExecuteParams } from '../../../src/infrastructure/adap
 import { AdapterErrorKind } from '../../../src/domain/errors.js';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
+import { adapterExecution, attachAdapterCommandRunner } from './adapter-command-runner.js';
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -39,12 +40,12 @@ function createMockProcess() {
 }
 
 function createMockProcessManager(proc: ReturnType<typeof createMockProcess>): IProcessManager {
-  return {
+  return attachAdapterCommandRunner({
     isAlive: vi.fn(() => true),
     kill: vi.fn(),
     killWithGrace: vi.fn(async () => {}),
     spawn: vi.fn(() => ({ process: proc as any, pid: proc.pid })),
-  };
+  }, proc as any, '1.2.26');
 }
 
 function makeParams(overrides?: Partial<ExecuteParams>): ExecuteParams {
@@ -52,6 +53,7 @@ function makeParams(overrides?: Partial<ExecuteParams>): ExecuteParams {
     prompt: 'test prompt',
     workspace: '/tmp/workspace',
     config: { adapter: 'opencode' },
+    execution: adapterExecution,
     ...overrides,
   };
 }
@@ -431,23 +433,10 @@ describe('OpenCodeAdapter', () => {
   });
 
   describe('test', () => {
-    it('returns errorKind SPAWN_FAILED when execFile throws ENOENT', async () => {
-      const { execFile } = await import('node:child_process');
-      vi.mocked(execFile).mockImplementationOnce(
-        (
-          _cmd: unknown,
-          _args: unknown,
-          cb: (err: Error | null, stdout: string, stderr: string) => void,
-        ) => {
-          const err = new Error('spawn opencode ENOENT');
-          (err as NodeJS.ErrnoException).code = 'ENOENT';
-          cb(err, '', '');
-          return {} as ReturnType<typeof execFile>;
-        },
-      );
-
+    it('returns errorKind SPAWN_FAILED when the runner cannot resolve the CLI', async () => {
       const proc = createMockProcess();
       const pm = createMockProcessManager(proc);
+      vi.mocked((pm as any).resolveExecutable).mockRejectedValueOnce(new Error('spawn opencode ENOENT'));
       const adapter = new OpenCodeAdapter(pm);
 
       const result = await adapter.test();

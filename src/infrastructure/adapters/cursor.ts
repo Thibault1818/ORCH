@@ -11,19 +11,14 @@
 
 import type { IAgentAdapter, AdapterTestResult, ExecuteParams, AgentEvent, ExecuteHandle } from './interface.js';
 import type { IProcessManager } from '../process/process-manager.js';
-import { extractTokens, createStreamingEvents, buildFullPrompt, buildChildEnv } from './utils.js';
+import type { ICommandRunner } from '../process/command-runner.js';
+import { extractTokens, createStreamingEvents, buildFullPrompt, buildChildEnv, adapterCommandRunner, probeVersion } from './utils.js';
 import { classifyAdapterError, AdapterErrorKind } from '../../domain/errors.js';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
-
 /** Try multiple command names and return the first that works */
-async function findCommand(): Promise<{ command: string; version: string } | null> {
+async function findCommand(runner: ICommandRunner): Promise<{ command: string; version: string } | null> {
   for (const cmd of ['cursor-agent', 'agent']) {
     try {
-      const { stdout } = await execFileAsync(cmd, ['--version']);
-      return { command: cmd, version: stdout.trim() };
+      return { command: cmd, version: await probeVersion(runner, cmd) };
     } catch {
       // try next
     }
@@ -36,10 +31,14 @@ export class CursorAdapter implements IAgentAdapter {
 
   private resolvedCommand: string = 'cursor-agent';
 
-  constructor(private readonly processManager: IProcessManager) {}
+  private readonly runner: ICommandRunner;
+
+  constructor(private readonly processManager: IProcessManager, runner?: ICommandRunner) {
+    this.runner = adapterCommandRunner(processManager, runner);
+  }
 
   async test(): Promise<AdapterTestResult> {
-    const found = await findCommand();
+    const found = await findCommand(this.runner);
     if (found) {
       this.resolvedCommand = found.command;
       return { ok: true, version: found.version };
@@ -66,22 +65,22 @@ export class CursorAdapter implements IAgentAdapter {
       args.push('--model', params.config.model);
     }
 
-    const { process: proc, pid } = this.processManager.spawn(this.resolvedCommand, args, {
+    const command = this.runner.start({
+      executable: this.resolvedCommand,
+      args,
       cwd: params.workspace,
       env: buildChildEnv(params.env),
       signal: params.signal,
-      stdio: ['pipe', 'pipe', 'pipe'], // stdin must be 'pipe' to send prompt
+      stdin: buildFullPrompt(params.systemPrompt, params.prompt),
+      timeoutMs: params.config.timeout_ms,
+      owner: params.execution.owner,
+      sandbox: params.execution.sandbox,
+      allowedExecutables: params.execution.allowedExecutables,
     });
 
-    // Pipe prompt via stdin — prepend system prompt if present (Cursor has no native --system-prompt)
-    if (proc.stdin) {
-      proc.stdin.write(buildFullPrompt(params.systemPrompt, params.prompt));
-      proc.stdin.end();
-    }
+    const events = createStreamingEvents(command, parseCursorEvent, 'Cursor agent', params.signal);
 
-    const events = createStreamingEvents(proc, parseCursorEvent, 'Cursor agent', params.signal);
-
-    return { pid, events };
+    return { pid: command.pid, events };
   }
 
   async stop(pid: number): Promise<void> {

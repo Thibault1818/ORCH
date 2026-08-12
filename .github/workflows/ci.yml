@@ -25,10 +25,10 @@ jobs:
       - run: npm run build:dist
       - name: Verify reproducible distribution
         run: |
-          shasum -a 256 $(git ls-files dist) > /tmp/dist-before.sha256
+          node scripts/verify-release-artifacts.mjs dist-manifest dist /tmp/dist-before.tsv
           npm run build:dist
-          shasum -a 256 $(git ls-files dist) > /tmp/dist-after.sha256
-          diff /tmp/dist-before.sha256 /tmp/dist-after.sha256
+          node scripts/verify-release-artifacts.mjs dist-manifest dist /tmp/dist-after.tsv
+          diff /tmp/dist-before.tsv /tmp/dist-after.tsv
       - name: Verify Git-installable package includes workflow distribution
         run: |
           npm pack --dry-run --json --ignore-scripts > package-manifest.json

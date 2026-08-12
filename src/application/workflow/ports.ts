@@ -160,10 +160,15 @@ export interface WorkflowRolePorts {
   fable: FableRolePort;
   opus: OpusRolePort;
   git: WorkflowGitPort;
+  safeguards: WorkflowRuntimePorts['safeguards'];
 }
 export interface WorkflowRuntimePorts {
   roles: WorkflowRoleResolver;
   git: WorkflowGitPort;
+  safeguards: {
+    assertReady(): Promise<unknown>;
+    assertQuiescent(owner: string): Promise<void>;
+  };
 }
 
 export class LegacyWorkflowRoleResolver implements WorkflowRoleResolver {

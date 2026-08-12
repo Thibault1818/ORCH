@@ -1,0 +1,2 @@
+#!/usr/bin/env node
+export{a as ClaudeAdapter}from'./chunk-VHNPRWCU.js';import'./chunk-JMMZ2QLQ.js';import'./chunk-57X3C432.js';import'./chunk-BPWQ434U.js';import'./chunk-UQEE676R.js';import'./chunk-CDVPC44Y.js';

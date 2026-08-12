@@ -6,6 +6,8 @@
  */
 
 import path from 'node:path';
+import os from 'node:os';
+import { createHash } from 'node:crypto';
 import { accessSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import { NotInitializedError } from '../../domain/errors.js';
@@ -15,15 +17,27 @@ export const ORCHESTRY_DIR = '.orchestry';
 const ID_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 export class Paths {
-  constructor(private readonly projectRoot: string) {}
+  constructor(
+    private readonly projectRoot: string,
+    private readonly stateRoot = path.join(projectRoot, ORCHESTRY_DIR),
+    private readonly externalWorkspaceRoot = path.join(stateRoot, 'workspaces'),
+  ) {}
 
   /** Root .orchestry/ directory */
   get root(): string {
+    return this.stateRoot;
+  }
+
+  get projectConfigRoot(): string {
     return path.join(this.projectRoot, ORCHESTRY_DIR);
   }
 
+  get workspacesRoot(): string {
+    return this.externalWorkspaceRoot;
+  }
+
   get configPath(): string {
-    return path.join(this.root, 'config.yml');
+    return path.join(this.projectConfigRoot, 'config.yml');
   }
 
   get statePath(): string {
@@ -32,6 +46,10 @@ export class Paths {
 
   get lockPath(): string {
     return path.join(this.root, 'orchestry.lock');
+  }
+
+  get processRegistryPath(): string {
+    return path.join(this.root, 'process-groups.json');
   }
 
   get tasksDir(): string {
@@ -95,11 +113,11 @@ export class Paths {
   }
 
   get gitignorePath(): string {
-    return path.join(this.root, '.gitignore');
+    return path.join(this.projectConfigRoot, '.gitignore');
   }
 
   get workspaceExcludePath(): string {
-    return path.join(this.root, 'workspace-exclude');
+    return path.join(this.projectConfigRoot, 'workspace-exclude');
   }
 
   taskPath(id: string): string {
@@ -140,13 +158,30 @@ export class Paths {
       throw new Error(`Unsafe .orchestry directory: ${expected}`);
     }
     const realRoot = await fs.realpath(expected);
-    const realProjectRoot = await fs.realpath(this.projectRoot);
-    const relative = path.relative(realProjectRoot, realRoot);
-    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-      throw new Error(`Unsafe .orchestry directory location: ${expected}`);
-    }
+    const project = await fs.realpath(this.projectRoot);
+    const workspace = path.resolve(this.externalWorkspaceRoot);
+    if (path.resolve(this.stateRoot) !== path.resolve(this.projectConfigRoot) && (contains(project, realRoot) || contains(realRoot, project)))
+      throw new Error(`Unsafe ORCH state directory location: ${expected}`);
+    if (path.resolve(this.stateRoot) !== path.resolve(this.projectConfigRoot) && (contains(workspace, realRoot) || contains(realRoot, workspace)))
+      throw new Error('ORCH state and workspace roots must be separate');
     await fs.chmod(expected, 0o700).catch(() => {});
   }
+}
+
+export function externalOrchestryRoots(projectRoot: string, home = os.homedir()): { stateRoot: string; workspaceRoot: string } {
+  const id = createHash('sha256').update(path.resolve(projectRoot)).digest('hex').slice(0, 24);
+  const base = process.platform === 'darwin'
+    ? path.join(home, 'Library', 'Application Support', 'orchestry')
+    : path.join(home, '.local', 'state', 'orchestry');
+  return {
+    stateRoot: path.join(base, 'state', id),
+    workspaceRoot: path.join(base, 'workspaces', id),
+  };
+}
+
+function contains(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 }
 
 /**
