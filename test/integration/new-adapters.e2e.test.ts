@@ -1,17 +1,13 @@
 /**
- * Grok and Antigravity adapters — end-to-end through the Orchestrator.
+ * Grok and Antigravity generic adapters — end-to-end through the Orchestrator.
  *
  * These tests use the real adapter classes, AdapterRegistry, Orchestrator,
- * task/agent/run services, state machine, and JSONL run event path. The spawned
- * process is mocked, matching the existing Pi adapter e2e style, so CI does not
- * need live Grok or Antigravity credentials.
+ * task/agent/run services, and state machine. Generic execution must fail closed
+ * before process creation because neither CLI has a proven stdin prompt transport.
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { PassThrough } from 'node:stream';
-import { EventEmitter } from 'node:events';
-import type { ChildProcess } from 'node:child_process';
-import type { SpawnResult, IProcessManager } from '../../src/infrastructure/process/process-manager.js';
+import type { IProcessManager } from '../../src/infrastructure/process/process-manager.js';
 import { Orchestrator } from '../../src/application/orchestrator.js';
 import { GrokAdapter } from '../../src/infrastructure/adapters/grok.js';
 import { AntigravityAdapter } from '../../src/infrastructure/adapters/antigravity.js';
@@ -29,39 +25,7 @@ import {
   cleanupOrch,
 } from '../unit/application/helpers.js';
 
-type MockProc = EventEmitter & {
-  stdout: PassThrough;
-  stderr: PassThrough;
-  stdin: PassThrough;
-  pid: number;
-  kill: ReturnType<typeof vi.fn>;
-};
-
-function createMockProcess(pid = 30101): MockProc {
-  const proc = new EventEmitter() as MockProc;
-  proc.stdout = new PassThrough();
-  proc.stderr = new PassThrough();
-  proc.stdin = new PassThrough();
-  proc.pid = pid;
-  proc.kill = vi.fn();
-  return proc;
-}
-
-async function waitFor<T>(
-  predicate: () => Promise<T | null | undefined> | T | null | undefined,
-  timeoutMs = 2000,
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await predicate();
-    if (value) return value;
-    await new Promise((r) => setTimeout(r, 5));
-  }
-  throw new Error(`waitFor: predicate did not become truthy within ${timeoutMs}ms`);
-}
-
 interface Harness {
-  proc: MockProc;
   processManager: IProcessManager;
   taskStore: ReturnType<typeof createMockTaskStore>;
   agentStore: ReturnType<typeof createMockAgentStore>;
@@ -71,12 +35,11 @@ interface Harness {
 }
 
 async function buildHarness(adapterKind: 'grok' | 'antigravity', adapterFactory: (pm: IProcessManager) => IAgentAdapter): Promise<Harness> {
-  const proc = createMockProcess(adapterKind === 'grok' ? 30101 : 30102);
   const processManager: IProcessManager = {
-    isAlive: vi.fn(() => true),
+    isAlive: vi.fn(() => false),
     kill: vi.fn(),
     killWithGrace: vi.fn(async () => {}),
-    spawn: vi.fn((): SpawnResult => ({ process: proc as unknown as ChildProcess, pid: proc.pid })),
+    spawn: vi.fn(),
   };
 
   const agent = makeAgent({
@@ -115,85 +78,43 @@ async function buildHarness(adapterKind: 'grok' | 'antigravity', adapterFactory:
   const orch = new Orchestrator(deps);
   await (orch as { loadState: () => Promise<void> }).loadState();
 
-  return { proc, processManager, taskStore, agentStore, runStore, events, orch };
+  return { processManager, taskStore, agentStore, runStore, events, orch };
 }
 
 describe('new adapters — e2e through Orchestrator', () => {
-  it('drives a Grok task todo → in_progress → review → done', async () => {
+  it('fails Grok orchestration closed without spawning or exposing the prompt in argv', async () => {
     const h = await buildHarness('grok', (pm) => new GrokAdapter(pm));
     try {
       await (h.orch as { tick: () => Promise<void> }).tick();
 
-      expect(h.processManager.spawn).toHaveBeenCalledOnce();
-      const spawnCall = (h.processManager.spawn as ReturnType<typeof vi.fn>).mock.calls[0]!;
-      expect(spawnCall[0]).toBe('grok');
-      expect(spawnCall[1]).toEqual(expect.arrayContaining([
-        '-p',
-        'rendered prompt',
-        '--output-format',
-        'streaming-json',
-      ]));
-      expect(spawnCall[1]).not.toContain('bypassPermissions');
-
-      h.proc.stdout.write(JSON.stringify({ type: 'thought', data: 'skip' }) + '\n');
-      h.proc.stdout.write(JSON.stringify({ type: 'text', data: 'Grok result' }) + '\n');
-      h.proc.stdout.write(JSON.stringify({ type: 'tool_call', name: 'read', input: { path: 'src/index.ts' } }) + '\n');
-      h.proc.stdout.write(JSON.stringify({ type: 'end', stopReason: 'EndTurn' }) + '\n');
-      h.proc.stdout.end();
-      setTimeout(() => h.proc.emit('close', 0), 20);
-
-      const finalTask = await waitFor(async () => {
-        const t = await h.taskStore.get('tsk_grok');
-        return t?.status === 'done' ? t : null;
+      expect(h.processManager.spawn).not.toHaveBeenCalled();
+      expect(JSON.stringify((h.processManager.spawn as ReturnType<typeof vi.fn>).mock.calls)).not.toContain('rendered prompt');
+      expect((await h.taskStore.get('tsk_grok'))?.last_error).toMatchObject({
+        phase: 'pre_run',
+        message: expect.stringContaining('argv prompt transport is prohibited'),
       });
-
-      expect(finalTask.status).toBe('done');
-      const agent = await h.agentStore.get('agt_grok');
-      expect(agent!.status).toBe('idle');
-      expect(agent!.stats.tasks_completed).toBe(1);
-
-      const run = (await h.runStore.listAll())[0]!;
-      const runEvents = await h.runStore.readEvents(run.id);
-      expect(runEvents.map((e) => e.type).sort()).toEqual(['agent_output', 'done', 'tool_call']);
-      expect(runEvents.at(-1)!.type).toBe('done');
-      expect(runEvents.find((e) => e.type === 'agent_output')!.data).toBe(JSON.stringify({ text: 'Grok result' }));
+      expect(h.events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'task:error', taskId: 'tsk_grok', phase: 'pre_run' }),
+      ]));
     } finally {
       cleanupOrch(h.orch);
     }
   });
 
-  it('drives an Antigravity task todo → in_progress → review → done', async () => {
+  it('fails Antigravity orchestration closed without spawning or exposing the prompt in argv', async () => {
     const h = await buildHarness('antigravity', (pm) => new AntigravityAdapter(pm));
     try {
       await (h.orch as { tick: () => Promise<void> }).tick();
 
-      expect(h.processManager.spawn).toHaveBeenCalledOnce();
-      const spawnCall = (h.processManager.spawn as ReturnType<typeof vi.fn>).mock.calls[0]!;
-      expect(spawnCall[0]).toBe('agy');
-      expect(spawnCall[1]).toContain('-p');
-      expect(spawnCall[1][spawnCall[1].indexOf('-p') + 1]).toContain('rendered prompt');
-      expect(spawnCall[1]).not.toContain('--dangerously-skip-permissions');
-
-      h.proc.stdout.write('Antigravity line one\n');
-      h.proc.stdout.write('Antigravity line two\n');
-      h.proc.stdout.end();
-      setTimeout(() => h.proc.emit('close', 0), 20);
-
-      const finalTask = await waitFor(async () => {
-        const t = await h.taskStore.get('tsk_antigravity');
-        return t?.status === 'done' ? t : null;
+      expect(h.processManager.spawn).not.toHaveBeenCalled();
+      expect(JSON.stringify((h.processManager.spawn as ReturnType<typeof vi.fn>).mock.calls)).not.toContain('rendered prompt');
+      expect((await h.taskStore.get('tsk_antigravity'))?.last_error).toMatchObject({
+        phase: 'pre_run',
+        message: expect.stringContaining('argv prompt transport is prohibited'),
       });
-
-      expect(finalTask.status).toBe('done');
-      const agent = await h.agentStore.get('agt_antigravity');
-      expect(agent!.status).toBe('idle');
-      expect(agent!.stats.tasks_completed).toBe(1);
-
-      const run = (await h.runStore.listAll())[0]!;
-      const runEvents = await h.runStore.readEvents(run.id);
-      expect(runEvents.map((e) => e.type)).toEqual(['agent_output', 'agent_output', 'done']);
-      expect(runEvents[0]!.data).toBe(JSON.stringify({ text: 'Antigravity line one' }));
-      expect(runEvents[2]!.data).toBe(JSON.stringify({ result: 'Antigravity line one\nAntigravity line two' }));
+      expect(h.events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'task:error', taskId: 'tsk_antigravity', phase: 'pre_run' }),
+      ]));
     } finally {
       cleanupOrch(h.orch);
     }

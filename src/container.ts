@@ -8,15 +8,18 @@
  */
 
 import type { OrchestratorConfig } from './domain/config.js';
+import path from 'node:path';
 import type { CliContext } from './cli/context.js';
 import type { ITaskStore, IAgentStore, IRunStore, IStateStore, IConfigStore, IContextStore, IMessageStore, IGoalStore, ITeamStore } from './infrastructure/storage/interfaces.js';
 import type { IWorkspaceManager } from './infrastructure/workspace/interface.js';
 import type { ITemplateEngine } from './infrastructure/template/template-engine.js';
 import type { IProcessManager } from './infrastructure/process/process-manager.js';
+import type { ICommandRunner } from './infrastructure/process/command-runner.js';
 import type { AdapterRegistry } from './infrastructure/adapters/registry.js';
 import type { ISkillLoader } from './infrastructure/skills/skill-loader.js';
 import type { WorkflowEngine } from './application/workflow/engine.js';
 import type { WorkflowArtifactStore } from './infrastructure/workflow/artifact-store.js';
+import type { WorkflowSafeguards } from './application/workflow/safeguards.js';
 
 import { type GlobalConfig, DEFAULT_GLOBAL_CONFIG } from './domain/global-config.js';
 import { Paths } from './infrastructure/storage/paths.js';
@@ -75,14 +78,15 @@ export interface LightContainer {
 /** Full container — everything from light + orchestrator, adapters, workspace, template. */
 export interface Container extends LightContainer {
   processManager: IProcessManager;
+  commandRunner: ICommandRunner;
   adapterRegistry: AdapterRegistry;
-  workspaceManager: IWorkspaceManager;
   templateEngine: ITemplateEngine;
   skillLoader: ISkillLoader;
   doctorService: DoctorService;
   orchestrator: Orchestrator;
   workflowStore: WorkflowArtifactStore;
   workflowEngine: WorkflowEngine;
+  workflowSafeguards: WorkflowSafeguards;
 }
 
 /**
@@ -91,7 +95,12 @@ export interface Container extends LightContainer {
  * Used by read-only commands: task, agent, context, msg, goal, team, logs, status, config.
  */
 export async function buildLightContainer(context: CliContext): Promise<LightContainer> {
-  const paths = new Paths(context.projectRoot);
+  const externalRoots = context.stateRoot && context.workspaceRoot
+    ? { stateRoot: context.stateRoot, workspaceRoot: context.workspaceRoot }
+    : (await import('./infrastructure/storage/paths.js')).externalOrchestryRoots(context.projectRoot);
+  context.stateRoot = externalRoots.stateRoot;
+  context.workspaceRoot = externalRoots.workspaceRoot;
+  const paths = new Paths(context.projectRoot, externalRoots.stateRoot, externalRoots.workspaceRoot);
 
   // Infrastructure — stores
   const configStore = new ConfigStore(paths);
@@ -159,6 +168,7 @@ export async function buildFullContainer(context: CliContext): Promise<Container
   // Dynamic imports — avoid loading heavy deps at top level
   const [
     { ProcessManager },
+    { CommandRunner, resolveExecutable },
     { AdapterRegistry },
     { ClaudeAdapter },
     { CodexAdapter },
@@ -175,9 +185,11 @@ export async function buildFullContainer(context: CliContext): Promise<Container
     { DoctorService },
     { WorkflowArtifactStore },
     { WorkflowEngine },
-    { NativeCodexWorkflowAdapter, NativeFableWorkflowAdapter, NativeOpusWorkflowAdapter, NativeWorkflowGitGateway },
+    { WorkflowSafeguards },
+    { NativeWorkflowRoleResolver, NativeWorkflowGitGateway },
   ] = await Promise.all([
     import('./infrastructure/process/process-manager.js'),
+    import('./infrastructure/process/command-runner.js'),
     import('./infrastructure/adapters/registry.js'),
     import('./infrastructure/adapters/claude.js'),
     import('./infrastructure/adapters/codex.js'),
@@ -194,36 +206,41 @@ export async function buildFullContainer(context: CliContext): Promise<Container
     import('./application/doctor-service.js'),
     import('./infrastructure/workflow/artifact-store.js'),
     import('./application/workflow/engine.js'),
+    import('./application/workflow/safeguards.js'),
     import('./infrastructure/workflow/native-adapters.js'),
   ]);
 
-  const processManager = new ProcessManager();
+  const processManager = new ProcessManager(path.join(light.paths.root, 'process-groups.json'));
+  const commandRunner = new CommandRunner(processManager);
   const templateEngine = new LiquidTemplateEngine();
   const skillLoader = new SkillLoader();
   const workspaceManager = new WorkspaceManager(
     context.projectRoot,
-    light.paths.root,
-    processManager,
+    light.paths.workspacesRoot,
+    commandRunner,
   );
 
   // Adapter registry
   const adapterRegistry = new AdapterRegistry();
-  adapterRegistry.register(new ClaudeAdapter(processManager));
-  adapterRegistry.register(new CodexAdapter(processManager));
-  adapterRegistry.register(new CursorAdapter(processManager));
-  adapterRegistry.register(new ShellAdapter(processManager));
-  adapterRegistry.register(new OpenCodeAdapter(processManager));
-  adapterRegistry.register(new PiAdapter(processManager));
-  adapterRegistry.register(new GrokAdapter(processManager));
-  adapterRegistry.register(new AntigravityAdapter(processManager));
+  adapterRegistry.register(new ClaudeAdapter(processManager, commandRunner));
+  adapterRegistry.register(new CodexAdapter(processManager, commandRunner));
+  adapterRegistry.register(new CursorAdapter(processManager, commandRunner));
+  adapterRegistry.register(new ShellAdapter(processManager, commandRunner));
+  adapterRegistry.register(new OpenCodeAdapter(processManager, commandRunner));
+  adapterRegistry.register(new PiAdapter(processManager, commandRunner));
+  adapterRegistry.register(new GrokAdapter(processManager, commandRunner));
+  adapterRegistry.register(new AntigravityAdapter(processManager, commandRunner));
 
-  const doctorService = new DoctorService(adapterRegistry, processManager, context.projectRoot);
-  const workflowStore = new WorkflowArtifactStore(context.projectRoot);
+  const [gitExecutable, nodeExecutable, npmExecutable, npxExecutable] = await Promise.all([
+    resolveExecutable('git'), resolveExecutable('node'), resolveExecutable('npm'), resolveExecutable('npx'),
+  ]);
+  const doctorService = new DoctorService(adapterRegistry, commandRunner, { git: gitExecutable, node: nodeExecutable }, context.projectRoot);
+  const workflowStore = new WorkflowArtifactStore(light.paths.root, { rootIsStateRoot: true });
+  const workflowSafeguards = new WorkflowSafeguards(context.projectRoot, light.paths.root, light.paths.workspacesRoot, commandRunner, processManager);
   const workflowEngine = new WorkflowEngine(workflowStore, {
-    codex: new NativeCodexWorkflowAdapter(processManager),
-    fable: new NativeFableWorkflowAdapter(processManager),
-    opus: new NativeOpusWorkflowAdapter(processManager),
-    git: new NativeWorkflowGitGateway(context.projectRoot),
+    roles: new NativeWorkflowRoleResolver(processManager, commandRunner, workflowSafeguards),
+    git: new NativeWorkflowGitGateway(context.projectRoot, commandRunner, light.paths.workspacesRoot, gitExecutable, workflowSafeguards),
+    safeguards: workflowSafeguards,
   });
   const orchestrator = new Orchestrator({
     taskStore: light.taskStore,
@@ -234,6 +251,9 @@ export async function buildFullContainer(context: CliContext): Promise<Container
     workspaceManager,
     templateEngine,
     processManager,
+    commandRunner,
+    reviewExecutables: { npm: npmExecutable, npx: npxExecutable, node: nodeExecutable },
+    executionSafeguards: workflowSafeguards,
     eventBus: light.eventBus,
     taskService: light.taskService,
     agentService: light.agentService,
@@ -250,14 +270,15 @@ export async function buildFullContainer(context: CliContext): Promise<Container
   return {
     ...light,
     processManager,
+    commandRunner,
     adapterRegistry,
-    workspaceManager,
     templateEngine,
     skillLoader,
     doctorService,
     orchestrator,
     workflowStore,
     workflowEngine,
+    workflowSafeguards,
   };
 }
 

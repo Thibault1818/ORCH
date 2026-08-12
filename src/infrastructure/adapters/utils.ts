@@ -5,9 +5,16 @@
  * common to claude, codex, and cursor adapters.
  */
 
-import type { ChildProcess } from 'node:child_process';
 import type { AgentEvent } from './interface.js';
 import { readLines } from '../process/process-manager.js';
+import {
+  CommandRunner,
+  commandFailureMessage,
+  streamingCommandFailureMessage,
+  type ICommandRunner,
+  type StreamingCommandHandle,
+} from '../process/command-runner.js';
+import type { IProcessManager } from '../process/process-manager.js';
 import { type TokenUsage, createTokenUsage } from '../../domain/run.js';
 import { classifyAdapterError } from '../../domain/errors.js';
 
@@ -90,6 +97,29 @@ export function buildChildEnv(
   return env;
 }
 
+export function adapterCommandRunner(processManager: IProcessManager, runner?: ICommandRunner): ICommandRunner {
+  if (runner) return runner;
+  const candidate = processManager as IProcessManager & Partial<ICommandRunner>;
+  if (typeof candidate.run === 'function' && typeof candidate.start === 'function') return candidate as IProcessManager & ICommandRunner;
+  return new CommandRunner(processManager);
+}
+
+export async function probeVersion(runner: ICommandRunner, command: string, env = buildChildEnv()): Promise<string> {
+  const executable = runner.resolveExecutable
+    ? await runner.resolveExecutable(command, env.PATH ?? process.env.PATH ?? '')
+    : command;
+  const result = await runner.run({
+    executable,
+    args: ['--version'],
+    env,
+    timeoutMs: 5_000,
+    maxStdoutBytes: 1024 * 1024,
+    maxStderrBytes: 1024 * 1024,
+  });
+  if (!result.ok) throw new Error(commandFailureMessage(result));
+  return result.stdout.trim();
+}
+
 /**
  * Extract token usage from a parsed JSON event.
  *
@@ -129,20 +159,14 @@ export function extractTokens(
  * @param signal - Optional abort signal.
  */
 export function createStreamingEvents(
-  proc: ChildProcess,
+  command: StreamingCommandHandle,
   parseEvent: (line: string) => AgentEvent | null,
   adapterName: string,
   signal?: AbortSignal,
 ): AsyncGenerator<AgentEvent> {
   async function* generate(): AsyncGenerator<AgentEvent> {
     let gotDoneEvent = false;
-
-    let exitCode: number | null = null;
-    let exitError: Error | null = null;
-    const exitPromise = new Promise<void>((resolve) => {
-      proc.on('close', (code) => { exitCode = code; resolve(); });
-      proc.on('error', (err) => { exitError = err; resolve(); });
-    });
+    const proc = command.process;
 
     if (proc.stdout) {
       try {
@@ -162,17 +186,14 @@ export function createStreamingEvents(
       }
     }
 
-    await exitPromise;
+    const completion = await command.completion;
 
-    if (exitError && !signal?.aborted && !gotDoneEvent) {
-      const spawnErr = exitError as Error;
-      const classified = classifyAdapterError(spawnErr.message, exitCode ?? undefined);
-      const err = Object.assign(new Error(spawnErr.message), { errorKind: classified });
-      throw err;
-    }
-    if (exitCode !== 0 && exitCode !== null && !signal?.aborted && !gotDoneEvent) {
-      const msg = `${adapterName} process exited with code ${exitCode}`;
-      const classified = classifyAdapterError(msg, exitCode);
+    if (!completion.ok && !signal?.aborted && !gotDoneEvent) {
+      const detail = streamingCommandFailureMessage(completion, adapterName);
+      const classified = classifyAdapterError(detail, completion.exitCode ?? undefined);
+      const msg = completion.termination === 'exited'
+        ? `${adapterName} process exited with code ${completion.exitCode}`
+        : detail;
       const err = Object.assign(new Error(msg), { errorKind: classified });
       throw err;
     }

@@ -300,7 +300,9 @@ export function registerTaskCommand(program: Command, container: LightContainer)
     .command('approve <id>')
     .description('Approve a task in review')
     .action(async (id: string) => {
-      await container.taskService.updateStatus(id, 'done');
+      const { buildFullContainer } = await import('../../container.js');
+      const full = await buildFullContainer(container.context);
+      await full.orchestrator.approveTask(id);
       printSuccess(`Approved ${id}`);
     });
 

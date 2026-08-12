@@ -1,6 +1,6 @@
 export const WORKFLOW_SCHEMA_VERSION = 2 as const;
 
-export type ProducingRole = 'fable' | 'codex' | 'opus' | 'orchestrator';
+export type ProducingRole = 'fable' | 'codex' | 'opus' | 'orchestrator' | 'human';
 export type CodexAction = 'DISPATCH_OPUS' | 'ACCEPT' | 'CORRECT_OPUS' | 'CONSULT_FABLE' | 'PAUSE' | 'STOP';
 export type FablePurpose = 'COMPARE_BOUNDED_OPTIONS' | 'GENERATE_NONCRITICAL_ALTERNATIVES' | 'CHALLENGE_REVERSIBLE_PLAN';
 
@@ -58,6 +58,18 @@ export interface CheckResults {
   commit: string;
   passed: boolean;
   checks: Array<{ command: string; passed: boolean; output: string }>;
+}
+
+export interface HumanApprovalV1 {
+  schema_version: 1;
+  job_id: string;
+  target_branch: string;
+  base_commit: string;
+  reviewed_commit: string;
+  reviewed_diff_hash: string;
+  check_results_hash: string;
+  reason: string;
+  approved_at: string;
 }
 
 export type CodexDecisionStage = 'pre_opus' | 'post_opus' | 'after_fable_pre' | 'after_fable_post';
@@ -127,6 +139,14 @@ export function validateCheckResults(value: unknown): CheckResults {
   return { job_id: id(o.job_id), commit: commit(o.commit), passed, checks };
 }
 
+export function validateHumanApproval(value: unknown): HumanApprovalV1 {
+  const o = exact(value, ['schema_version', 'job_id', 'target_branch', 'base_commit', 'reviewed_commit', 'reviewed_diff_hash', 'check_results_hash', 'reason', 'approved_at'], 'Human approval');
+  if (o.schema_version !== 1) throw new Error('Unsupported human approval schema version');
+  const approvedAt = nonEmpty(o.approved_at, 'approved_at');
+  if (!Number.isFinite(Date.parse(approvedAt))) throw new Error('approved_at must be a timestamp');
+  return { schema_version: 1, job_id: id(o.job_id), target_branch: nonEmpty(o.target_branch, 'target_branch'), base_commit: commit(o.base_commit), reviewed_commit: commit(o.reviewed_commit), reviewed_diff_hash: hash(o.reviewed_diff_hash, 'reviewed_diff_hash'), check_results_hash: hash(o.check_results_hash, 'check_results_hash'), reason: nonEmpty(o.reason, 'reason'), approved_at: approvedAt };
+}
+
 type ObjectValue = Record<string, unknown>;
 function exact(value: unknown, keys: string[], label: string): ObjectValue { if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`); const object = value as ObjectValue; for (const key of keys) if (!(key in object)) throw new Error(`${label} is missing ${key}`); const allowed = new Set(keys); for (const key of Object.keys(object)) if (!allowed.has(key)) throw new Error(`${label} contains unknown field ${key}`); return object; }
 function array(value: unknown, label: string): unknown[] { if (!Array.isArray(value)) throw new Error(`${label} must be an array`); return value; }
@@ -136,4 +156,5 @@ function strings(value: unknown, label: string): string[] { return array(value, 
 function bool(value: unknown, label: string): boolean { if (typeof value !== 'boolean') throw new Error(`${label} must be a boolean`); return value; }
 function id(value: unknown): string { const result = nonEmpty(value, 'id'); if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(result)) throw new Error('Invalid id'); return result; }
 function commit(value: unknown): string { const result = text(value, 'commit'); if (!/^[a-f0-9]{7,64}$/.test(result)) throw new Error('Invalid commit'); return result; }
+function hash(value: unknown, label: string): string { const result = text(value, label); if (!/^[a-f0-9]{64}$/.test(result)) throw new Error(`${label} must be a SHA-256 hash`); return result; }
 function enumeration<const T extends readonly string[]>(value: unknown, values: T, label: string): T[number] { if (typeof value !== 'string' || !values.includes(value)) throw new Error(`${label} has an invalid value`); return value as T[number]; }

@@ -5,6 +5,7 @@ import type { AgentEvent, ExecuteParams } from '../../../src/infrastructure/adap
 import { AdapterErrorKind } from '../../../src/domain/errors.js';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
+import { adapterExecution, attachAdapterCommandRunner } from './adapter-command-runner.js';
 
 /** Create a minimal mock process with controllable stdout/stderr streams. */
 function createMockProcess() {
@@ -24,12 +25,12 @@ function createMockProcess() {
 }
 
 function createMockProcessManager(proc: ReturnType<typeof createMockProcess>): IProcessManager {
-  return {
+  return attachAdapterCommandRunner({
     isAlive: vi.fn(() => true),
     kill: vi.fn(),
     killWithGrace: vi.fn(async () => {}),
     spawn: vi.fn(() => ({ process: proc as any, pid: proc.pid })),
-  };
+  }, proc as any, 'GNU bash, version 5.2');
 }
 
 function makeParams(overrides?: Partial<ExecuteParams>): ExecuteParams {
@@ -38,6 +39,7 @@ function makeParams(overrides?: Partial<ExecuteParams>): ExecuteParams {
     workspace: '/tmp',
     config: { command: 'echo hello', adapter: 'shell' },
     security: { allowShellAdapter: true },
+    execution: adapterExecution,
     ...overrides,
   };
 }

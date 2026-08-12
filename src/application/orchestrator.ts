@@ -11,7 +11,7 @@
 import type { OrchestratorConfig } from '../domain/config.js';
 import type { OrchestratorState, RunningEntry } from '../domain/state.js';
 import type { Task, TaskStatus, GoalTaskRole } from '../domain/task.js';
-import { AUTONOMOUS_LABEL, GOAL_LEAD_LABEL, GOAL_REVIEW_LABEL } from '../domain/task.js';
+import { AUTONOMOUS_LABEL, GOAL_LEAD_LABEL, GOAL_REVIEW_LABEL, GOVERNED_LABEL } from '../domain/task.js';
 import type { Goal, GoalOrchestrationPhase } from '../domain/goal.js';
 import { type RunEvent, createTokenUsage } from '../domain/run.js';
 import {
@@ -32,8 +32,10 @@ import type { IWorkspaceManager } from '../infrastructure/workspace/interface.js
 import type { ITemplateEngine } from '../infrastructure/template/template-engine.js';
 import { buildPromptContext, DEFAULT_SYSTEM_TEMPLATE, DEFAULT_USER_TEMPLATE, type RetryContext, type GoalContext } from '../infrastructure/template/template-engine.js';
 import type { IProcessManager } from '../infrastructure/process/process-manager.js';
+import type { ICommandRunner, ExecutableDescriptor } from '../infrastructure/process/command-runner.js';
 import type { AgentEvent } from '../infrastructure/adapters/interface.js';
 import type { ISkillLoader } from '../infrastructure/skills/skill-loader.js';
+import type { WorkflowExecutionSafeguards } from '../infrastructure/workflow/native-adapters.js';
 import type { EventBus } from './event-bus.js';
 import type { TaskService } from './task-service.js';
 import type { AgentService } from './agent-service.js';
@@ -58,6 +60,9 @@ export interface OrchestratorDeps {
   workspaceManager: IWorkspaceManager;
   templateEngine: ITemplateEngine;
   processManager: IProcessManager;
+  commandRunner: ICommandRunner;
+  reviewExecutables: { npm: ExecutableDescriptor; npx: ExecutableDescriptor; node: ExecutableDescriptor };
+  executionSafeguards: WorkflowExecutionSafeguards & { assertReady(): Promise<unknown>; assertQuiescent(owner: string): Promise<void>; runQuiescent<T>(owner: string, action: () => Promise<T>): Promise<T> };
   eventBus: EventBus;
   taskService: TaskService;
   agentService: AgentService;
@@ -1287,7 +1292,8 @@ export class Orchestrator {
       }
 
       // Prepare workspace
-      const { path: workspacePath, branch: worktreeBranch } = await this.deps.workspaceManager.prepare(
+      await this.deps.executionSafeguards.assertReady();
+      const { path: workspacePath, branch: worktreeBranch, baseCommit, targetBranch } = await this.deps.workspaceManager.prepare(
         task,
         agent,
         this.deps.config,
@@ -1398,7 +1404,12 @@ export class Orchestrator {
       if (worktreeBranch) {
         const freshTask = await this.deps.taskStore.get(taskId);
         if (freshTask) {
-          freshTask.proof = { ...(freshTask.proof ?? { files_changed: [] }), branch: worktreeBranch };
+          freshTask.proof = {
+            ...(freshTask.proof ?? { files_changed: [] }),
+            branch: worktreeBranch,
+            base_commit: baseCommit,
+            target_branch: targetBranch,
+          };
           freshTask.workspace = workspacePath;
           await this.deps.taskStore.save(freshTask);
         }
@@ -1417,6 +1428,8 @@ export class Orchestrator {
       this.abortControllers.set(taskId, abortController);
 
       const allowDangerousExecution = process.env[DANGEROUS_EXECUTION_ENV] === '1';
+      const allowedExecutables = await this.deps.executionSafeguards.executableAllowlist([agent.adapter]);
+      const proxyAddress = await this.deps.executionSafeguards.proxyEndpoint();
       const handle = adapter.execute({
         prompt,
         systemPrompt,
@@ -1433,6 +1446,16 @@ export class Orchestrator {
           allowShellAdapter: this.deps.config.execution.security.allow_shell_adapter === true && allowDangerousExecution,
         },
         persistPrompts: this.deps.config.execution.security.persist_prompts === true,
+        execution: {
+          owner: task.id,
+          allowedExecutables,
+          sandbox: {
+            workspace: workspacePath,
+            proxyAddress,
+            writableWorkspace: true,
+            readOnlyFiles: allowedExecutables.map((value) => value.realpath),
+          },
+        },
         signal: abortController.signal,
       });
 
@@ -1704,10 +1727,8 @@ export class Orchestrator {
     await this.deps.taskStore.save(task);
 
     const agent = await this.deps.agentStore.get(agentId);
-    const isAutonomousTask = task.labels?.includes(AUTONOMOUS_LABEL);
-    const autoApprove = isAutonomousTask || agent?.config.approval_policy === 'auto';
-
-    const newStatus = resolveCompletionStatus(task, true, autoApprove);
+    const isGovernedTask = task.labels?.includes(GOVERNED_LABEL);
+    const newStatus = resolveCompletionStatus(task, true, false);
 
     // Finish run first (emits agent:completed)
     await this.deps.runService.finish(runId, 'succeeded', tokens);
@@ -1760,41 +1781,28 @@ export class Orchestrator {
       throw new Error(`Generic orchestrator cannot merge protected workflow branch: ${task.proof.branch}`);
     }
 
-    // Auto merge-back: if task used a worktree branch, merge into current branch
-    if (task.proof?.branch) {
+    if (task.proof?.branch && !isGovernedTask) {
       try {
-        const mergeResult = await this.deps.workspaceManager.mergeBack(task.proof.branch);
-        if (mergeResult.success) {
-          this.deps.eventBus.emit({
-            type: 'workspace:merge_succeeded',
-            taskId,
-            branch: task.proof.branch,
-          });
-          // Clean up worktree and branch after successful merge
-          await this.deps.workspaceManager.cleanup(taskId, task.proof.branch).catch((err) => {
-            this.deps.eventBus.emit({
-              type: 'orchestrator:error',
-              error: err instanceof Error ? err.message : String(err),
-              context: `workspace cleanup for ${taskId}`,
-              fatal: false,
-            });
-          });
-        } else {
-          // Merge conflict: force task to review regardless of auto-approve
-          this.deps.eventBus.emit({
-            type: 'workspace:merge_conflict',
-            taskId,
-            branch: task.proof.branch,
-            conflictInfo: mergeResult.conflictInfo,
-          });
-          await this.forceTaskToReview(task, agentId, `MERGE CONFLICT: ${mergeResult.conflictInfo}`);
-          return;
-        }
+        const evidence = await this.deps.workspaceManager.inspect(task.proof.branch);
+        task.proof = {
+          ...task.proof,
+          base_commit: evidence.baseCommit,
+          reviewed_commit: evidence.commit,
+          reviewed_diff_hash: evidence.diffHash,
+          target_branch: evidence.targetBranch,
+          files_changed: evidence.changedFiles,
+        };
+        await this.deps.taskStore.save(task);
       } catch (err) {
         const error = sanitizeText(err instanceof Error ? err.message : String(err));
-        await this.forceTaskToReview(task, agentId, `MERGE ERROR: ${error}`);
+        await this.forceTaskToReview(task, agentId, `EVIDENCE ERROR: ${error}`);
         return;
       }
+    }
+
+    if (isGovernedTask && task.proof?.branch) {
+      await this.forceTaskToReview(task, agentId, 'GOVERNED: candidate branch preserved for exact evidence, independent review, and human approval');
+      return;
     }
 
     // State-machine validation is authoritative. Invalid transitions fail closed.
@@ -1812,10 +1820,7 @@ export class Orchestrator {
 
     // Auto-review: if task landed in 'review' and has review_criteria, run them
     if (newStatus === 'review' && task.review_criteria?.length) {
-      await this.runAutoReview(taskId, task.review_criteria, task.workspace ?? this.deps.projectRoot, autoApprove);
-    } else if (newStatus === 'review' && autoApprove) {
-      // Auto-approve: skip review and transition review → done immediately
-      await this.deps.taskService.updateStatus(taskId, 'done');
+      await this.runAutoReview(taskId, task.review_criteria, task.workspace ?? this.deps.projectRoot);
     }
 
     await this.saveState();
@@ -1953,9 +1958,8 @@ export class Orchestrator {
     taskId: string,
     criteria: import('../domain/task.js').ReviewCriterion[],
     cwd: string,
-    autoApprove = false,
   ): Promise<void> {
-    const runner = new ReviewRunner({ cwd });
+    const runner = new ReviewRunner({ cwd }, this.deps.commandRunner, this.deps.reviewExecutables, this.deps.executionSafeguards, taskId);
     const results = await runner.runAll(criteria);
     const allPassed = ReviewRunner.allPassed(results);
 
@@ -1979,10 +1983,45 @@ export class Orchestrator {
       results,
     });
 
-    // Failed deterministic review criteria never auto-approve.
-    if (allPassed) {
+    // Passing checks are evidence for human approval; they never approve or merge.
+  }
+
+  async approveTask(taskId: string): Promise<void> {
+    if (!this.lockAcquired) return this.withTemporaryLock(() => this.approveTask(taskId));
+    await this.withStateLock(async () => {
+      await this.deps.executionSafeguards.assertReady();
+      await this.deps.executionSafeguards.runQuiescent(taskId, async () => {
+      const task = await this.deps.taskService.get(taskId);
+      if (task.status !== 'review') throw new InvalidArgumentsError(`Task ${taskId} is not awaiting approval`);
+      if (task.labels?.includes(GOVERNED_LABEL)) throw new InvalidArgumentsError(`Task ${taskId} requires governed approval`);
+      if (task.review_criteria?.length && (!task.review_results?.length || !ReviewRunner.allPassed(task.review_results))) {
+        throw new InvalidArgumentsError(`Task ${taskId} has not passed its required checks`);
+      }
+      if (task.proof?.branch) {
+        const proof = task.proof;
+        const branch = proof.branch!;
+        if (!proof.base_commit || !proof.reviewed_commit || !proof.reviewed_diff_hash || !proof.target_branch)
+          throw new InvalidArgumentsError(`Task ${taskId} approval evidence is incomplete`);
+        const expected = {
+          baseCommit: proof.base_commit,
+          commit: proof.reviewed_commit,
+          diffHash: proof.reviewed_diff_hash,
+          changedFiles: proof.files_changed,
+          targetBranch: proof.target_branch,
+        };
+        const actual = await this.deps.workspaceManager.inspect(branch);
+        if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new InvalidArgumentsError(`Task ${taskId} approval evidence changed`);
+        if (task.review_criteria?.length) await this.runAutoReview(taskId, task.review_criteria, task.workspace!);
+        const rechecked = await this.deps.taskService.get(taskId);
+        if (rechecked.review_criteria?.length && !ReviewRunner.allPassed(rechecked.review_results ?? []))
+          throw new InvalidArgumentsError(`Task ${taskId} checks failed during approval`);
+        const merged = await this.deps.workspaceManager.mergeBack(branch, expected);
+        if (!merged.success) throw new InvalidArgumentsError(`Task ${taskId} merge failed closed: ${merged.conflictInfo}`);
+        await this.deps.workspaceManager.cleanup(taskId, branch);
+      }
       await this.deps.taskService.updateStatus(taskId, 'done');
-    }
+      });
+    });
   }
 
   /**

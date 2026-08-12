@@ -9,6 +9,7 @@ import { createContext } from '../../../src/cli/context.js';
 // Mock findProjectRoot to avoid filesystem access
 vi.mock('../../../src/infrastructure/storage/paths.js', () => ({
   findProjectRoot: vi.fn(() => '/tmp/test-project'),
+  externalOrchestryRoots: vi.fn(() => ({ stateRoot: '/tmp/orch-state', workspaceRoot: '/tmp/orch-workspaces' })),
 }));
 
 describe('createContext — NO_COLOR env var', () => {

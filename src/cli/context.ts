@@ -4,10 +4,12 @@
  * Validated at entry point before any command runs.
  */
 
-import { findProjectRoot } from '../infrastructure/storage/paths.js';
+import { externalOrchestryRoots, findProjectRoot } from '../infrastructure/storage/paths.js';
 
 export interface CliContext {
   projectRoot: string;
+  stateRoot?: string;
+  workspaceRoot?: string;
   json: boolean;
   quiet: boolean;
   noColor: boolean;
@@ -30,8 +32,11 @@ export function createContext(opts: {
     process.env['TERM'] === 'dumb' ||
     false;
 
+  const projectRoot = findProjectRoot();
+  const roots = externalOrchestryRoots(projectRoot);
   return {
-    projectRoot: findProjectRoot(),
+    projectRoot,
+    ...roots,
     json: opts.json ?? false,
     quiet: opts.quiet ?? false,
     noColor,

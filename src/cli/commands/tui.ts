@@ -101,7 +101,7 @@ export function registerTuiCommand(program: Command, container: Container): void
       };
 
       const onApproveTask = async (taskId: string) => {
-        await container.taskService.updateStatus(taskId, 'done');
+        await container.orchestrator.approveTask(taskId);
       };
 
       const onRejectTask = async (taskId: string, feedback?: string) => {

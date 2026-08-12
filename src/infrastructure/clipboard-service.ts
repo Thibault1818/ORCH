@@ -7,16 +7,26 @@
  * - Windows: PowerShell Get-Clipboard
  */
 
-import { execFile as execFileCb, execFileSync } from 'node:child_process';
-import { promisify } from 'node:util';
-import { writeFile, readFile, unlink, mkdtemp, rm } from 'node:fs/promises';
+import { accessSync, constants, statSync } from 'node:fs';
+import { readFile, unlink, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { OrchestryError } from '../domain/errors.js';
-
-const execFile = promisify(execFileCb);
+import {
+  CommandRunner,
+  commandFailureMessage,
+  resolveExecutable,
+  type CommandResult,
+  type ExecutableDescriptor,
+} from './process/command-runner.js';
+import { ProcessManager } from './process/process-manager.js';
 
 const EXEC_TIMEOUT_MS = 3_000;
+const TEXT_MAX_STDOUT_BYTES = 64 * 1024;
+const IMAGE_MAX_STDOUT_BYTES = 50 * 1024 * 1024;
+const MAX_STDERR_BYTES = 64 * 1024;
+const commandRunner = new CommandRunner(new ProcessManager());
+const executableDescriptors = new Map<string, Promise<ExecutableDescriptor>>();
 
 export type ClipboardContentType = 'image' | 'text' | 'empty';
 
@@ -41,12 +51,7 @@ export function isClipboardToolAvailable(): boolean {
   }
 
   if (platform === 'linux') {
-    try {
-      execFileSync('which', ['xclip'], { timeout: EXEC_TIMEOUT_MS, stdio: 'ignore' });
-      return true;
-    } catch {
-      return false;
-    }
+    return executableOnPath('xclip');
   }
 
   if (platform === 'win32') {
@@ -116,9 +121,7 @@ export async function getClipboardImage(): Promise<ClipboardImage | null> {
 
 async function detectMacOS(): Promise<ClipboardContentType> {
   try {
-    const { stdout } = await execFile('osascript', ['-e', 'clipboard info'], {
-      timeout: EXEC_TIMEOUT_MS,
-    });
+    const { stdout } = await run('osascript', ['-e', 'clipboard info']);
 
     if (stdout.includes('«class PNGf»') || stdout.includes('«class TIFF»')) {
       return 'image';
@@ -157,9 +160,7 @@ async function getImageMacOS(): Promise<ClipboardImage | null> {
       end try
     `;
 
-    const { stdout } = await execFile('osascript', ['-e', script], {
-      timeout: EXEC_TIMEOUT_MS,
-    });
+    const { stdout } = await run('osascript', ['-e', script]);
 
     if (stdout.trim() !== 'ok') return null;
 
@@ -186,10 +187,9 @@ async function getImageMacOS(): Promise<ClipboardImage | null> {
 
 async function detectLinux(): Promise<ClipboardContentType> {
   try {
-    const { stdout } = await execFile(
+    const { stdout } = await run(
       'xclip',
       ['-selection', 'clipboard', '-t', 'TARGETS', '-o'],
-      { timeout: EXEC_TIMEOUT_MS },
     );
 
     const targets = stdout.toLowerCase();
@@ -210,14 +210,13 @@ async function detectLinux(): Promise<ClipboardContentType> {
 
 async function getImageLinux(): Promise<ClipboardImage | null> {
   try {
-    const { stdout } = await execFile(
+    const { stdoutBuffer } = await run(
       'xclip',
       ['-selection', 'clipboard', '-t', 'image/png', '-o'],
-      { timeout: EXEC_TIMEOUT_MS, encoding: 'buffer' as unknown as BufferEncoding, maxBuffer: 50 * 1024 * 1024 },
+      IMAGE_MAX_STDOUT_BYTES,
     );
 
-    // stdout is a Buffer when encoding is 'buffer'
-    const data = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout, 'binary');
+    const data = stdoutBuffer;
     if (data.length === 0) return null;
 
     return { data, ext: 'png' };
@@ -231,19 +230,17 @@ async function getImageLinux(): Promise<ClipboardImage | null> {
 async function detectWindows(): Promise<ClipboardContentType> {
   try {
     // Check for image first
-    const { stdout: imgCheck } = await execFile(
-      'powershell',
+    const { stdout: imgCheck } = await run(
+      'powershell.exe',
       ['-NoProfile', '-Command', 'if (Get-Clipboard -Format Image) { "image" } else { "none" }'],
-      { timeout: EXEC_TIMEOUT_MS },
     );
 
     if (imgCheck.trim() === 'image') return 'image';
 
     // Check for text
-    const { stdout: textCheck } = await execFile(
-      'powershell',
+    const { stdout: textCheck } = await run(
+      'powershell.exe',
       ['-NoProfile', '-Command', 'if (Get-Clipboard) { "text" } else { "empty" }'],
-      { timeout: EXEC_TIMEOUT_MS },
     );
 
     return textCheck.trim() === 'text' ? 'text' : 'empty';
@@ -268,9 +265,7 @@ async function getImageWindows(): Promise<ClipboardImage | null> {
       }
     `;
 
-    const { stdout } = await execFile('powershell', ['-NoProfile', '-Command', script], {
-      timeout: EXEC_TIMEOUT_MS,
-    });
+    const { stdout } = await run('powershell.exe', ['-NoProfile', '-Command', script]);
 
     if (stdout.trim() !== 'ok') return null;
 
@@ -289,5 +284,47 @@ async function getImageWindows(): Promise<ClipboardImage | null> {
     } catch {
       // Ignore cleanup errors
     }
+  }
+}
+
+async function run(command: string, args: string[], maxStdoutBytes = TEXT_MAX_STDOUT_BYTES): Promise<CommandResult> {
+  const result = await commandRunner.run({
+    executable: await pinnedExecutable(command),
+    args,
+    env: process.env,
+    timeoutMs: EXEC_TIMEOUT_MS,
+    maxStdoutBytes,
+    maxStderrBytes: MAX_STDERR_BYTES,
+  });
+  if (!result.ok) throw new Error(commandFailureMessage(result));
+  return result;
+}
+
+function pinnedExecutable(command: string): Promise<ExecutableDescriptor> {
+  let descriptor = executableDescriptors.get(command);
+  if (!descriptor) {
+    descriptor = resolveExecutable(command);
+    executableDescriptors.set(command, descriptor);
+    void descriptor.catch(() => {
+      if (executableDescriptors.get(command) === descriptor) executableDescriptors.delete(command);
+    });
+  }
+  return descriptor;
+}
+
+function executableOnPath(command: string): boolean {
+  if (isAbsolute(command)) return canExecute(command);
+  for (const entry of (process.env.PATH ?? '').split(delimiter).filter(Boolean)) {
+    if (canExecute(resolve(entry, command))) return true;
+  }
+  return false;
+}
+
+function canExecute(filePath: string): boolean {
+  try {
+    accessSync(filePath, constants.X_OK);
+    return statSync(filePath).isFile();
+  } catch {
+    return false;
   }
 }

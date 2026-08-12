@@ -16,6 +16,32 @@ export interface AdapterTestResult {
   details?: Record<string, unknown>;
 }
 
+export type WorkflowCapabilityRole = 'supervisor' | 'implementer' | 'adviser' | 'reviewer';
+
+export interface AdapterCapabilityDescriptor {
+  adapter: 'codex' | 'claude' | 'opencode' | 'fable' | 'grok' | 'antigravity';
+  command: 'codex' | 'claude' | 'opencode' | 'grok' | 'agy';
+  installed: boolean;
+  version: string | null;
+  transport: 'stdin' | 'unsupported';
+  structured_output: { supported: boolean; format: string | null };
+  sandbox: { supported: boolean; mode: string | null };
+  tools: { configurable: boolean; mode: 'enabled' | 'disabled' | 'unknown' };
+  resume: { advertised: boolean; enabled: boolean };
+  role_compatibility: Record<WorkflowCapabilityRole, { compatible: boolean; reasons: string[] }>;
+  models: {
+    cli_default: boolean;
+    verified: Array<{ id: string; source: 'trusted_catalog' | 'local_detection' }>;
+  };
+  supported_options: string[];
+  unsupported_options: string[];
+  detail: string;
+  /** Legacy workflow readiness aliases. */
+  available: boolean;
+  advertised_native_resume: boolean;
+  native_resume: boolean;
+}
+
 export interface ExecuteParams {
   prompt: string;
   systemPrompt?: string;
@@ -25,6 +51,11 @@ export interface ExecuteParams {
   security?: {
     allowPermissionBypass?: boolean;
     allowShellAdapter?: boolean;
+  };
+  execution: {
+    owner: string;
+    sandbox: unknown;
+    allowedExecutables: import('../process/command-runner.js').ExecutableDescriptor[];
   };
   persistPrompts?: boolean;
   signal?: AbortSignal;

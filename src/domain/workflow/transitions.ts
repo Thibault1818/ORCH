@@ -1,6 +1,6 @@
-export type WorkflowPhase = 'codex_pre_opus' | 'fable_consultation' | 'codex_after_fable' | 'opus_execution' | 'codex_post_opus' | 'verification' | 'merge_ready' | 'done' | 'blocked' | 'paused' | 'cancelled' | 'failed';
+export type WorkflowPhase = 'codex_pre_opus' | 'fable_consultation' | 'codex_after_fable' | 'opus_execution' | 'codex_post_opus' | 'verification' | 'awaiting_approval' | 'merge_ready' | 'done' | 'blocked' | 'paused' | 'cancelled' | 'failed';
 
-const ACTIVE: WorkflowPhase[] = ['codex_pre_opus', 'fable_consultation', 'codex_after_fable', 'opus_execution', 'codex_post_opus', 'verification', 'merge_ready'];
+const ACTIVE: WorkflowPhase[] = ['codex_pre_opus', 'fable_consultation', 'codex_after_fable', 'opus_execution', 'codex_post_opus', 'verification', 'awaiting_approval', 'merge_ready'];
 
 export const WORKFLOW_PHASE_TRANSITIONS: Readonly<Record<WorkflowPhase, readonly WorkflowPhase[]>> = {
   codex_pre_opus: ['fable_consultation', 'opus_execution', 'paused', 'cancelled', 'failed'],
@@ -8,7 +8,8 @@ export const WORKFLOW_PHASE_TRANSITIONS: Readonly<Record<WorkflowPhase, readonly
   codex_after_fable: ['opus_execution', 'verification', 'paused', 'cancelled', 'failed'],
   opus_execution: ['codex_post_opus', 'blocked', 'paused', 'cancelled', 'failed'],
   codex_post_opus: ['fable_consultation', 'opus_execution', 'verification', 'paused', 'cancelled', 'failed'],
-  verification: ['merge_ready', 'blocked', 'paused', 'cancelled', 'failed'],
+  verification: ['awaiting_approval', 'blocked', 'paused', 'cancelled', 'failed'],
+  awaiting_approval: ['merge_ready', 'cancelled', 'failed'],
   merge_ready: ['done', 'blocked', 'paused', 'cancelled', 'failed'],
   done: [], blocked: [...ACTIVE, 'cancelled'], paused: [...ACTIVE, 'blocked', 'cancelled'], cancelled: [], failed: [],
 };

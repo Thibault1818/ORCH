@@ -8,6 +8,7 @@
 import type { Command } from 'commander';
 import type { Container } from '../../container.js';
 import { ProcessManager } from '../../infrastructure/process/process-manager.js';
+import { CommandRunner, resolveExecutable } from '../../infrastructure/process/command-runner.js';
 import { AdapterRegistry } from '../../infrastructure/adapters/registry.js';
 import { ClaudeAdapter } from '../../infrastructure/adapters/claude.js';
 import { ShellAdapter } from '../../infrastructure/adapters/shell.js';
@@ -35,13 +36,18 @@ export function registerDoctorCommand(program: Command, container?: Container): 
         hasContainer = true;
       } else {
         const pm = new ProcessManager();
+        const runner = new CommandRunner(pm);
         const registry = new AdapterRegistry();
-        registry.register(new ClaudeAdapter(pm));
-        registry.register(new ShellAdapter(pm));
-        registry.register(new PiAdapter(pm));
-        registry.register(new GrokAdapter(pm));
-        registry.register(new AntigravityAdapter(pm));
-        doctorService = new DoctorService(registry, pm, process.cwd());
+        registry.register(new ClaudeAdapter(pm, runner));
+        registry.register(new ShellAdapter(pm, runner));
+        registry.register(new PiAdapter(pm, runner));
+        registry.register(new GrokAdapter(pm, runner));
+        registry.register(new AntigravityAdapter(pm, runner));
+        const [git, node] = await Promise.all([
+          resolveExecutable('git').catch(() => undefined),
+          resolveExecutable('node').catch(() => undefined),
+        ]);
+        doctorService = new DoctorService(registry, runner, { git, node }, process.cwd());
         paths = new Paths(process.cwd());
       }
 

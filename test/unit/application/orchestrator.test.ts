@@ -113,7 +113,7 @@ describe('Orchestrator', () => {
       orchestrator = new Orchestrator(deps);
 
       await orchestrator.runTask('tsk_1');
-      await waitFor(async () => (await taskStore.get('tsk_1'))?.status === 'done');
+      await waitFor(async () => (await taskStore.get('tsk_1'))?.status === 'review');
 
       // Wait past the 500ms immediate-dispatch debounce. A single-task run must
       // not consume the next ready task just because the first agent became idle.
@@ -138,7 +138,7 @@ describe('Orchestrator', () => {
       orchestrator = new Orchestrator(deps);
 
       await orchestrator.runTask('tsk_1');
-      await waitFor(async () => (await taskStore.get('tsk_1'))?.status === 'done');
+      await waitFor(async () => (await taskStore.get('tsk_1'))?.status === 'review');
 
       expect((await stateStore.read())?.claimed).toEqual(new Set());
     });
@@ -166,7 +166,7 @@ describe('Orchestrator', () => {
       orchestrator = new Orchestrator(deps);
 
       await orchestrator.runTask('tsk_1');
-      await waitFor(async () => (await taskStore.get('tsk_1'))?.status === 'done');
+      await waitFor(async () => (await taskStore.get('tsk_1'))?.status === 'review');
 
       expect(adapter.execute).toHaveBeenCalledWith(expect.objectContaining({
         security: { allowPermissionBypass: false, allowShellAdapter: false },
@@ -198,7 +198,7 @@ describe('Orchestrator', () => {
 
       try {
         await orchestrator.runTask('tsk_1');
-        await waitFor(async () => (await taskStore.get('tsk_1'))?.status === 'done');
+        await waitFor(async () => (await taskStore.get('tsk_1'))?.status === 'review');
 
         expect(adapter.execute).toHaveBeenCalledWith(expect.objectContaining({
           security: { allowPermissionBypass: true, allowShellAdapter: true },
@@ -298,7 +298,7 @@ describe('Orchestrator', () => {
       deps = buildDeps({ taskStore, agentStore, goalStore, adapterRegistry });
       orchestrator = new Orchestrator(deps);
       await orchestrator.runAll();
-      await waitFor(async () => (await taskStore.get('tsk_lead'))?.status === 'done');
+      await waitFor(async () => (await taskStore.get('tsk_lead'))?.status === 'review');
 
       expect((await taskStore.get('tsk_worker'))?.status).toBe('todo');
       expect(await deps.runStore.listAll()).toHaveLength(1);
@@ -1242,7 +1242,7 @@ describe('Orchestrator', () => {
       orchestrator = new Orchestrator(deps);
       await orchestrator.startWatch();
 
-      await waitFor(async () => (await taskStore.get(task.id))?.status === 'done');
+      await waitFor(async () => (await taskStore.get(task.id))?.status === 'review');
       const run = (await runStore.listAll())[0]!;
       const events = await runStore.readEvents(run.id);
 

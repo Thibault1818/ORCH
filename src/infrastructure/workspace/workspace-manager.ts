@@ -1,238 +1,177 @@
-/**
- * Workspace manager implementation.
- *
- * Resolves workspace path based on mode priority chain:
- * task.workspace_mode → agent.config.workspace_mode → defaults.agent.workspace_mode → 'worktree'
- */
-
-import path from 'node:path';
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import os from 'node:os';
+import path from 'node:path';
 import type { Agent } from '../../domain/agent.js';
 import type { OrchestratorConfig } from '../../domain/config.js';
 import type { Task, WorkspaceMode } from '../../domain/task.js';
-import type { IProcessManager } from '../process/process-manager.js';
-import { validateWorkspacePath, sanitizeId } from '../storage/paths.js';
-import { ensureDir } from '../storage/fs-utils.js';
-import type { IWorkspaceManager, PrepareResult } from './interface.js';
-import { MergeStrategy, type MergeResult } from './merge-strategy.js';
 import { WorkspaceError } from '../../domain/errors.js';
+import type { ICommandRunner } from '../process/command-runner.js';
+import { CommandRunner, resolveExecutable } from '../process/command-runner.js';
+import type { IProcessManager } from '../process/process-manager.js';
+import { HardenedGit } from '../git/hardened-git.js';
+import { validateWorkspacePath, sanitizeId } from '../storage/paths.js';
+import type { IWorkspaceManager, PrepareResult, WorkspaceEvidence } from './interface.js';
+import type { MergeResult } from './merge-strategy.js';
 
 export class WorkspaceManager implements IWorkspaceManager {
-  private readonly mergeStrategy: MergeStrategy;
+  private readonly runner: ICommandRunner;
+  private readonly git: Promise<HardenedGit>;
   private gitRepoChecked = false;
-  private isGitRepo = false;
 
   constructor(
     private readonly projectRoot: string,
-    private readonly orchestryDir: string,
-    private readonly processManager: IProcessManager,
+    private readonly workspaceRoot: string,
+    runner: ICommandRunner | IProcessManager,
   ) {
-    this.mergeStrategy = new MergeStrategy(projectRoot, processManager);
+    const commandRunner = 'run' in runner ? runner : new CommandRunner(runner);
+    this.runner = commandRunner;
+    this.git = (async () => new HardenedGit(
+      commandRunner,
+      commandRunner.resolveExecutable ? await commandRunner.resolveExecutable('git') : await resolveExecutable('git'),
+      { configRoot: path.join(os.tmpdir(), 'orch-workspace-git') },
+    ))();
   }
 
   async prepare(task: Task, agent: Agent, config: OrchestratorConfig): Promise<PrepareResult> {
     const mode = this.resolveMode(task, agent, config);
+    if (mode === 'shared') throw new WorkspaceError('workspace_mode "shared" is disabled because changes cannot be held for human approval');
+    await this.requireGitRepo(mode);
+    return this.prepareClone(task);
+  }
 
-    if (mode !== 'shared') {
-      await this.requireGitRepo(mode);
-    }
+  async inspect(branch: string): Promise<WorkspaceEvidence> {
+    const clone = this.cloneForBranch(branch);
+    const git = await this.git;
+    const status = (await git.run(clone, ['status', '--porcelain'])).trim();
+    if (status) throw new WorkspaceError('Isolated clone has uncommitted changes');
+    const [commit, baseCommit, targetBranch] = await Promise.all([
+      git.run(clone, ['rev-parse', 'HEAD']),
+      git.run(clone, ['merge-base', 'HEAD', '@{upstream}']),
+      git.run(this.projectRoot, ['branch', '--show-current']),
+    ]);
+    const base = baseCommit.trim();
+    const head = commit.trim();
+    const diff = await git.run(clone, ['diff', '--binary', `${base}...${head}`], { maxStdoutBytes: 16 * 1024 * 1024 });
+    const changedFiles = (await git.run(clone, ['diff', '--name-only', '-z', `${base}...${head}`]))
+      .split('\0').filter(Boolean).sort();
+    return {
+      baseCommit: base,
+      commit: head,
+      diffHash: createHash('sha256').update(diff).digest('hex'),
+      changedFiles,
+      targetBranch: targetBranch.trim(),
+    };
+  }
 
-    switch (mode) {
-      case 'shared':
-        return { path: this.projectRoot };
-
-      case 'worktree':
-        return this.prepareWorktree(task);
-
-      case 'isolated':
-        return { path: await this.prepareIsolated(task) };
-
-      default:
-        return { path: this.projectRoot };
+  async mergeBack(branch: string, expected: WorkspaceEvidence): Promise<MergeResult> {
+    try {
+      const clone = this.cloneForBranch(branch);
+      const git = await this.git;
+      const actual = await this.inspect(branch);
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) return { success: false, conflictInfo: 'Approved workspace evidence changed' };
+      const [currentBranch, currentCommit, controllerStatus] = await Promise.all([
+        git.run(this.projectRoot, ['branch', '--show-current']),
+        git.run(this.projectRoot, ['rev-parse', 'HEAD']),
+        git.run(this.projectRoot, ['status', '--porcelain']),
+      ]);
+      if (currentBranch.trim() !== expected.targetBranch || currentCommit.trim() !== expected.baseCommit)
+        return { success: false, conflictInfo: 'Target branch changed after review' };
+      if (controllerStatus.trim()) return { success: false, conflictInfo: 'Controller worktree is dirty' };
+      const integrationRef = `refs/orchestry/tasks/${sanitizeId(branch.split('/')[1] ?? '')}`;
+      await git.run(this.projectRoot, ['fetch', '--no-tags', clone, `${expected.commit}:${integrationRef}`], { fileProtocol: 'always' });
+      const result = await git.run(this.projectRoot, ['merge', '--ff-only', integrationRef], { output: 'result' });
+      if (result.ok) return { success: true };
+      const output = `${result.stdout}${result.stderr}`.slice(0, 1000);
+      if (/CONFLICT|Merge conflict/.test(output)) await git.run(this.projectRoot, ['merge', '--abort'], { output: 'result' });
+      return { success: false, conflictInfo: output };
+    } catch (error) {
+      return { success: false, conflictInfo: error instanceof Error ? error.message : String(error) };
     }
   }
 
-  private async requireGitRepo(mode: WorkspaceMode): Promise<void> {
-    if (!this.gitRepoChecked) {
-      const code = await this.spawnAndWait('git', ['rev-parse', '--is-inside-work-tree']);
-      this.isGitRepo = code === 0;
-      // Only cache positive result — negative may change if user runs git init
-      if (this.isGitRepo) this.gitRepoChecked = true;
-    }
-
-    if (!this.isGitRepo) {
-      throw new WorkspaceError(
-        `workspace_mode "${mode}" requires a git repository`,
-        'Run: git init && git add -A && git commit -m "Initial commit"\n         Or set workspace_mode: shared in .orchestry/config.yml',
-      );
-    }
-  }
-
-  async mergeBack(branch: string): Promise<MergeResult> {
-    return this.mergeStrategy.mergeBack(branch);
-  }
-
-  async cleanup(taskId: string, branch?: string): Promise<void> {
-    const workspacePath = path.join(this.orchestryDir, 'workspaces', sanitizeId(taskId));
-
-    // Try git worktree remove first (cleans up .git/worktrees/ metadata)
-    await this.spawnAndWait('git', ['worktree', 'remove', '--force', workspacePath]);
-
-    // Delete branch + remove directory concurrently
-    const branchDeletion = branch
-      ? this.spawnAndWait('git', ['branch', '-D', branch]).then(() => {})
-      : Promise.resolve();
-
-    const dirRemoval = fs.rm(workspacePath, { recursive: true, force: true }).catch(() => {});
-
-    await Promise.all([branchDeletion, dirRemoval]);
+  async cleanup(taskId: string): Promise<void> {
+    await fs.rm(path.join(this.workspaceRoot, sanitizeId(taskId)), { recursive: true, force: true });
   }
 
   validate(workspacePath: string, projectRoot: string): void {
     validateWorkspacePath(workspacePath, projectRoot);
   }
 
-  /**
-   * Get files changed on a worktree branch relative to its merge-base.
-   * Uses `git merge-base` to find the fork point dynamically (no hardcoded branch name).
-   */
   async getChangedFiles(branch: string): Promise<string[]> {
     try {
-      const { stdout: baseStdout } = await this.spawnAndCapture(
-        'git', ['merge-base', 'HEAD', branch],
-      );
-      const mergeBase = baseStdout.trim();
-      if (!mergeBase) return [];
-
-      const { stdout: diffStdout, code } = await this.spawnAndCapture(
-        'git', ['diff', '--name-only', `${mergeBase}...${branch}`],
-      );
-      if (code !== 0 || !diffStdout.trim()) return [];
-      return diffStdout.trim().split('\n').filter(Boolean);
+      const clone = this.cloneForBranch(branch);
+      const git = await this.git;
+      const base = (await git.run(clone, ['merge-base', 'HEAD', '@{upstream}'])).trim();
+      return (await git.run(clone, ['diff', '--name-only', `${base}...HEAD`])).trim().split('\n').filter(Boolean);
     } catch {
       return [];
     }
   }
 
   private resolveMode(task: Task, agent: Agent, config: OrchestratorConfig): WorkspaceMode {
-    return (
-      task.workspace_mode ??
-      agent.config.workspace_mode ??
-      config.defaults.agent.workspace_mode ??
-      'worktree'
-    );
+    return task.workspace_mode ?? agent.config.workspace_mode ?? config.defaults.agent.workspace_mode ?? 'worktree';
   }
 
-  private async prepareWorktree(task: Task): Promise<PrepareResult> {
-    const workspacePath = path.join(
-      this.orchestryDir,
-      'workspaces',
-      sanitizeId(task.id),
-    );
-    await ensureDir(path.dirname(workspacePath));
-
-    const titleSlug = sanitizeTitle(task.title) || sanitizeId(task.id);
-    const branchName = `orchestry/${sanitizeId(task.id)}/${titleSlug}`;
-
-    // Idempotent: if worktree directory already exists (retry after failure), reuse it
-    try {
-      await fs.access(workspacePath);
-      return { path: workspacePath, branch: branchName };
-    } catch {
-      // Directory doesn't exist — create fresh
-    }
-
-    // Try creating worktree: first with new branch (-b), fallback to existing branch
-    const createResult = await this.spawnAndWait(
-      'git', ['worktree', 'add', workspacePath, '-b', branchName],
-    );
-    if (createResult !== 0) {
-      // Branch may already exist from a previous failed run — prune stale metadata and retry
-      await this.spawnAndWait('git', ['worktree', 'prune']);
-      const reuseResult = await this.spawnAndWait(
-        'git', ['worktree', 'add', workspacePath, branchName],
-      );
-      if (reuseResult !== 0) {
-        throw new WorkspaceError(
-          `git worktree add failed with code ${reuseResult}`,
-          'Run: git worktree prune && git branch | grep orchestry | xargs -r git branch -D',
-        );
+  private async requireGitRepo(mode: WorkspaceMode): Promise<void> {
+    if (!this.gitRepoChecked) {
+      try {
+        this.gitRepoChecked = (await (await this.git).run(this.projectRoot, ['rev-parse', '--is-inside-work-tree'])).trim() === 'true';
+      } catch {
+        this.gitRepoChecked = false;
       }
     }
-
-    // Remove .orchestry/ from worktree to prevent recursive state/workspaces
-    const worktreeOrchestry = path.join(workspacePath, '.orchestry');
-    await fs.rm(worktreeOrchestry, { recursive: true, force: true }).catch(() => {});
-
-    return { path: workspacePath, branch: branchName };
-  }
-
-  /** Spawn a command and return exit code (non-throwing). */
-  private async spawnAndWait(cmd: string, args: string[]): Promise<number> {
-    try {
-      const { process: proc } = this.processManager.spawn(cmd, args, { cwd: this.projectRoot });
-      return new Promise<number>((resolve) => {
-        proc.on('close', (code) => resolve(code ?? 1));
-        proc.on('error', () => resolve(1));
-      });
-    } catch {
-      return 1;
-    }
-  }
-
-  /** Spawn a command and capture stdout + exit code. */
-  private async spawnAndCapture(cmd: string, args: string[]): Promise<{ stdout: string; code: number }> {
-    try {
-      const { process: proc } = this.processManager.spawn(cmd, args, { cwd: this.projectRoot });
-      let stdout = '';
-      proc.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
-      const code = await new Promise<number>((resolve) => {
-        proc.on('close', (c) => resolve(c ?? 1));
-        proc.on('error', () => resolve(1));
-      });
-      return { stdout, code };
-    } catch {
-      return { stdout: '', code: 1 };
-    }
-  }
-
-  private async prepareIsolated(task: Task): Promise<string> {
-    const workspacePath = path.join(
-      this.orchestryDir,
-      'workspaces',
-      sanitizeId(task.id),
-    );
-    await ensureDir(path.dirname(workspacePath));
-
-    // Try git clone first, fall back to rsync
-    try {
-      const cloneResult = await this.spawnAndWait(
-        'git', ['clone', '--local', '--no-hardlinks', this.projectRoot, workspacePath],
+    if (!this.gitRepoChecked)
+      throw new WorkspaceError(
+        `workspace_mode "${mode}" requires a git repository`,
+        'Run: git init && git add -A && git commit -m "Initial commit"\n         Or set workspace_mode: shared in .orchestry/config.yml',
       );
-      if (cloneResult !== 0) throw new Error('git clone failed');
-    } catch {
-      // Fallback: rsync
-      const excludeFile = path.join(this.orchestryDir, 'workspace-exclude');
-      const args = ['-a', `--exclude-from=${excludeFile}`, './', `${workspacePath}/`];
+  }
 
-      const rsyncResult = await this.spawnAndWait('rsync', args);
-      if (rsyncResult !== 0) {
-        throw new Error(`rsync failed with code ${rsyncResult}`);
-      }
+  private async prepareClone(task: Task): Promise<PrepareResult> {
+    const id = sanitizeId(task.id);
+    const workspace = path.join(this.workspaceRoot, id);
+    const branch = `orchestry/${id}/${sanitizeTitle(task.title) || id}`;
+    const git = await this.git;
+    const [baseValue, targetValue] = await Promise.all([
+      git.run(this.projectRoot, ['rev-parse', 'HEAD']),
+      git.run(this.projectRoot, ['branch', '--show-current']),
+    ]);
+    const base = baseValue.trim();
+    const targetBranch = targetValue.trim();
+    if (!targetBranch) throw new WorkspaceError('Controller must be on a named branch');
+    await fs.mkdir(this.workspaceRoot, { recursive: true, mode: 0o700 });
+    try {
+      const [existingBranch, status] = await Promise.all([
+        git.run(workspace, ['branch', '--show-current']),
+        git.run(workspace, ['status', '--porcelain']),
+      ]);
+      if (existingBranch.trim() !== branch || status.trim()) throw new WorkspaceError('Existing isolated clone is stale or dirty');
+      await git.run(workspace, ['merge-base', '--is-ancestor', base, 'HEAD']);
+      return { path: workspace, branch, baseCommit: base, targetBranch };
+    } catch (error) {
+      if (error instanceof WorkspaceError) throw error;
+      await fs.rm(workspace, { recursive: true, force: true });
     }
+    try {
+      await git.run(this.workspaceRoot, ['clone', '--local', '--no-hardlinks', this.projectRoot, workspace], { fileProtocol: 'always' });
+      await git.run(workspace, ['checkout', '-b', branch, base]);
+      await git.run(workspace, ['branch', '--set-upstream-to', `origin/${targetBranch}`, branch]);
+      await fs.rm(path.join(workspace, '.orchestry'), { recursive: true, force: true });
+      return { path: workspace, branch, baseCommit: base, targetBranch };
+    } catch (error) {
+      await fs.rm(workspace, { recursive: true, force: true });
+      throw new WorkspaceError(`Isolated git clone failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 
-    // Remove .orchestry/ to prevent recursive workspaces (covers both clone and rsync)
-    const clonedOrchestry = path.join(workspacePath, '.orchestry');
-    await fs.rm(clonedOrchestry, { recursive: true, force: true }).catch(() => {});
-
-    return workspacePath;
+  private cloneForBranch(branch: string): string {
+    const match = /^orchestry\/([A-Za-z0-9._-]+)\//.exec(branch);
+    if (!match) throw new WorkspaceError('Invalid isolated clone branch');
+    return path.join(this.workspaceRoot, sanitizeId(match[1]!));
   }
 }
 
 function sanitizeTitle(title: string): string {
-  return title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 40);
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
 }

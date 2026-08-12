@@ -7,12 +7,16 @@
  * Timeout: 30s per test.
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { describe, it, expect, afterAll, afterEach } from 'vitest';
 import { ProcessManager } from '../../../src/infrastructure/process/process-manager.js';
 
 const isCI = !!process.env['CI'];
 
-const manager = new ProcessManager();
+const root = mkdtempSync(path.join(os.tmpdir(), 'orch-process-endurance-'));
+const manager = new ProcessManager(path.join(root, 'processes.json'));
 
 // Track all spawned PIDs for cleanup
 const spawnedPids: number[] = [];
@@ -34,6 +38,8 @@ afterEach(() => {
   }
   spawnedPids.length = 0;
 });
+
+afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 describe('ProcessManager endurance', { timeout: 30_000, skip: isCI }, () => {
   /**

@@ -5,13 +5,12 @@
  */
 
 import type { AdapterRegistry } from '../infrastructure/adapters/registry.js';
-import type { IProcessManager } from '../infrastructure/process/process-manager.js';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import type { ExecutableDescriptor, ICommandRunner } from '../infrastructure/process/command-runner.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-const execFileAsync = promisify(execFile);
+const COMMAND_TIMEOUT_MS = 10_000;
+const MAX_COMMAND_OUTPUT_BYTES = 64 * 1024;
 
 export interface DoctorCheck {
   name: string;
@@ -25,15 +24,24 @@ export interface DoctorReport {
   adaptersTotal: number;
 }
 
+export interface DoctorExecutables {
+  git?: ExecutableDescriptor;
+  node?: ExecutableDescriptor;
+}
+
 export class DoctorService {
   private readonly cwd: string;
 
   constructor(
     private readonly adapterRegistry: AdapterRegistry,
-    private readonly processManager: IProcessManager,
+    private readonly commandRunner: ICommandRunner,
+    private readonly executables: DoctorExecutables,
     projectRoot?: string,
   ) {
-    this.cwd = projectRoot ?? process.cwd();
+    this.cwd = path.resolve(projectRoot ?? process.cwd());
+    for (const executable of Object.values(executables)) {
+      if (executable) validateDescriptor(executable);
+    }
   }
 
   async runAll(): Promise<DoctorReport> {
@@ -62,7 +70,7 @@ export class DoctorService {
     }
 
     // Check git
-    checks.push(await this.checkCommand('git', ['--version'], 'git'));
+    checks.push(await this.checkCommand(this.executables.git, ['--version'], 'git', 'git'));
 
     // Check git repository (required for worktree/isolated workspace modes)
     checks.push(await this.checkGitRepo());
@@ -71,7 +79,7 @@ export class DoctorService {
     checks.push(await this.checkGitignore());
 
     // Check node
-    checks.push(await this.checkCommand('node', ['--version'], 'node'));
+    checks.push(await this.checkCommand(this.executables.node, ['--version'], 'node', 'node'));
 
     return {
       checks,
@@ -81,15 +89,25 @@ export class DoctorService {
   }
 
   private async checkCommand(
-    command: string,
-    args: string[],
+    executable: ExecutableDescriptor | undefined,
+    args: readonly string[],
     name: string,
+    commandName: string,
   ): Promise<DoctorCheck> {
+    if (!executable) return { name, status: 'fail', detail: `${commandName}: command not found` };
     try {
-      const { stdout } = await execFileAsync(command, args);
-      return { name, status: 'ok', detail: stdout.trim() };
+      const result = await this.commandRunner.run({
+        executable,
+        args,
+        env: doctorEnvironment(executable),
+        timeoutMs: COMMAND_TIMEOUT_MS,
+        maxStdoutBytes: MAX_COMMAND_OUTPUT_BYTES,
+        maxStderrBytes: MAX_COMMAND_OUTPUT_BYTES,
+      });
+      if (!result.ok) return { name, status: 'fail', detail: `${commandName}: command not found` };
+      return { name, status: 'ok', detail: result.stdout.trim() };
     } catch {
-      return { name, status: 'fail', detail: `${command}: command not found` };
+      return { name, status: 'fail', detail: `${commandName}: command not found` };
     }
   }
 
@@ -116,15 +134,46 @@ export class DoctorService {
   }
 
   private async checkGitRepo(): Promise<DoctorCheck> {
+    const git = this.executables.git;
+    if (!git) return this.gitRepoFailure();
     try {
-      await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: this.cwd });
+      const result = await this.commandRunner.run({
+        executable: git,
+        args: ['rev-parse', '--is-inside-work-tree'],
+        cwd: this.cwd,
+        env: doctorEnvironment(git),
+        timeoutMs: COMMAND_TIMEOUT_MS,
+        maxStdoutBytes: MAX_COMMAND_OUTPUT_BYTES,
+        maxStderrBytes: MAX_COMMAND_OUTPUT_BYTES,
+      });
+      if (!result.ok) return this.gitRepoFailure();
       return { name: 'git repo', status: 'ok', detail: 'git repository detected' };
     } catch {
-      return {
-        name: 'git repo',
-        status: 'fail',
-        detail: 'not a git repository — worktree/isolated modes will fail. Run: git init',
-      };
+      return this.gitRepoFailure();
     }
+  }
+
+  private gitRepoFailure(): DoctorCheck {
+    return {
+      name: 'git repo',
+      status: 'fail',
+      detail: 'not a git repository — worktree/isolated modes will fail. Run: git init',
+    };
+  }
+}
+
+function doctorEnvironment(executable: ExecutableDescriptor): NodeJS.ProcessEnv {
+  return {
+    PATH: [...new Set([path.dirname(executable.path), path.dirname(executable.realpath), '/usr/bin', '/bin', '/usr/sbin', '/sbin'])].join(path.delimiter),
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_TERMINAL_PROMPT: '0',
+    NO_COLOR: '1',
+  };
+}
+
+function validateDescriptor(value: ExecutableDescriptor): void {
+  if (!path.isAbsolute(value.path) || !path.isAbsolute(value.realpath) || !/^[a-f0-9]{64}$/.test(value.sha256)) {
+    throw new Error('DoctorService requires absolute pinned executable descriptors');
   }
 }

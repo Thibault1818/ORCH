@@ -7,8 +7,11 @@
 import type { Command } from 'commander';
 import type { LightContainer } from '../../container.js';
 import type { ActivityFilterPreset } from '../../domain/global-config.js';
+import { CommandRunner, commandFailureMessage, resolveExecutable } from '../../infrastructure/process/command-runner.js';
+import { ProcessManager } from '../../infrastructure/process/process-manager.js';
 import { printSuccess, printError, dim } from '../output.js';
-import { spawn } from 'node:child_process';
+
+const commandRunner = new CommandRunner(new ProcessManager());
 
 const VALID_FILTER_PRESETS: ActivityFilterPreset[] = ['all', 'text', 'tools', 'errors', 'events'];
 const SECURITY_CONFIG_KEYS = new Set([
@@ -94,17 +97,21 @@ export function registerConfigCommand(program: Command, container: LightContaine
 
       const editor = process.env['EDITOR'] || process.env['VISUAL'] || 'vi';
       const parts = editor.split(/\s+/);
-      const child = spawn(parts[0]!, [...parts.slice(1), container.paths.configPath], {
+      const executable = await resolveExecutable(parts[0]!);
+      const result = await commandRunner.run({
+        executable,
+        args: [...parts.slice(1), container.paths.configPath],
+        env: process.env,
         stdio: 'inherit',
+        timeoutMs: 2_147_483_647,
+        maxStdoutBytes: 1,
+        maxStderrBytes: 1,
       });
-
-      await new Promise<void>((resolve, reject) => {
-        child.on('close', (code) => {
-          if (code === 0) resolve();
-          else reject(new Error(`Editor exited with code ${code}`));
-        });
-        child.on('error', reject);
-      });
+      if (!result.ok) {
+        throw new Error(result.termination === 'exited'
+          ? `Editor exited with code ${result.exitCode}`
+          : commandFailureMessage(result));
+      }
     });
 
   // ── Global config (cross-project, ~/.orchestry/global.yml) ──

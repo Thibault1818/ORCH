@@ -123,7 +123,7 @@ describe('autoApprove + review_criteria interaction', () => {
     return { orch, taskStore, agentStore, deps, emittedEvents, taskId, agentId, runId };
   }
 
-  it('transitions to done when review_criteria pass and autoApprove is set', async () => {
+  it('requires human approval when review_criteria pass even if autoApprove is set', async () => {
     const { orch, taskStore, taskId, runId, agentId } = await setup({
       autoApprove: true,
       criteriaPass: true,
@@ -132,7 +132,7 @@ describe('autoApprove + review_criteria interaction', () => {
     await (orch as any)._handleRunSuccess(taskId, runId, agentId, undefined, 'result text', []);
 
     const task = await taskStore.get(taskId);
-    expect(task!.status).toBe('done');
+    expect(task!.status).toBe('review');
   });
 
   it('stays in review when review_criteria fail even if autoApprove is set', async () => {
@@ -187,7 +187,7 @@ describe('autoApprove + review_criteria interaction', () => {
     expect(task!.review_results![0]!.passed).toBe(false);
   });
 
-  it('transitions review → done directly when autoApprove is set and no review_criteria', async () => {
+  it('requires human approval when autoApprove is set and no review_criteria', async () => {
     const { orch, taskStore, taskId, runId, agentId } = await setup({
       autoApprove: true,
       reviewCriteria: [],
@@ -197,7 +197,7 @@ describe('autoApprove + review_criteria interaction', () => {
     await (orch as any)._handleRunSuccess(taskId, runId, agentId, undefined, 'result text', []);
 
     const task = await taskStore.get(taskId);
-    expect(task!.status).toBe('done');
+    expect(task!.status).toBe('review');
     // review_results should NOT be set — runAutoReview was never called
     expect(task!.review_results).toBeUndefined();
   });

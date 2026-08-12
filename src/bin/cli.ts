@@ -36,6 +36,7 @@ const FULL_COMMANDS: Record<string, (program: Command, container: Container) => 
   tui:     async (p, c) => { const m = await import('../cli/commands/tui.js');     m.registerTuiCommand(p, c); },
   serve:   async (p, c) => { const m = await import('../cli/commands/serve.js');   m.registerServeCommand(p, c); },
   workflow: async (p, c) => { const m = await import('../cli/commands/workflow.js'); m.registerWorkflowCommand(p, c); },
+  provider: async (p, c) => { const m = await import('../cli/commands/provider.js'); m.registerProviderCommand(p, c); },
 };
 
 const program = new Command();
@@ -70,7 +71,8 @@ const COMMAND_STUBS: Array<[name: string, description: string]> = [
   ['doctor',  'Check adapters and dependencies'],
   ['tui',     'Launch TUI dashboard'],
   ['serve',   'Headless daemon mode with structured logs'],
-  ['workflow','Run the Codex-Fable-Opus workflow'],
+  ['workflow','Run governed multi-provider workflows'],
+  ['provider','Discover and qualify workflow providers'],
   ['init',    'Initialize project'],
   ['setup',   'Show setup status or configure an explicit integration'],
   ['update',  'Check for updates'],

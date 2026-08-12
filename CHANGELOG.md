@@ -3,12 +3,26 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## Plan3
+
+### Changed
+
+- Reframed the dedicated workflow around Supervisor, Implementer, optional Adviser, and Reviewer roles, with an immutable launch roster and audited binding rotation only at a paused boundary.
+- Added check discovery and the TTY launch wizard, launch summaries, project/global presets, direct mode, and an adaptive default that uses no Adviser with a zero call cap.
+- Expanded `workflow doctor` and status output with capability reasons, roster revisions, role usage, Adviser budget, checks, and blockers.
+
+### Security
+
+- Workflow launch validates a meaningful trusted check before any LLM invocation; noninteractive launch requires an explicit acceptance path such as `--yes --check "npm run test"`.
+- Every enabled workflow role receives prompts through stdin. Grok and Antigravity remain disabled and fail closed because secure stdin prompt transport is unproven.
+- Native resume remains opt-in pending an end-to-end continuation probe; the default is a durable passport handoff.
+
 ## 1.1.0-th.1 (2026-08-03)
 
 ### Added
 
-- Recoverable direct Codex-Opus workflow with strict phase-valid actions, compact versioned passports, immutable artifacts, invocation receipts, native continuation detection, and audited passport handoffs.
-- Adaptive and direct modes. Adaptive permits at most one stateless, low-authority Fable consultation; direct prohibits Fable completely.
+- Recoverable dedicated workflow with strict phase-valid wire actions, compact versioned passports, immutable artifacts, invocation receipts, native continuation detection, and audited passport handoffs.
+- Adaptive and direct modes. Adaptive can permit one stateless, low-authority Adviser consultation when configured; direct prohibits an Adviser completely.
 - Safe `orch setup`, workflow doctor/status/log/artifact commands, explicit session rotation, hard Fable call caps, role-specific execution profiles, and per-role usage accounting.
 - Fake Claude/Codex executable tests, restart reconciliation tests, real Git worktree and stale-evidence tests, and exact-SHA installation CI on macOS/Linux with Node 20/24.
 - Journaled passport updates, monotonic workflow revisions, idempotent worktree preparation, and durable check/merge receipts that prevent duplicate side effects after restart.

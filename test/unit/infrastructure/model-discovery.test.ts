@@ -1,11 +1,34 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const { commandRunMock, resolveExecutableMock } = vi.hoisted(() => ({
+  commandRunMock: vi.fn(),
+  resolveExecutableMock: vi.fn((command: string) => Promise.resolve({
+    path: `/resolved/${command}`,
+    realpath: `/resolved/${command}`,
+    sha256: 'a'.repeat(64),
+  })),
+}));
+
+vi.mock('../../../src/infrastructure/process/command-runner.js', () => ({
+  CommandRunner: class {
+    run = commandRunMock;
+  },
+  resolveExecutable: resolveExecutableMock,
+  commandFailureMessage: () => 'command failed',
+}));
+
 import {
+  discoverModelOptions,
   getFallbackModelOptions,
   parseGrokModels,
   parseLineModels,
 } from '../../../src/infrastructure/models/model-discovery.js';
 
 describe('model discovery parsers', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it('parses grok models and marks the current default', () => {
     const output = `
 You are logged in with grok.com.
@@ -43,5 +66,27 @@ Claude Sonnet 4.6 (Thinking)
     expect(getFallbackModelOptions('unknown')).toEqual([
       { value: '', label: 'Default', hint: 'use adapter default' },
     ]);
+  });
+
+  it('discovers with a bounded pinned executable descriptor and no shell', async () => {
+    commandRunMock.mockResolvedValue({ ok: true, stdout: 'provider/model\n' });
+
+    await expect(discoverModelOptions('opencode')).resolves.toEqual([
+      { value: '', label: 'Default', hint: 'use model configured in opencode' },
+      { value: 'provider/model', label: 'Model', hint: 'runtime' },
+    ]);
+    expect(commandRunMock).toHaveBeenCalledWith(expect.objectContaining({
+      executable: expect.objectContaining({ path: '/resolved/opencode', realpath: '/resolved/opencode' }),
+      args: ['models'],
+      timeoutMs: 15_000,
+      maxStdoutBytes: 1024 * 1024,
+      maxStderrBytes: 256 * 1024,
+    }));
+    expect(commandRunMock.mock.calls[0]![0]).not.toHaveProperty('shell');
+  });
+
+  it('returns no discovered models when command execution fails', async () => {
+    commandRunMock.mockResolvedValue({ ok: false, stdout: '', stderr: 'failed' });
+    await expect(discoverModelOptions('pi')).resolves.toEqual([]);
   });
 });

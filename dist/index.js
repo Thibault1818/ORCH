@@ -1,23 +1,178 @@
-import { Paths } from './chunk-IFOHGLEJ.js';
-import { canTransition, isTerminal } from './chunk-MQCWGD2M.js';
-export { Orchestrator, canTransition, isBlocked, isDispatchable, isTerminal, resolveFailureStatus } from './chunk-MQCWGD2M.js';
-export { createTokenUsage } from './chunk-UG72A2JI.js';
-import { InvalidArgumentsError, TaskNotFoundError, InvalidTransitionError, AgentNotFoundError, OrchestryError, TeamNotFoundError, GoalNotFoundError, GoalHasPendingTasksError } from './chunk-Z7JNYNWE.js';
-export { AdapterErrorKind, AgentNotFoundError, ERROR_HINTS, GoalHasPendingTasksError, NotInitializedError, OrchestryError, TaskNotFoundError, WorkspaceError, classifyAdapterError } from './chunk-Z7JNYNWE.js';
-import { GOAL_LEAD_LABEL, GOAL_REVIEW_LABEL, AUTONOMOUS_LABEL } from './chunk-YNPZFT75.js';
-export { DEFAULT_WORKFLOW_CONFIG, WORKFLOW_SCHEMA_VERSION, WorkflowEngine, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult } from './chunk-Z6DOEI2O.js';
-export { ARTIFACT_FILES, WORKFLOW_PHASE_TRANSITIONS, WorkflowArtifactStore, canTransitionWorkflow, hashCanonical, isTerminalWorkflowPhase, transitionWorkflow } from './chunk-UTG567T3.js';
-export { AdapterRegistry } from './chunk-6DWHQPTE.js';
-export { SkillLoader } from './chunk-Y5P4NXTL.js';
-import { ensureDir, readYaml, writeYaml, readJson, writeJson, listFiles, appendJsonl, readJsonl, readJsonlTail, closeAppendHandle, pathExists } from './chunk-54K3JU53.js';
-import { sanitizeText } from './chunk-RQZGDMFG.js';
-import fs, { mkdtemp, readFile, unlink, rm, mkdir } from 'fs/promises';
-import { constants, createWriteStream, createReadStream } from 'fs';
-import path, { join } from 'path';
-import { nanoid } from 'nanoid';
-import { execFile as execFile$1, execFileSync } from 'child_process';
-import { promisify } from 'util';
-import { homedir, tmpdir } from 'os';
+import fs4, { readFile, mkdtemp, unlink, rm } from 'fs/promises';
+import path4, { join, isAbsolute, delimiter, resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
+import { randomUUID, createHash } from 'crypto';
+import 'js-yaml';
+import { realpathSync, statSync, accessSync, mkdirSync, openSync, writeFileSync, closeSync, readFileSync, rmSync, readSync, createReadStream, existsSync, lstatSync, chmodSync, renameSync, constants } from 'fs';
+import os, { tmpdir } from 'os';
+import { spawn, spawnSync } from 'child_process';
+import net from 'net';
+import { AsyncLocalStorage } from 'async_hooks';
+
+// src/domain/run.ts
+function createTokenUsage(input, output, opts) {
+  const reasoning = opts?.reasoning ?? 0;
+  return {
+    input,
+    output,
+    reasoning,
+    total: input + output + reasoning,
+    cache_read: opts?.cache_read ?? 0,
+    cache_write: opts?.cache_write ?? 0
+  };
+}
+
+// src/domain/errors.ts
+var OrchestryError = class extends Error {
+  constructor(message, exitCode, hint) {
+    super(message);
+    this.exitCode = exitCode;
+    this.hint = hint;
+    this.name = "OrchestryError";
+  }
+  exitCode;
+  hint;
+};
+var NotInitializedError = class extends OrchestryError {
+  constructor() {
+    super("Not initialized", 3, "Run: orch init");
+    this.name = "NotInitializedError";
+  }
+};
+var TaskNotFoundError = class extends OrchestryError {
+  constructor(taskId) {
+    super(`Task not found: ${taskId}`, 1);
+    this.name = "TaskNotFoundError";
+  }
+};
+var AgentNotFoundError = class extends OrchestryError {
+  constructor(agentId) {
+    super(`Agent not found: ${agentId}`, 1);
+    this.name = "AgentNotFoundError";
+  }
+};
+var GoalHasPendingTasksError = class extends OrchestryError {
+  constructor(goalId, count, summary) {
+    super(
+      `Cannot mark goal ${goalId} as achieved: ${count} task(s) still pending \u2014 ${summary}`,
+      1,
+      "Use --force to cancel pending tasks and mark achieved"
+    );
+    this.name = "GoalHasPendingTasksError";
+  }
+};
+var WorkspaceError = class extends OrchestryError {
+  constructor(message, hint) {
+    super(message, 6, hint);
+    this.name = "WorkspaceError";
+  }
+};
+var AdapterErrorKind = /* @__PURE__ */ ((AdapterErrorKind2) => {
+  AdapterErrorKind2["ADAPTER_NOT_FOUND"] = "adapter_not_found";
+  AdapterErrorKind2["AUTH_FAILED"] = "auth_failed";
+  AdapterErrorKind2["TIMEOUT"] = "timeout";
+  AdapterErrorKind2["RATE_LIMIT"] = "rate_limit";
+  AdapterErrorKind2["PROCESS_CRASH"] = "process_crash";
+  AdapterErrorKind2["SPAWN_FAILED"] = "spawn_failed";
+  AdapterErrorKind2["UNKNOWN"] = "unknown";
+  return AdapterErrorKind2;
+})(AdapterErrorKind || {});
+var ERROR_HINTS = {
+  ["adapter_not_found" /* ADAPTER_NOT_FOUND */]: {
+    message: "CLI \u043D\u0435 \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D.",
+    fix: "\u0423\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u0435: npm i -g @anthropic-ai/claude-code",
+    doctorHint: true
+  },
+  ["auth_failed" /* AUTH_FAILED */]: {
+    message: "API \u043A\u043B\u044E\u0447 \u043D\u0435\u0432\u0430\u043B\u0438\u0434\u0435\u043D.",
+    fix: "\u041F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435: claude auth status"
+  },
+  ["timeout" /* TIMEOUT */]: {
+    message: "\u0410\u0433\u0435\u043D\u0442 \u043F\u0440\u0435\u0432\u044B\u0441\u0438\u043B \u043B\u0438\u043C\u0438\u0442 \u0432\u0440\u0435\u043C\u0435\u043D\u0438.",
+    fix: "\u0423\u0432\u0435\u043B\u0438\u0447\u044C\u0442\u0435 \u0447\u0435\u0440\u0435\u0437: orch config set agent_timeout <ms>"
+  },
+  ["rate_limit" /* RATE_LIMIT */]: {
+    message: "\u0414\u043E\u0441\u0442\u0438\u0433\u043D\u0443\u0442 \u043B\u0438\u043C\u0438\u0442 API.",
+    fix: "\u041F\u043E\u0434\u043E\u0436\u0434\u0438\u0442\u0435 \u0438 \u043F\u043E\u0432\u0442\u043E\u0440\u0438\u0442\u0435: orch task retry <id>"
+  },
+  ["process_crash" /* PROCESS_CRASH */]: {
+    message: "\u041F\u0440\u043E\u0446\u0435\u0441\u0441 \u0430\u0433\u0435\u043D\u0442\u0430 \u0443\u043F\u0430\u043B.",
+    fix: "\u041F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435: orch task retry <id>"
+  },
+  ["spawn_failed" /* SPAWN_FAILED */]: {
+    message: "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0437\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u044C \u043F\u0440\u043E\u0446\u0435\u0441\u0441.",
+    fix: "\u041F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 PATH \u0438 \u043F\u0440\u0430\u0432\u0430 \u0434\u043E\u0441\u0442\u0443\u043F\u0430"
+  },
+  ["unknown" /* UNKNOWN */]: {
+    message: "\u041D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u0430\u044F \u043E\u0448\u0438\u0431\u043A\u0430.",
+    fix: "\u0417\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u0435: orch doctor",
+    doctorHint: true
+  }
+};
+function classifyAdapterError(error, exitCode) {
+  const lower = error.toLowerCase();
+  if (lower.includes("enoent") || lower.includes("spawn failed")) {
+    return "spawn_failed" /* SPAWN_FAILED */;
+  }
+  if (lower.includes("not found") || lower.includes("command not found") || lower.includes("no such file")) {
+    return "adapter_not_found" /* ADAPTER_NOT_FOUND */;
+  }
+  if (lower.includes("auth") || lower.includes("unauthorized") || lower.includes("401") || lower.includes("invalid api key") || lower.includes("authentication")) {
+    return "auth_failed" /* AUTH_FAILED */;
+  }
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) {
+    return "timeout" /* TIMEOUT */;
+  }
+  if (lower.includes("rate limit") || lower.includes("429") || lower.includes("too many requests")) {
+    return "rate_limit" /* RATE_LIMIT */;
+  }
+  if (exitCode !== void 0 && exitCode !== 0) {
+    return "process_crash" /* PROCESS_CRASH */;
+  }
+  return "unknown" /* UNKNOWN */;
+}
+
+// src/domain/transitions.ts
+var VALID_TRANSITIONS = {
+  todo: ["in_progress", "cancelled"],
+  in_progress: ["review", "retrying", "failed", "cancelled"],
+  retrying: ["in_progress", "failed", "cancelled"],
+  review: ["done", "todo", "cancelled"],
+  done: [],
+  failed: ["todo", "retrying"],
+  cancelled: ["todo"]
+};
+var TERMINAL_STATUSES = /* @__PURE__ */ new Set(["done", "failed", "cancelled"]);
+function canTransition(from, to) {
+  return VALID_TRANSITIONS[from].includes(to);
+}
+function isTerminal(status) {
+  return TERMINAL_STATUSES.has(status);
+}
+function isDispatchable(status) {
+  return status === "todo" || status === "retrying";
+}
+function isBlocked(task, allTasks) {
+  if (task.depends_on.length === 0) return false;
+  if (allTasks instanceof Map) {
+    return task.depends_on.some((depId) => {
+      const dep = allTasks.get(depId);
+      if (!dep) return false;
+      return dep.status !== "done";
+    });
+  }
+  return task.depends_on.some((depId) => {
+    const dep = allTasks.find((t) => t.id === depId);
+    if (!dep) return false;
+    return dep.status !== "done";
+  });
+}
+function resolveFailureStatus(task) {
+  if (task.attempts < task.max_attempts) {
+    return "retrying";
+  }
+  return "failed";
+}
 
 // src/domain/model-tiers.ts
 var MODEL_TIER_MAP = {
@@ -579,713 +734,1352 @@ function getShopTemplateByKey(key) {
   return AGENT_SHOP_TEMPLATES.find((t) => t.key === key);
 }
 
-// src/application/event-bus.ts
-var EventBus = class {
-  handlers = /* @__PURE__ */ new Map();
-  wildcardHandlers = /* @__PURE__ */ new Set();
-  maxListeners = 10;
-  warnedTypes = /* @__PURE__ */ new Set();
-  /**
-   * Set the maximum number of listeners per event type before a warning is emitted.
-   * Helps detect memory leaks from repeated subscriptions in watch mode.
-   */
-  setMaxListeners(n) {
-    this.maxListeners = n;
-  }
-  getMaxListeners() {
-    return this.maxListeners;
-  }
-  /**
-   * Get the number of listeners for a specific event type.
-   */
-  listenerCount(type) {
-    return this.handlers.get(type)?.size ?? 0;
-  }
-  /**
-   * Subscribe to events of a specific type.
-   * Returns an unsubscribe function.
-   */
-  on(type, handler) {
-    if (!this.handlers.has(type)) {
-      this.handlers.set(type, /* @__PURE__ */ new Set());
-    }
-    const set = this.handlers.get(type);
-    set.add(handler);
-    if (this.maxListeners > 0 && set.size > this.maxListeners && !this.warnedTypes.has(type)) {
-      this.warnedTypes.add(type);
-      console.warn(
-        `EventBus: possible memory leak detected. ${set.size} listeners added for "${type}". Use setMaxListeners() to increase limit if this is intentional.`
-      );
-    }
-    return () => this.off(type, handler);
-  }
-  /**
-   * Subscribe to an event type, auto-unsubscribe after first call.
-   */
-  once(type, handler) {
-    const wrapper = (event) => {
-      this.off(type, wrapper);
-      handler(event);
-    };
-    return this.on(type, wrapper);
-  }
-  /**
-   * Unsubscribe a handler from an event type.
-   */
-  off(type, handler) {
-    this.handlers.get(type)?.delete(handler);
-  }
-  /**
-   * Emit an event synchronously to all subscribed handlers.
-   */
-  emit(event) {
-    const typed = this.handlers.get(event.type);
-    if (typed) this.dispatchToSet(typed, event, "handler");
-    this.dispatchToSet(this.wildcardHandlers, event, "wildcard handler");
-  }
-  dispatchToSet(handlers, event, label) {
-    for (const handler of handlers) {
-      try {
-        handler(event);
-      } catch (err) {
-        console.error(`EventBus ${label} error for "${event.type}":`, err);
-      }
-    }
-  }
-  /**
-   * Subscribe to ALL events regardless of type.
-   */
-  onAny(handler) {
-    this.wildcardHandlers.add(handler);
-    if (this.maxListeners > 0 && this.wildcardHandlers.size > this.maxListeners && !this.warnedTypes.has("*")) {
-      this.warnedTypes.add("*");
-      console.warn(
-        `EventBus: possible memory leak detected. ${this.wildcardHandlers.size} wildcard listeners added. Use setMaxListeners() to increase limit if this is intentional.`
-      );
-    }
-    return () => {
-      this.wildcardHandlers.delete(handler);
-    };
-  }
-  /**
-   * Remove all handlers.
-   */
-  clear() {
-    this.handlers.clear();
-    this.wildcardHandlers.clear();
-    this.warnedTypes.clear();
-  }
-};
-
 // src/application/agent-factory.ts
 function isMcpSkill(skill) {
   return skill.includes(":");
 }
 function templateToAgentInput(template, adapter) {
-  const model = resolveModel(adapter, template.tier);
+  const model2 = resolveModel(adapter, template.tier);
   const skills = adapter === "claude" ? template.skills : template.skills.filter((s) => !isMcpSkill(s));
   return {
     name: template.name,
     adapter,
-    model: model || void 0,
+    model: model2 || void 0,
     role: template.role,
     skills,
     approval_policy: template.approval_policy
   };
 }
-var TaskService = class {
-  constructor(taskStore, eventBus, config, paths, agentStore) {
-    this.taskStore = taskStore;
-    this.eventBus = eventBus;
-    this.config = config;
-    this.paths = paths;
-    this.agentStore = agentStore;
-  }
-  taskStore;
-  eventBus;
-  config;
-  paths;
-  agentStore;
-  async create(input) {
-    if (!input.title.trim()) {
-      throw new InvalidArgumentsError("Task title is required");
-    }
-    const priority = input.priority ?? this.config.defaults.task.priority;
-    if (!Number.isInteger(priority) || priority < 1 || priority > 4) {
-      throw new InvalidArgumentsError("Priority must be an integer between 1 and 4");
-    }
-    if (input.depends_on?.length) {
-      const results = await Promise.all(
-        input.depends_on.map(async (depId) => ({ depId, exists: !!await this.taskStore.get(depId) }))
-      );
-      const missing = results.filter((r) => !r.exists).map((r) => r.depId);
-      if (missing.length > 0) {
-        throw new InvalidArgumentsError(
-          `Unknown depends_on task ID(s): ${missing.join(", ")}`
-        );
-      }
-    }
-    const assignee = await this.resolveAssignee(input.assignee);
-    if (input.goalTaskRole !== void 0 && !["lead_analysis", "worker", "lead_review"].includes(input.goalTaskRole)) {
-      throw new InvalidArgumentsError('Goal role must be "worker"');
-    }
-    if ((input.goalTaskRole === "lead_analysis" || input.goalTaskRole === "lead_review") && input.systemGenerated !== true) {
-      throw new InvalidArgumentsError("Lead goal roles are internal orchestration roles and cannot be set manually");
-    }
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const labels = input.labels ? [...input.labels] : [];
-    if (input.goalTaskRole === "lead_analysis" && !labels.includes(GOAL_LEAD_LABEL)) {
-      labels.push(GOAL_LEAD_LABEL);
-    }
-    if (input.goalTaskRole === "lead_review" && !labels.includes(GOAL_REVIEW_LABEL)) {
-      labels.push(GOAL_REVIEW_LABEL);
-    }
-    const task = {
-      id: `tsk_${nanoid(7)}`,
-      title: input.title.trim(),
-      description: input.description?.trim() ?? "",
-      status: "todo",
-      priority,
-      assignee,
-      labels,
-      depends_on: input.depends_on ?? [],
-      created_at: now,
-      updated_at: now,
-      attempts: 0,
-      max_attempts: input.max_attempts ?? this.config.defaults.task.max_attempts,
-      workspace_mode: input.workspace_mode,
-      review_criteria: input.review_criteria,
-      scope: input.scope,
-      goalId: input.goalId,
-      goalTaskRole: input.goalTaskRole,
-      goalCycle: input.goalCycle
-    };
-    if (input.attachments?.length && this.paths) {
-      const attachmentNames = await this.copyAttachments(task.id, input.attachments);
-      task.attachments = attachmentNames;
-    }
-    await this.taskStore.save(task);
-    this.eventBus.emit({ type: "task:created", task });
-    return task;
-  }
-  async list(filter) {
-    return this.taskStore.list(filter);
-  }
-  async get(id) {
-    const task = await this.taskStore.get(id);
-    if (!task) throw new TaskNotFoundError(id);
-    return task;
-  }
-  async updateStatus(id, newStatus) {
-    const task = await this.get(id);
-    const oldStatus = task.status;
-    if (!canTransition(oldStatus, newStatus)) {
-      throw new InvalidTransitionError(id, oldStatus, newStatus);
-    }
-    task.status = newStatus;
-    task.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-    await this.taskStore.save(task);
-    this.eventBus.emit({
-      type: "task:status_changed",
-      taskId: id,
-      from: oldStatus,
-      to: newStatus
-    });
-    return task;
-  }
-  async assign(taskId, agentId) {
-    const task = await this.get(taskId);
-    task.assignee = await this.resolveAssignee(agentId);
-    task.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-    await this.taskStore.save(task);
-    this.eventBus.emit({
-      type: "task:assigned",
-      taskId,
-      agentId
-    });
-    return task;
-  }
-  async cancel(id) {
-    const task = await this.get(id);
-    if (isTerminal(task.status)) {
-      throw new InvalidTransitionError(id, task.status, "cancelled");
-    }
-    return this.updateStatus(id, "cancelled");
-  }
-  async retry(id) {
-    const task = await this.get(id);
-    if (task.status !== "failed" && task.status !== "cancelled") {
-      throw new InvalidTransitionError(id, task.status, "todo");
-    }
-    const oldStatus = task.status;
-    task.status = "todo";
-    task.attempts = 0;
-    task.last_error = void 0;
-    task.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-    await this.taskStore.save(task);
-    this.eventBus.emit({
-      type: "task:status_changed",
-      taskId: id,
-      from: oldStatus,
-      to: "todo"
-    });
-    return task;
-  }
-  async reject(id, feedback) {
-    const task = await this.get(id);
-    if (task.status !== "review") {
-      throw new InvalidTransitionError(id, task.status, "todo");
-    }
-    const oldStatus = task.status;
-    task.status = "todo";
-    task.attempts = 0;
-    task.feedback = feedback;
-    task.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-    await this.taskStore.save(task);
-    this.eventBus.emit({
-      type: "task:status_changed",
-      taskId: id,
-      from: oldStatus,
-      to: "todo"
-    });
-    return task;
-  }
-  async update(id, fields) {
-    const task = await this.get(id);
-    if (fields.title !== void 0) {
-      if (!fields.title.trim()) throw new InvalidArgumentsError("Task title cannot be empty");
-      task.title = fields.title.trim();
-    }
-    if (fields.description !== void 0) task.description = fields.description.trim();
-    if (fields.priority !== void 0) {
-      if (!Number.isInteger(fields.priority) || fields.priority < 1 || fields.priority > 4) {
-        throw new InvalidArgumentsError("Priority must be an integer between 1 and 4");
-      }
-      task.priority = fields.priority;
-    }
-    if (fields.labels !== void 0) task.labels = fields.labels;
-    if (fields.attachments?.length && this.paths) {
-      const attachmentNames = await this.copyAttachments(id, fields.attachments);
-      task.attachments = [...task.attachments ?? [], ...attachmentNames];
-    }
-    task.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-    await this.taskStore.save(task);
-    return task;
-  }
-  async delete(id) {
-    const task = await this.get(id);
-    if (task.status === "in_progress") {
-      throw new InvalidArgumentsError("Cannot delete a running task. Cancel it first.");
-    }
-    await this.taskStore.delete(id);
-    if (this.paths) {
-      const dir = this.paths.taskAttachmentsDir(id);
-      await fs.rm(dir, { recursive: true, force: true });
-    }
-  }
-  getAttachmentPath(taskId, filename) {
-    if (!this.paths) {
-      throw new InvalidArgumentsError("Paths not configured");
-    }
-    validateAttachmentName(filename);
-    const dir = this.paths.taskAttachmentsDir(taskId);
-    const resolved = path.resolve(dir, filename);
-    if (!isWithin(resolved, path.resolve(dir))) {
-      throw new InvalidArgumentsError(`Invalid attachment filename: ${filename}`);
-    }
-    return resolved;
-  }
-  async copyAttachments(taskId, sourcePaths) {
-    if (!this.paths) return [];
-    const dir = this.paths.taskAttachmentsDir(taskId);
-    await ensureDir(dir);
-    const paths = this.paths;
-    const projectRoot = path.resolve(paths.root, "..");
-    const realProjectRoot = await fs.realpath(projectRoot);
-    const realStateRoot = await fs.realpath(paths.root).catch(() => paths.root);
-    const realDestDir = path.resolve(dir);
-    const destDirStat = await fs.lstat(realDestDir);
-    if (!destDirStat.isDirectory() || destDirStat.isSymbolicLink()) {
-      throw new InvalidArgumentsError(`Attachment destination is not a safe directory: ${realDestDir}`);
-    }
-    const actualDestDir = await fs.realpath(realDestDir);
-    if (!isWithin(actualDestDir, realStateRoot)) {
-      throw new InvalidArgumentsError(`Attachment destination escaped state directory: ${realDestDir}`);
-    }
-    const validated = await Promise.all(
-      sourcePaths.map(async (srcPath) => {
-        let handle;
-        try {
-          const stat = await fs.lstat(srcPath);
-          if (!stat.isFile()) throw new Error("not a regular file");
-          const realSource = await fs.realpath(srcPath);
-          if (!isWithin(realSource, realProjectRoot) || isWithin(realSource, realStateRoot)) {
-            throw new Error("outside project or inside .orchestry");
-          }
-          handle = await fs.open(srcPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-          const openedStat = await handle.stat();
-          if (!openedStat.isFile() || openedStat.dev !== stat.dev || openedStat.ino !== stat.ino) {
-            throw new Error("source changed during validation");
-          }
-          const basename = path.basename(srcPath);
-          validateAttachmentName(basename);
-          return { handle, basename };
-        } catch {
-          await handle?.close().catch(() => {
-          });
-          throw new InvalidArgumentsError(`Attachment file not allowed: ${srcPath}`);
-        }
-      })
-    );
-    try {
-      const names = await Promise.all(
-        validated.map(async ({ handle, basename }) => {
-          const dest = path.resolve(realDestDir, basename);
-          if (!isWithin(dest, realDestDir)) {
-            throw new InvalidArgumentsError(`Attachment destination escaped task directory: ${basename}`);
-          }
-          const currentDestDir = await fs.realpath(realDestDir);
-          if (currentDestDir !== actualDestDir) {
-            throw new InvalidArgumentsError(`Attachment destination changed during copy: ${basename}`);
-          }
-          await copyFromHandle(handle, dest);
-          await fs.chmod(dest, 384).catch(() => {
-          });
-          return basename;
-        })
-      );
-      return names;
-    } finally {
-      await Promise.all(validated.map(({ handle }) => handle.close().catch(() => {
-      })));
-    }
-  }
-  async incrementAttempts(id) {
-    const task = await this.get(id);
-    task.attempts += 1;
-    task.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-    await this.taskStore.save(task);
-    return task;
-  }
-  /**
-   * Resolve an assignee value to an agent ID.
-   * Accepts: agent ID (agt_xxx), agent name, or undefined.
-   * Returns the agent ID if found, or undefined if input is undefined.
-   * Throws InvalidArgumentsError if non-empty value matches no agent.
-   */
-  async resolveAssignee(assignee) {
-    if (!assignee) return void 0;
-    if (!this.agentStore) return assignee;
-    if (assignee.startsWith("agt_")) {
-      const agent = await this.agentStore.get(assignee);
-      if (agent) return agent.id;
-      throw new InvalidArgumentsError(
-        `Unknown agent ID: "${assignee}". No agent with this ID exists.`
-      );
-    }
-    const byName = await this.agentStore.getByName(assignee);
-    if (byName) return byName.id;
-    throw new InvalidArgumentsError(
-      `Unknown agent: "${assignee}". Use an agent ID (agt_xxx) or an exact agent name.`
-    );
-  }
+var SCRIPT_NAMES = ["test", "typecheck", "lint", "check", "build"];
+var LOCKFILES = {
+  npm: ["npm-shrinkwrap.json", "package-lock.json"],
+  pnpm: ["pnpm-lock.yaml"],
+  yarn: ["yarn.lock"],
+  bun: ["bun.lock", "bun.lockb"]
 };
-function validateAttachmentName(name) {
-  if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.includes("\0")) {
-    throw new InvalidArgumentsError(`Invalid attachment filename: ${name}`);
+var SHELL_SYNTAX = /[;&|><`\n\r]|\$\(|\$\{|\|\||&&/;
+var PLACEHOLDER = /(?:no test specified|not implemented|todo|placeholder)|^(?:true|false|:|exit(?:\s+0)?|echo(?:\s+.*)?)$/i;
+var SAFE_TOKEN = /^[A-Za-z0-9_@%+.,:/=~-]+$/;
+async function discoverDeterministicChecks(projectRoot) {
+  const [manifest, packageManager] = await Promise.all([readPackageManifest(projectRoot), detectPackageManager(projectRoot)]);
+  if (!manifest || !packageManager) return { package_manager: packageManager, checks: [] };
+  const checks = SCRIPT_NAMES.flatMap((name) => {
+    const script = manifest.scripts?.[name];
+    return typeof script === "string" && isSafeMeaningfulScript(script) ? [`${packageManager} run ${name}`] : [];
+  });
+  return { package_manager: packageManager, checks };
+}
+async function validateExplicitChecks(projectRoot, checks) {
+  const normalized = validateDeterministicCheckCommands(checks);
+  if (normalized.length === 0) throw new Error("At least one meaningful deterministic check is required");
+  const [manifest, packageManager] = await Promise.all([readPackageManifest(projectRoot), detectPackageManager(projectRoot)]);
+  for (const command of normalized) {
+    if (!isSafeCommand(command)) throw new Error(`Unsafe or unsupported deterministic check: ${command}`);
+    if (validatePackageScriptCommand(command, manifest, packageManager)) continue;
+    if (validateKnownToolCommand(command, manifest)) continue;
+    throw new Error(`Deterministic check is not trusted by a local manifest: ${command}`);
+  }
+  return [...new Set(normalized)];
+}
+function validateDeterministicCheckCommands(checks) {
+  const normalized = checks.map((check) => check.trim().replace(/\s+/g, " ")).filter(Boolean);
+  for (const command of normalized) {
+    if (!isSafeCommand(command)) throw new Error(`Unsafe or unsupported deterministic check: ${command}`);
+    if (!isMeaningfulCommand(command)) throw new Error(`No meaningful deterministic check was provided: ${command}`);
+  }
+  return [...new Set(normalized)];
+}
+function isMeaningfulCommand(command) {
+  return /^(?:npm test|(?:npm|pnpm|yarn|bun) run (?:test|typecheck|lint|check|build))$|^(?:tsc --noEmit|vitest run(?: [A-Za-z0-9_@%+.,:/=~-]+)*|jest(?: [A-Za-z0-9_@%+.,:/=~-]+)*|eslint (?:[A-Za-z0-9_@%+.,:/=~-]+ ?)+|biome check(?: [A-Za-z0-9_@%+.,:/=~-]+)*)$/.test(command);
+}
+function validatePackageScriptCommand(command, manifest, packageManager) {
+  if (!manifest || !packageManager) return false;
+  const match = /^(?:(npm) test|(npm|pnpm|yarn|bun) run (test|typecheck|lint|check|build))$/.exec(command);
+  const manager = match?.[1] ?? match?.[2];
+  const scriptName = match?.[1] ? "test" : match?.[3];
+  if (!match || manager !== packageManager) return false;
+  const script = manifest.scripts?.[scriptName];
+  return typeof script === "string" && isSafeMeaningfulScript(script);
+}
+function validateKnownToolCommand(command, manifest) {
+  if (!manifest) return false;
+  const [tool, ...args] = command.split(/\s+/);
+  if (!tool || !knownToolArguments(tool, args)) return false;
+  const packageName = tool === "tsc" ? "typescript" : tool;
+  return packageName in (manifest.devDependencies ?? {}) || packageName in (manifest.dependencies ?? {});
+}
+function knownToolArguments(tool, args) {
+  if (tool === "tsc") return args.includes("--noEmit") && args.every((arg) => SAFE_TOKEN.test(arg));
+  if (tool === "vitest") return args[0] === "run" && args.every((arg) => SAFE_TOKEN.test(arg));
+  if (tool === "jest") return !args.includes("--watch") && !args.includes("--watchAll") && args.every((arg) => SAFE_TOKEN.test(arg));
+  if (tool === "eslint") return args.length > 0 && !args.includes("--fix") && args.every((arg) => SAFE_TOKEN.test(arg));
+  if (tool === "biome") return args[0] === "check" && !args.includes("--write") && args.every((arg) => SAFE_TOKEN.test(arg));
+  return false;
+}
+function isSafeMeaningfulScript(script) {
+  const value = script.trim();
+  return value.length > 0 && !SHELL_SYNTAX.test(value) && !PLACEHOLDER.test(value);
+}
+function isSafeCommand(command) {
+  return !SHELL_SYNTAX.test(command) && command.split(/\s+/).every((token) => SAFE_TOKEN.test(token));
+}
+async function detectPackageManager(projectRoot) {
+  const present = [];
+  for (const manager of Object.keys(LOCKFILES)) {
+    if (await anyExists(projectRoot, LOCKFILES[manager])) present.push(manager);
+  }
+  return present.length === 1 ? present[0] : null;
+}
+async function anyExists(projectRoot, filenames) {
+  const results = await Promise.all(filenames.map((filename) => fs4.access(path4.join(projectRoot, filename)).then(() => true, () => false)));
+  return results.some(Boolean);
+}
+async function readPackageManifest(projectRoot) {
+  try {
+    const value = JSON.parse(await fs4.readFile(path4.join(projectRoot, "package.json"), "utf8"));
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
   }
 }
-function isWithin(child, parent) {
-  const rel = path.relative(parent, child);
-  return rel === "" || !rel.startsWith("..") && !path.isAbsolute(rel);
-}
-async function copyFromHandle(handle, dest) {
-  const writer = createWriteStream(dest, { flags: "wx", mode: 384 });
-  const reader = createReadStream("", { fd: handle.fd, autoClose: false, start: 0 });
-  await new Promise((resolve, reject) => {
-    const fail = (err) => {
-      reader.destroy();
-      writer.destroy();
-      reject(err);
-    };
-    reader.on("error", fail);
-    writer.on("error", fail);
-    writer.on("finish", resolve);
-    reader.pipe(writer);
+var appendHandles = /* @__PURE__ */ new Map();
+function evictHandle(filePath) {
+  const entry = appendHandles.get(filePath);
+  if (!entry) return;
+  appendHandles.delete(filePath);
+  clearTimeout(entry.idleTimer);
+  entry.handle.close().catch(() => {
   });
 }
-var AgentService = class {
-  constructor(agentStore, stateStore, eventBus, config) {
-    this.agentStore = agentStore;
-    this.stateStore = stateStore;
-    this.eventBus = eventBus;
-    this.config = config;
+function closeAllAppendHandles() {
+  for (const filePath of [...appendHandles.keys()]) {
+    evictHandle(filePath);
   }
-  agentStore;
-  stateStore;
-  eventBus;
-  config;
-  async create(input) {
-    if (!input.name.trim()) {
-      throw new InvalidArgumentsError("Agent name is required");
+}
+process.once("exit", closeAllAppendHandles);
+async function pathExists(filePath) {
+  try {
+    await fs4.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function listFiles(dirPath, ext) {
+  try {
+    const entries = await fs4.readdir(dirPath);
+    if (ext) {
+      return entries.filter((e) => e.endsWith(ext));
     }
-    const existing = await this.agentStore.getByName(input.name);
-    if (existing) {
-      throw new InvalidArgumentsError(`Agent "${input.name}" already exists`);
-    }
-    const agent = {
-      id: `agt_${nanoid(7)}`,
-      name: input.name.trim(),
-      adapter: input.adapter || this.config.defaults.agent.adapter,
-      role: input.role,
-      config: {
-        command: input.command,
-        model: input.model,
-        effort: input.effort,
-        approval_policy: input.approval_policy ?? this.config.defaults.agent.approval_policy,
-        max_turns: input.max_turns ?? this.config.defaults.agent.max_turns,
-        timeout_ms: input.timeout_ms ?? this.config.defaults.agent.timeout_ms,
-        stall_timeout_ms: input.stall_timeout_ms ?? this.config.defaults.agent.stall_timeout_ms,
-        env: input.env,
-        system_prompt: input.system_prompt,
-        workspace_mode: input.workspace_mode,
-        skills: input.skills
-      },
-      status: "idle",
-      stats: {
-        tasks_completed: 0,
-        tasks_failed: 0,
-        total_runs: 0,
-        total_runtime_ms: 0
-      }
-    };
-    await this.agentStore.save(agent);
-    return agent;
+    return entries;
+  } catch (err) {
+    if (isENOENT(err)) return [];
+    throw err;
   }
-  async list() {
-    return this.agentStore.list();
+}
+function isENOENT(err) {
+  return err instanceof Error && "code" in err && err.code === "ENOENT";
+}
+
+// src/infrastructure/skills/skill-loader.ts
+var VALID_SKILL_NAME = /^[a-z0-9-]+$/;
+async function resolveLibraryDir() {
+  const thisDir = dirname(fileURLToPath(import.meta.url));
+  let dir = thisDir;
+  for (let i = 0; i < 5; i++) {
+    const candidate = join(dir, "skills", "library");
+    if (await pathExists(candidate)) return candidate;
+    dir = dirname(dir);
   }
-  async get(id) {
-    const agent = await this.agentStore.get(id);
-    if (!agent) throw new AgentNotFoundError(id);
-    return agent;
+  return join(thisDir, "..", "..", "..", "skills", "library");
+}
+var SkillLoader = class {
+  cache = /* @__PURE__ */ new Map();
+  libraryDirPromise;
+  availableCache = null;
+  constructor(libraryDir) {
+    this.libraryDirPromise = libraryDir ? Promise.resolve(libraryDir) : resolveLibraryDir();
   }
-  async remove(id) {
-    const agent = await this.get(id);
-    if (agent.status === "running") {
-      const state = await this.stateStore.read();
-      const isActuallyRunning = Object.values(state.running).some((e) => e.agent_id === id);
-      if (isActuallyRunning) {
-        throw new InvalidArgumentsError("Cannot remove a running agent. Stop it first.");
-      }
-      agent.status = "idle";
-      await this.agentStore.save(agent);
-    }
-    await this.agentStore.delete(id);
+  async loadSkills(skillNames) {
+    const librarySkills = skillNames.filter((s) => !s.includes(":"));
+    if (librarySkills.length === 0) return "";
+    const results = await Promise.all(librarySkills.map((name) => this.loadOne(name)));
+    const sections = librarySkills.map((name, i) => results[i] ? `### ${name}
+
+${results[i]}` : null).filter((s) => s !== null);
+    if (sections.length === 0) return "";
+    return `## Skills
+
+${sections.join("\n\n")}`;
   }
-  async update(id, fields) {
-    const agent = await this.get(id);
-    if (fields.name !== void 0) {
-      if (!fields.name.trim()) throw new InvalidArgumentsError("Agent name cannot be empty");
-      const existing = await this.agentStore.getByName(fields.name.trim());
-      if (existing && existing.id !== id) {
-        throw new InvalidArgumentsError(`Agent "${fields.name}" already exists`);
-      }
-      agent.name = fields.name.trim();
-    }
-    if (fields.adapter !== void 0) {
-      const adapter = fields.adapter.trim();
-      if (!adapter) throw new InvalidArgumentsError("Agent adapter cannot be empty");
-      agent.adapter = adapter;
-    }
-    if (fields.role !== void 0) agent.role = fields.role || void 0;
-    if (fields.model !== void 0) agent.config.model = fields.model || void 0;
-    if (fields.effort !== void 0) agent.config.effort = fields.effort || void 0;
-    if (fields.approval_policy !== void 0) agent.config.approval_policy = fields.approval_policy;
-    await this.agentStore.save(agent);
-    return agent;
+  async listAvailable() {
+    if (this.availableCache) return this.availableCache;
+    const dir = await this.libraryDirPromise;
+    const entries = await listFiles(dir, ".md");
+    this.availableCache = entries.map((e) => e.replace(/\.md$/, "")).sort();
+    return this.availableCache;
   }
-  async disable(id) {
-    return this.setStatus(id, "disabled");
-  }
-  async enable(id) {
-    return this.setStatus(id, "idle");
-  }
-  async setAutonomous(id, enabled) {
-    const agent = await this.get(id);
-    agent.autonomous = enabled;
-    await this.agentStore.save(agent);
-    this.eventBus.emit({ type: "agent:autonomous_toggled", agentId: id, autonomous: enabled });
-    return agent;
-  }
-  async setStatus(id, status) {
-    const agent = await this.get(id);
-    agent.status = status;
-    await this.agentStore.save(agent);
-    return agent;
-  }
-  async updateStats(id, update) {
-    const agent = await this.get(id);
-    Object.assign(agent.stats, update);
-    await this.agentStore.save(agent);
-    return agent;
-  }
-  /**
-   * Find the best available agent for a task using scoring.
-   *
-   * Scoring:
-   * - Explicit assignee match = 100
-   * - Skill match with task labels = 50 per match
-   * - Role match with task labels = 30
-   * - Idle status bonus = 20
-   * - Success rate bonus = 0–10 (scaled by completed / total)
-   */
-  async findBestAgent(task) {
-    const agents = await this.agentStore.list();
-    const available = agents.filter(
-      (a) => a.status === "idle"
-    );
-    if (available.length === 0) return null;
-    if (task.assignee) {
-      const assigned = agents.find((a) => a.id === task.assignee || a.name === task.assignee);
-      if (assigned && assigned.status === "idle") return assigned;
+  async loadOne(name) {
+    const cached = this.cache.get(name);
+    if (cached !== void 0) return cached || null;
+    if (!VALID_SKILL_NAME.test(name)) {
       return null;
     }
-    const lowerLabels = task.labels?.length ? task.labels.map((l) => l.toLowerCase()) : void 0;
-    const scored = available.map((agent) => {
-      let score = 0;
-      if (lowerLabels && agent.config.skills?.length) {
-        const skillSet = new Set(agent.config.skills.map((s) => s.toLowerCase()));
-        for (const label of lowerLabels) {
-          if (skillSet.has(label)) {
-            score += 50;
-          }
-        }
-      }
-      if (lowerLabels && agent.role) {
-        const lowerRole = agent.role.toLowerCase();
-        if (lowerLabels.some((l) => lowerRole.includes(l))) {
-          score += 30;
-        }
-      }
-      if (agent.status === "idle") {
-        score += 20;
-      }
-      const totalTasks = agent.stats.tasks_completed + agent.stats.tasks_failed;
-      if (totalTasks > 0) {
-        score += Math.round(agent.stats.tasks_completed / totalTasks * 10);
-      }
-      return { agent, score };
-    });
-    scored.sort((a, b) => b.score - a.score);
-    return scored[0]?.agent ?? null;
+    const dir = await this.libraryDirPromise;
+    const filePath = join(dir, `${name}.md`);
+    try {
+      const content = await readFile(filePath, "utf8");
+      this.cache.set(name, content);
+      return content;
+    } catch {
+      process.stderr.write(`[orch] skill library: "${name}" not found in ${dir}
+`);
+      this.cache.set(name, "");
+      return null;
+    }
   }
 };
-var RunService = class {
-  constructor(runStore, eventBus) {
-    this.runStore = runStore;
-    this.eventBus = eventBus;
+
+// src/domain/workflow/contracts.ts
+var WORKFLOW_SCHEMA_VERSION = 2;
+function validateCodexDecision(value, stage) {
+  const o = exact(value, ["schema_version", "job_id", "action", "summary", "implementation_brief", "required_changes", "risk_level", "fable_query", "reviewed_commit", "fable_advice_disposition", "fable_error", "fable_iteration_effect"], "Codex decision");
+  if (o.schema_version !== 2) throw new Error("Unsupported Codex decision schema version");
+  const action = enumeration(o.action, ["DISPATCH_OPUS", "ACCEPT", "CORRECT_OPUS", "CONSULT_FABLE", "PAUSE", "STOP"], "action");
+  const allowed = stage === "pre_opus" ? ["DISPATCH_OPUS", "CONSULT_FABLE", "PAUSE", "STOP"] : stage === "post_opus" ? ["ACCEPT", "CORRECT_OPUS", "CONSULT_FABLE", "PAUSE", "STOP"] : stage === "after_fable_pre" ? ["DISPATCH_OPUS", "PAUSE", "STOP"] : ["ACCEPT", "CORRECT_OPUS", "PAUSE", "STOP"];
+  if (!allowed.includes(action)) throw new Error(`Codex action ${action} is invalid during ${stage}`);
+  const implementationBrief = o.implementation_brief === null ? null : nonEmpty(o.implementation_brief, "implementation_brief");
+  const requiredChanges = strings(o.required_changes, "required_changes");
+  const fableQuery = o.fable_query === null ? null : validateFableQuery(o.fable_query);
+  const reviewedCommit = o.reviewed_commit === null ? null : commit(o.reviewed_commit);
+  const disposition = o.fable_advice_disposition === null ? null : enumeration(o.fable_advice_disposition, ["accepted", "rejected"], "fable_advice_disposition");
+  const fableError = o.fable_error === null ? null : nonEmpty(o.fable_error, "fable_error");
+  const iterationEffect = o.fable_iteration_effect === null ? null : enumeration(o.fable_iteration_effect, ["avoided", "added", "unchanged"], "fable_iteration_effect");
+  const afterFable = stage === "after_fable_pre" || stage === "after_fable_post";
+  if (action === "DISPATCH_OPUS" && !implementationBrief) throw new Error("DISPATCH_OPUS requires implementation_brief");
+  if (action !== "DISPATCH_OPUS" && implementationBrief !== null) throw new Error(`${action} cannot include implementation_brief`);
+  if (action === "CORRECT_OPUS" && requiredChanges.length === 0) throw new Error("CORRECT_OPUS requires required_changes");
+  if (action !== "CORRECT_OPUS" && requiredChanges.length > 0) throw new Error(`${action} cannot include required_changes`);
+  if (action === "CONSULT_FABLE" && !fableQuery) throw new Error("CONSULT_FABLE requires fable_query");
+  if (action !== "CONSULT_FABLE" && fableQuery !== null) throw new Error(`${action} requires fable_query null`);
+  if (fableQuery && (stage === "pre_opus" || stage === "after_fable_pre") && fableQuery.fallback_if_skipped.action === "CORRECT_OPUS") throw new Error("Pre-Opus consultation cannot use CORRECT_OPUS fallback");
+  if (fableQuery && (stage === "post_opus" || stage === "after_fable_post") && fableQuery.fallback_if_skipped.action === "DISPATCH_OPUS") throw new Error("Post-Opus consultation cannot use DISPATCH_OPUS fallback");
+  if ((stage === "post_opus" || stage === "after_fable_post") && reviewedCommit === null) throw new Error("Post-Opus decision requires reviewed_commit");
+  if ((stage === "pre_opus" || stage === "after_fable_pre") && reviewedCommit !== null) throw new Error("Pre-Opus decision cannot include reviewed_commit");
+  if (afterFable && (disposition === null || iterationEffect === null)) throw new Error("After-Fable decision must record advice disposition and iteration effect");
+  if (!afterFable && (disposition !== null || fableError !== null || iterationEffect !== null)) throw new Error("Non-Fable decision cannot record Fable outcome");
+  return { schema_version: 2, job_id: id(o.job_id), action, summary: nonEmpty(o.summary, "summary"), implementation_brief: implementationBrief, required_changes: requiredChanges, risk_level: enumeration(o.risk_level, ["low", "medium", "high"], "risk_level"), fable_query: fableQuery, reviewed_commit: reviewedCommit, fable_advice_disposition: disposition, fable_error: fableError, fable_iteration_effect: iterationEffect };
+}
+function validateFableQuery(value) {
+  const o = exact(value, ["purpose", "question", "verification_method", "fallback_if_skipped"], "Fable query");
+  const fallback = exact(o.fallback_if_skipped, ["action", "instructions"], "Fable fallback");
+  return {
+    purpose: enumeration(o.purpose, ["COMPARE_BOUNDED_OPTIONS", "GENERATE_NONCRITICAL_ALTERNATIVES", "CHALLENGE_REVERSIBLE_PLAN"], "purpose"),
+    question: nonEmpty(o.question, "question"),
+    verification_method: nonEmpty(o.verification_method, "verification_method"),
+    fallback_if_skipped: { action: enumeration(fallback.action, ["DISPATCH_OPUS", "CORRECT_OPUS", "PAUSE"], "fallback action"), instructions: nonEmpty(fallback.instructions, "fallback instructions") }
+  };
+}
+function validateFableAdvice(value) {
+  const o = exact(value, ["schema_version", "consultation_id", "answer", "alternatives", "uncertainties"], "Fable advice");
+  if (o.schema_version !== 1) throw new Error("Unsupported Fable advice schema version");
+  return { schema_version: 1, consultation_id: id(o.consultation_id), answer: nonEmpty(o.answer, "answer"), alternatives: strings(o.alternatives, "alternatives"), uncertainties: strings(o.uncertainties, "uncertainties") };
+}
+function validateFableFallbackRecord(value) {
+  const o = exact(value, ["schema_version", "reason", "action", "instructions", "origin"], "Fable fallback record");
+  if (o.schema_version !== 1) throw new Error("Unsupported Fable fallback record schema version");
+  return { schema_version: 1, reason: enumeration(o.reason, ["direct_mode", "workflow_cap_or_duplicate", "risk_not_low", "input_oversized", "fable_unavailable", "fable_failed", "malformed_request", "ambiguous_interruption", "resume_persisted_fallback"], "reason"), action: enumeration(o.action, ["DISPATCH_OPUS", "CORRECT_OPUS", "PAUSE"], "fallback action"), instructions: nonEmpty(o.instructions, "fallback instructions"), origin: enumeration(o.origin, ["pre_opus", "post_opus"], "origin") };
+}
+function validateOpusResult(value) {
+  const o = exact(value, ["job_id", "status", "files_changed", "commands_run", "tests_reported", "deviations", "unresolved", "summary"], "Opus result");
+  return { job_id: id(o.job_id), status: enumeration(o.status, ["completed", "partial", "failed"], "status"), files_changed: strings(o.files_changed, "files_changed"), commands_run: strings(o.commands_run, "commands_run"), tests_reported: strings(o.tests_reported, "tests_reported"), deviations: strings(o.deviations, "deviations"), unresolved: strings(o.unresolved, "unresolved"), summary: nonEmpty(o.summary, "summary") };
+}
+function validateCheckResults(value) {
+  const o = exact(value, ["job_id", "commit", "passed", "checks"], "Check results");
+  const checks = array(o.checks, "checks").map((item, index) => {
+    const c = exact(item, ["command", "passed", "output"], `checks[${index}]`);
+    return { command: nonEmpty(c.command, "command"), passed: bool(c.passed, "passed"), output: text(c.output, "output") };
+  });
+  const passed = bool(o.passed, "passed");
+  if (passed !== checks.every((check) => check.passed)) throw new Error("Check aggregate does not match individual results");
+  return { job_id: id(o.job_id), commit: commit(o.commit), passed, checks };
+}
+function validateHumanApproval(value) {
+  const o = exact(value, ["schema_version", "job_id", "target_branch", "base_commit", "reviewed_commit", "reviewed_diff_hash", "check_results_hash", "reason", "approved_at"], "Human approval");
+  if (o.schema_version !== 1) throw new Error("Unsupported human approval schema version");
+  const approvedAt = nonEmpty(o.approved_at, "approved_at");
+  if (!Number.isFinite(Date.parse(approvedAt))) throw new Error("approved_at must be a timestamp");
+  return { schema_version: 1, job_id: id(o.job_id), target_branch: nonEmpty(o.target_branch, "target_branch"), base_commit: commit(o.base_commit), reviewed_commit: commit(o.reviewed_commit), reviewed_diff_hash: hash(o.reviewed_diff_hash, "reviewed_diff_hash"), check_results_hash: hash(o.check_results_hash, "check_results_hash"), reason: nonEmpty(o.reason, "reason"), approved_at: approvedAt };
+}
+function exact(value, keys, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  const object2 = value;
+  for (const key of keys) if (!(key in object2)) throw new Error(`${label} is missing ${key}`);
+  const allowed = new Set(keys);
+  for (const key of Object.keys(object2)) if (!allowed.has(key)) throw new Error(`${label} contains unknown field ${key}`);
+  return object2;
+}
+function array(value, label) {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  return value;
+}
+function text(value, label) {
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  return value;
+}
+function nonEmpty(value, label) {
+  const result2 = text(value, label);
+  if (!result2.trim()) throw new Error(`${label} must not be empty`);
+  return result2;
+}
+function strings(value, label) {
+  return array(value, label).map((v, i) => text(v, `${label}[${i}]`));
+}
+function bool(value, label) {
+  if (typeof value !== "boolean") throw new Error(`${label} must be a boolean`);
+  return value;
+}
+function id(value) {
+  const result2 = nonEmpty(value, "id");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(result2)) throw new Error("Invalid id");
+  return result2;
+}
+function commit(value) {
+  const result2 = text(value, "commit");
+  if (!/^[a-f0-9]{7,64}$/.test(result2)) throw new Error("Invalid commit");
+  return result2;
+}
+function hash(value, label) {
+  const result2 = text(value, label);
+  if (!/^[a-f0-9]{64}$/.test(result2)) throw new Error(`${label} must be a SHA-256 hash`);
+  return result2;
+}
+function enumeration(value, values, label) {
+  if (typeof value !== "string" || !values.includes(value)) throw new Error(`${label} has an invalid value`);
+  return value;
+}
+
+// src/domain/workflow/transitions.ts
+var ACTIVE = ["codex_pre_opus", "fable_consultation", "codex_after_fable", "opus_execution", "codex_post_opus", "verification", "awaiting_approval", "merge_ready"];
+var WORKFLOW_PHASE_TRANSITIONS = {
+  codex_pre_opus: ["fable_consultation", "opus_execution", "paused", "cancelled", "failed"],
+  fable_consultation: ["codex_after_fable", "opus_execution", "paused", "cancelled", "failed"],
+  codex_after_fable: ["opus_execution", "verification", "paused", "cancelled", "failed"],
+  opus_execution: ["codex_post_opus", "blocked", "paused", "cancelled", "failed"],
+  codex_post_opus: ["fable_consultation", "opus_execution", "verification", "paused", "cancelled", "failed"],
+  verification: ["awaiting_approval", "blocked", "paused", "cancelled", "failed"],
+  awaiting_approval: ["merge_ready", "cancelled", "failed"],
+  merge_ready: ["done", "blocked", "paused", "cancelled", "failed"],
+  done: [],
+  blocked: [...ACTIVE, "cancelled"],
+  paused: [...ACTIVE, "blocked", "cancelled"],
+  cancelled: [],
+  failed: []
+};
+function canTransitionWorkflow(from, to) {
+  return WORKFLOW_PHASE_TRANSITIONS[from].includes(to);
+}
+function transitionWorkflow(from, to) {
+  if (!canTransitionWorkflow(from, to)) throw new Error(`Invalid workflow phase transition: ${from} -> ${to}`);
+  return to;
+}
+function isTerminalWorkflowPhase(phase) {
+  return phase === "done" || phase === "cancelled" || phase === "failed";
+}
+var SEMANTIC_ROLES = ["supervisor", "implementer", "adviser", "reviewer"];
+var ROLE_PERMISSIONS = Object.freeze({
+  supervisor: Object.freeze({ workspace: "read_only", tools: "enabled", advisory_only: false }),
+  implementer: Object.freeze({ workspace: "worktree", tools: "enabled", advisory_only: false }),
+  adviser: Object.freeze({ workspace: "read_only", tools: "none", advisory_only: true }),
+  reviewer: Object.freeze({ workspace: "read_only", tools: "enabled", advisory_only: false })
+});
+function createRosterSnapshot(input, mode = "adaptive") {
+  return validateRosterSnapshot({
+    schema_version: 1,
+    supervisor: input.supervisor,
+    implementer: input.implementer,
+    adviser: input.adviser ?? null,
+    reviewer: input.reviewer ?? { same_as: "supervisor" }
+  }, mode);
+}
+function legacyRosterSnapshot(mode) {
+  return createRosterSnapshot({
+    supervisor: { adapter: "codex", profile: { name: "codex", model: "codex", effort: "medium", max_turns: 1, timeout_ms: 6e5 } },
+    implementer: { adapter: "claude", profile: { name: "opus", model: "opus", effort: "high", max_turns: 50, timeout_ms: 18e5 } },
+    adviser: mode === "adaptive" ? { adapter: "fable", profile: { name: "fable", model: "fable", effort: "low", max_turns: 1, timeout_ms: 3e5 } } : null
+  }, mode);
+}
+function validateRosterSnapshot(value, mode) {
+  const roster = object(value, "workflow roster");
+  exact2(roster, ["schema_version", "supervisor", "implementer", "adviser", "reviewer"], "workflow roster");
+  if (roster.schema_version !== 1) throw new Error("Unsupported workflow roster schema version");
+  const adviser = roster.adviser === null ? null : agent(roster.adviser, "workflow roster.adviser");
+  if (mode === "direct" && adviser !== null) throw new Error("Direct workflow roster cannot include an adviser");
+  return {
+    schema_version: 1,
+    supervisor: agent(roster.supervisor, "workflow roster.supervisor"),
+    implementer: agent(roster.implementer, "workflow roster.implementer"),
+    adviser,
+    reviewer: reviewer(roster.reviewer)
+  };
+}
+function hashRosterSnapshot(value) {
+  const roster = validateRosterSnapshot(value);
+  return createHash("sha256").update(canonicalJson(roster)).digest("hex");
+}
+function validateRosterAgent(value, label = "workflow roster agent") {
+  return agent(value, label);
+}
+function hashRosterAgent(value) {
+  return createHash("sha256").update(canonicalJson(validateRosterAgent(value))).digest("hex");
+}
+function reviewer(value) {
+  const item = object(value, "workflow roster.reviewer");
+  if ("same_as" in item) {
+    exact2(item, ["same_as"], "workflow roster.reviewer");
+    if (item.same_as !== "supervisor") throw new Error("workflow roster.reviewer.same_as must be supervisor");
+    return { same_as: "supervisor" };
   }
-  runStore;
-  eventBus;
-  async create(params) {
-    const run = {
-      id: `run_${nanoid(7)}`,
-      task_id: params.taskId,
-      agent_id: params.agentId,
-      attempt: params.attempt,
-      status: "preparing",
-      started_at: (/* @__PURE__ */ new Date()).toISOString(),
-      workspace_path: params.workspacePath,
-      prompt: params.persistPrompt ? params.prompt : "[redacted]"
+  return agent(item, "workflow roster.reviewer");
+}
+function agent(value, label) {
+  const item = object(value, label);
+  exact2(item, ["adapter", "profile"], label);
+  const profile = object(item.profile, `${label}.profile`);
+  exact2(profile, ["name", "model", "effort", "max_turns", "timeout_ms"], `${label}.profile`);
+  if (!["low", "medium", "high"].includes(profile.effort)) throw new Error(`${label}.profile.effort is invalid`);
+  if (!Number.isSafeInteger(profile.max_turns) || profile.max_turns < 1) throw new Error(`${label}.profile.max_turns is invalid`);
+  if (!Number.isSafeInteger(profile.timeout_ms) || profile.timeout_ms < 1) throw new Error(`${label}.profile.timeout_ms is invalid`);
+  return { adapter: identifier(item.adapter, `${label}.adapter`), profile: { name: identifier(profile.name, `${label}.profile.name`), model: model(profile.model, `${label}.profile.model`), effort: profile.effort, max_turns: profile.max_turns, timeout_ms: profile.timeout_ms } };
+}
+function object(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  return value;
+}
+function exact2(value, keys, label) {
+  const expected = new Set(keys);
+  for (const key of keys) if (!(key in value)) throw new Error(`${label} is missing ${key}`);
+  for (const key of Object.keys(value)) if (!expected.has(key)) throw new Error(`${label} contains unknown field ${key}`);
+}
+function identifier(value, label) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(value)) throw new Error(`${label} is invalid`);
+  return value;
+}
+function model(value, label) {
+  if (value === "") return value;
+  return identifier(value, label);
+}
+function canonicalJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const item = value;
+  return `{${Object.keys(item).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(item[key])}`).join(",")}}`;
+}
+var SYSTEM_READ_PATHS = ["/System", "/Library/Apple", "/usr/lib", "/usr/share", "/dev", "/private/etc/ssl"];
+function generateMacosSandboxProfile(request, workspace = path4.resolve(request.workspace), executablePaths = []) {
+  const proxy = validateProxyAddress(request.proxyAddress);
+  const executableFiles = new Set(uniquePaths(executablePaths));
+  const literalReadFiles = new Set(uniquePaths([...executableFiles, ...request.readOnlyFiles ?? []]));
+  const readSubpaths = uniquePaths([workspace, ...SYSTEM_READ_PATHS, ...request.readOnlyPaths ?? []]).filter((value) => !executableFiles.has(value)).map((value) => `  (subpath ${sandboxString(value)})`).join("\n");
+  const readFiles = [...literalReadFiles].map((value) => `  (literal ${sandboxString(value)})`).join("\n");
+  return [
+    "(version 1)",
+    "(deny default)",
+    '(import "system.sb")',
+    "(deny network*)",
+    "(allow process-fork)",
+    "(allow process-info*)",
+    ...request.allowedExecutablePaths?.length ? ["(allow process-exec", ...uniquePaths(request.allowedExecutablePaths).map((value) => `  (literal ${sandboxString(value)})`), ")"] : ['(allow process-exec (literal "/usr/bin/false"))'],
+    "(allow signal (target self))",
+    "(allow sysctl-read)",
+    "(allow mach-lookup)",
+    "(allow file-read*",
+    readSubpaths,
+    readFiles,
+    ")",
+    ...request.writableWorkspace === false ? [] : [`(allow file-write* (subpath ${sandboxString(workspace)}))`],
+    ...(request.writablePaths ?? []).map((value) => `(allow file-write* (subpath ${sandboxString(value)}))`),
+    '(allow file-write-data (literal "/dev/null"))',
+    `(allow network-outbound (remote tcp ${sandboxString(`localhost:${proxy.port}`)}))`
+  ].join("\n");
+}
+async function prepareMacosSandbox(request, executablePaths = []) {
+  if (process.platform !== "darwin") throw new Error("macOS sandboxing requires darwin");
+  const workspace = await fs4.realpath(path4.resolve(request.workspace));
+  if (!(await fs4.stat(workspace)).isDirectory()) throw new Error(`Sandbox workspace is not a directory: ${workspace}`);
+  const proxyAddress = validateProxyAddress(request.proxyAddress);
+  const executable = await describeExecutable(request.sandboxExecutable ?? "/usr/bin/sandbox-exec");
+  return {
+    executable,
+    profile: generateMacosSandboxProfile({ ...request, proxyAddress }, workspace, executablePaths),
+    workspace,
+    proxyAddress
+  };
+}
+async function describeExecutable(value) {
+  const requestedPath = path4.resolve(value);
+  await fs4.access(requestedPath, 1);
+  const realpath = await fs4.realpath(requestedPath);
+  const stat = await fs4.stat(realpath);
+  if (!stat.isFile()) throw new Error(`Sandbox executable is not a file: ${requestedPath}`);
+  return { path: requestedPath, realpath, sha256: await sha256(realpath) };
+}
+async function sha256(file) {
+  const hash2 = createHash("sha256");
+  for await (const chunk of createReadStream(file)) hash2.update(chunk);
+  return hash2.digest("hex");
+}
+function validateProxyAddress(value) {
+  const host = stripIpv6Brackets(value.host).toLowerCase();
+  if (!isLoopback(host)) throw new Error("Sandbox proxy must use a numeric loopback address");
+  if (!Number.isSafeInteger(value.port) || value.port < 1 || value.port > 65535) throw new Error("Sandbox proxy port is invalid");
+  return { host, port: value.port };
+}
+function isLoopback(host) {
+  if (net.isIP(host) === 4) return host.startsWith("127.");
+  return net.isIP(host) === 6 && (host === "::1" || host.toLowerCase() === "0:0:0:0:0:0:0:1");
+}
+function stripIpv6Brackets(value) {
+  return value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value;
+}
+function sandboxString(value) {
+  if (value.includes("\0") || value.includes("\n") || value.includes("\r")) throw new Error("Sandbox value contains invalid characters");
+  return JSON.stringify(value).replace(/\\u2028|\\u2029/g, "");
+}
+function uniquePaths(values) {
+  return [...new Set(values.map((value) => path4.resolve(value)))].sort();
+}
+
+// src/infrastructure/process/command-runner.ts
+var CommandRunner = class {
+  constructor(processManager) {
+    this.processManager = processManager;
+  }
+  processManager;
+  resolveExecutable(command, pathValue) {
+    return resolveExecutable(command, pathValue);
+  }
+  start(request) {
+    validateStreamingRequest(request);
+    const args = [...request.args ?? []];
+    const descriptor = streamingRequestDescriptor(request);
+    const owner = optionalOwner(request.owner, "owner");
+    const ownerTag = optionalOwner(request.ownerTag, "ownerTag");
+    const sandboxRequest = optionalSandbox(request.sandbox ?? request.macosSandbox);
+    const allowedExecutables = uniqueDescriptors([descriptor, ...request.allowedExecutables ?? []]);
+    const effectiveSandbox = sandboxRequest ? {
+      ...sandboxRequest,
+      readOnlyPaths: [...explicitReadSubpaths(sandboxRequest.readOnlyPaths ?? [], allowedExecutables), ...macosRuntimeReadSubpaths(allowedExecutables)],
+      readOnlyFiles: [...sandboxRequest.readOnlyFiles ?? [], ...macosRuntimeReadFiles(allowedExecutables)],
+      allowedExecutablePaths: allowedExecutables.map((value) => value.realpath)
+    } : null;
+    const sandbox = effectiveSandbox ? prepareMacosSandboxSync(effectiveSandbox, allowedExecutables.map((value) => value.realpath)) : null;
+    const sandboxCwd = sandbox && request.cwd ? realpathSync(path4.resolve(request.cwd)) : null;
+    if (sandbox && sandboxCwd && !isWithin(sandboxCwd, sandbox.workspace)) throw new Error("Sandboxed cwd must be within the workspace");
+    const spawnExecutable = sandbox?.executable.realpath ?? descriptor.realpath;
+    const spawnArgs = sandbox ? ["-p", sandbox.profile, descriptor.realpath, ...args] : args;
+    const spawnEnv = sandbox ? sandboxEnvironment(request.env, sandbox) : { ...request.env ?? {} };
+    for (const executable of allowedExecutables) verifyExecutableSync(executable);
+    if (sandbox) verifyExecutableSync(sandbox.executable);
+    const spawned = this.processManager.spawn(spawnExecutable, spawnArgs, {
+      cwd: sandboxCwd ?? request.cwd ?? sandbox?.workspace,
+      env: spawnEnv,
+      stdio: [request.stdin === void 0 && !request.keepStdinOpen ? "ignore" : "pipe", "pipe", "pipe"],
+      owner,
+      ownerTag
+    });
+    const child = spawned.process;
+    let termination = "exited";
+    let cleanup = null;
+    const stop = (reason) => {
+      if (termination !== "exited") return;
+      termination = reason;
+      cleanup = this.processManager.killWithGrace(spawned.pid, request.killGraceMs ?? 1e3);
     };
-    await this.runStore.save(run);
-    return run;
-  }
-  async get(id) {
-    return this.runStore.get(id);
-  }
-  async start(id, pid) {
-    const run = await this.runStore.get(id);
-    if (!run) throw new Error(`Run not found: ${id}`);
-    run.status = "running";
-    run.pid = pid;
-    await this.runStore.save(run);
-    this.eventBus.emit({
-      type: "agent:started",
-      agentId: run.agent_id,
-      taskId: run.task_id,
-      runId: id
+    const onAbort = () => stop("timed_out");
+    if (request.signal) {
+      if (request.signal.aborted) onAbort();
+      else request.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const timer = request.timeoutMs === void 0 ? null : setTimeout(() => stop("timed_out"), request.timeoutMs);
+    if (request.stdin !== void 0) {
+      if (request.keepStdinOpen) child.stdin?.write(request.stdin);
+      else child.stdin?.end(request.stdin);
+    }
+    const completion = new Promise((resolve2) => {
+      let settled = false;
+      const finish = async (exitCode, signal, spawnError) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        request.signal?.removeEventListener("abort", onAbort);
+        let integrityError = null;
+        try {
+          for (const executable of allowedExecutables) verifyExecutableSync(executable);
+          if (sandbox) verifyExecutableSync(sandbox.executable);
+        } catch (error) {
+          integrityError = error instanceof Error ? error.message : String(error);
+          termination = "integrity_error";
+        }
+        if (cleanup) await cleanup;
+        if (spawnError && termination === "exited") termination = "spawn_error";
+        resolve2({
+          ok: termination === "exited" && exitCode === 0,
+          termination,
+          exitCode,
+          signal,
+          spawnError,
+          integrityError
+        });
+      };
+      child.once("close", (code, signal) => void finish(code, signal, null));
+      child.once("error", (error) => void finish(null, null, { message: error.message, code: error.code ?? null }));
     });
-    return run;
+    return { ...spawned, executableDescriptor: descriptor, completion };
   }
-  async finish(id, status, tokens, error, failure) {
-    const run = await this.runStore.get(id);
-    if (!run) throw new Error(`Run not found: ${id}`);
-    run.status = status;
-    run.finished_at = (/* @__PURE__ */ new Date()).toISOString();
-    run.tokens = tokens;
-    run.error = error === void 0 ? void 0 : sanitizeText(error);
-    run.failure = failure;
-    await this.runStore.save(run);
-    this.eventBus.emit({
-      type: "agent:completed",
-      runId: id,
-      agentId: run.agent_id,
-      success: status === "succeeded"
-    });
-    return run;
-  }
-  async appendEvent(runId, event) {
-    await this.runStore.appendEvent(runId, event);
-  }
-  async listAll() {
-    return this.runStore.listAll();
-  }
-  async listForTask(taskId) {
-    return this.runStore.listForTask(taskId);
-  }
-  async listForAgent(agentId) {
-    return this.runStore.listForAgent(agentId);
-  }
-  async readEvents(runId) {
-    return this.runStore.readEvents(runId);
-  }
-  async readEventsTail(runId, count) {
-    return this.runStore.readEventsTail(runId, count);
-  }
-  /**
-   * Get error and last N lines of output from the most recent failed run for a task.
-   * Used to provide retry context so agents can learn from previous failures.
-   */
-  async getLastFailedRunContext(taskId) {
-    const runs = await this.runStore.listForTask(taskId);
-    const failedRun = runs.filter((r) => r.status === "failed").sort((a, b) => (b.finished_at ?? "").localeCompare(a.finished_at ?? ""))[0];
-    if (!failedRun) return null;
-    const error = failedRun.error ?? "Unknown error";
-    let output = "";
+  async run(request) {
+    validateRequest(request);
+    const started = Date.now();
+    const args = [...request.args ?? []];
+    const descriptor = await requestDescriptor(request);
+    const owner = optionalOwner(request.owner, "owner");
+    const ownerTag = optionalOwner(request.ownerTag, "ownerTag");
+    const sandboxRequest = optionalSandbox(request.sandbox ?? request.macosSandbox);
+    const allowedExecutables = uniqueDescriptors([descriptor, ...request.allowedExecutables ?? []]);
+    const effectiveSandbox = sandboxRequest ? {
+      ...sandboxRequest,
+      readOnlyPaths: [...explicitReadSubpaths(sandboxRequest.readOnlyPaths ?? [], allowedExecutables), ...macosRuntimeReadSubpaths(allowedExecutables)],
+      readOnlyFiles: [...sandboxRequest.readOnlyFiles ?? [], ...macosRuntimeReadFiles(allowedExecutables)],
+      allowedExecutablePaths: allowedExecutables.map((value) => value.realpath)
+    } : null;
+    const sandbox = effectiveSandbox ? await prepareMacosSandbox(effectiveSandbox, allowedExecutables.map((value) => value.realpath)) : null;
+    const sandboxCwd = sandbox && request.cwd ? await fs4.realpath(path4.resolve(request.cwd)) : null;
+    if (sandbox && sandboxCwd && !isWithin(sandboxCwd, sandbox.workspace)) throw new Error("Sandboxed cwd must be within the workspace");
+    const spawnExecutable = sandbox?.executable.realpath ?? descriptor.realpath;
+    const spawnArgs = sandbox ? ["-p", sandbox.profile, descriptor.realpath, ...args] : args;
+    const spawnEnv = sandbox ? sandboxEnvironment(request.env, sandbox) : { ...request.env ?? {} };
+    await Promise.all([...allowedExecutables.map(verifyExecutable), sandbox ? verifyExecutable(sandbox.executable) : Promise.resolve()]);
+    const stdout = [];
+    const stderr = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
+    let termination = "exited";
+    let cleanup = null;
+    let child;
+    let pid = null;
+    let integrityError = null;
     try {
-      const events = await this.runStore.readEventsTail(failedRun.id, 50);
-      output = events.filter((e) => e.type === "agent_output" || e.type === "error").map((e) => typeof e.data === "string" ? e.data : JSON.stringify(e.data)).join("\n");
+      const spawned = this.processManager.spawn(spawnExecutable, spawnArgs, {
+        cwd: sandboxCwd ?? request.cwd ?? sandbox?.workspace,
+        env: spawnEnv,
+        stdio: request.stdio === "inherit" ? "inherit" : [request.stdin === void 0 ? "ignore" : "pipe", "pipe", "pipe"],
+        owner,
+        ownerTag
+      });
+      child = spawned.process;
+      pid = spawned.pid;
+    } catch (error) {
+      const cause = error;
+      return result({ request, descriptor, sandbox, args, started, pid, termination: "spawn_error", stdout, stderr, stdoutBytes, stderrBytes, stdoutTruncated, stderrTruncated, exitCode: null, signal: null, spawnError: { message: cause.message, code: cause.code ?? null }, integrityError });
+    }
+    const stop = (reason) => {
+      if (termination !== "exited") return;
+      termination = reason;
+      cleanup = this.processManager.killWithGrace(pid, request.killGraceMs ?? 1e3);
+    };
+    const capture = (chunks, chunk, current, maximum, stream) => {
+      const remaining = Math.max(0, maximum - current);
+      if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
+      if (chunk.length > remaining) {
+        if (stream === "stdout") stdoutTruncated = true;
+        else stderrTruncated = true;
+        stop(`${stream}_limit`);
+      }
+      return current + chunk.length;
+    };
+    child.stdout?.on("data", (value) => {
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      stdoutBytes = capture(stdout, chunk, stdoutBytes, request.maxStdoutBytes, "stdout");
+    });
+    child.stderr?.on("data", (value) => {
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      stderrBytes = capture(stderr, chunk, stderrBytes, request.maxStderrBytes, "stderr");
+    });
+    if (request.stdin !== void 0) child.stdin?.end(request.stdin);
+    const timer = setTimeout(() => stop("timed_out"), request.timeoutMs);
+    const closed = await new Promise((resolve2) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve2(value);
+      };
+      child.once("close", (code, signal) => finish({ exitCode: code, signal, spawnError: null }));
+      child.once("error", (error) => finish({ exitCode: null, signal: null, spawnError: { message: error.message, code: error.code ?? null } }));
+    });
+    clearTimeout(timer);
+    try {
+      await Promise.all([...allowedExecutables.map(verifyExecutable), sandbox ? verifyExecutable(sandbox.executable) : Promise.resolve()]);
+    } catch (error) {
+      integrityError = error instanceof Error ? error.message : String(error);
+      termination = "integrity_error";
+    }
+    if (cleanup) await cleanup;
+    if (closed.spawnError && termination === "exited") termination = "spawn_error";
+    return result({ request, descriptor, sandbox, args, started, pid, termination, stdout, stderr, stdoutBytes, stderrBytes, stdoutTruncated, stderrTruncated, integrityError, ...closed });
+  }
+};
+async function resolveExecutable(command, pathValue = process.env.PATH ?? "") {
+  if (path4.isAbsolute(command)) return describeExecutable2(command);
+  if (command.includes("/") || command.includes("\\")) throw new Error(`Executable path must be absolute or a bare name: ${command}`);
+  for (const entry of pathValue.split(path4.delimiter).filter(Boolean)) {
+    const candidate = path4.resolve(entry, command);
+    try {
+      return await describeExecutable2(candidate);
     } catch {
     }
-    return { error, output };
+  }
+  throw new Error(`Executable not found: ${command}`);
+}
+async function verifyExecutable(descriptor) {
+  validateDescriptor(descriptor);
+  const currentRealpath = await fs4.realpath(descriptor.path);
+  if (currentRealpath !== descriptor.realpath) throw new Error(`Executable realpath changed: ${descriptor.path}`);
+  await fs4.access(currentRealpath, process.platform === "win32" ? void 0 : 1);
+  const currentHash = await sha2562(currentRealpath);
+  if (currentHash !== descriptor.sha256) throw new Error(`Executable SHA-256 changed: ${descriptor.realpath}`);
+}
+function commandFailureMessage(value) {
+  if (value.termination === "timed_out") return `${value.executable} timed out`;
+  if (value.termination === "stdout_limit" || value.termination === "stderr_limit") return `${value.executable} output exceeded configured maximum`;
+  if (value.termination === "integrity_error") return value.integrityError ?? `${value.executable} failed executable integrity verification`;
+  if (value.termination === "spawn_error") return value.spawnError?.message ?? "Process could not be started";
+  return `${value.executable} exited ${value.exitCode}: ${value.stderr}`;
+}
+async function describeExecutable2(value) {
+  const requestedPath = path4.resolve(value);
+  await fs4.access(requestedPath, process.platform === "win32" ? void 0 : 1);
+  const realpath = await fs4.realpath(requestedPath);
+  const stat = await fs4.stat(realpath);
+  if (!stat.isFile()) throw new Error(`Executable is not a file: ${requestedPath}`);
+  return { path: requestedPath, realpath, sha256: await sha2562(realpath) };
+}
+async function sha2562(file) {
+  const hash2 = createHash("sha256");
+  for await (const chunk of createReadStream(file)) hash2.update(chunk);
+  return hash2.digest("hex");
+}
+function sha256Sync(file) {
+  const hash2 = createHash("sha256");
+  const fd = openSync(file, "r");
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  try {
+    let bytesRead;
+    while ((bytesRead = readSync(fd, buffer, 0, buffer.length, null)) > 0) hash2.update(buffer.subarray(0, bytesRead));
+  } finally {
+    closeSync(fd);
+  }
+  return hash2.digest("hex");
+}
+async function requestDescriptor(request) {
+  if (request.executableDescriptor) {
+    if (typeof request.executable !== "string" || path4.resolve(request.executable) !== request.executableDescriptor.path) {
+      throw new Error("Executable and executableDescriptor path do not match");
+    }
+    return request.executableDescriptor;
+  }
+  if (typeof request.executable !== "string") return request.executable;
+  return resolveExecutable(request.executable);
+}
+function streamingRequestDescriptor(request) {
+  if (request.executableDescriptor) {
+    if (typeof request.executable !== "string" || path4.resolve(request.executable) !== request.executableDescriptor.path) {
+      throw new Error("Executable and executableDescriptor path do not match");
+    }
+    return request.executableDescriptor;
+  }
+  if (typeof request.executable !== "string") return request.executable;
+  return resolveExecutableSync(request.executable, request.env?.PATH ?? process.env.PATH ?? "");
+}
+function resolveExecutableSync(command, pathValue) {
+  if (path4.isAbsolute(command)) return describeExecutableSync(command);
+  if (command.includes("/") || command.includes("\\")) throw new Error(`Executable path must be absolute or a bare name: ${command}`);
+  for (const entry of pathValue.split(path4.delimiter).filter(Boolean)) {
+    try {
+      return describeExecutableSync(path4.resolve(entry, command));
+    } catch {
+    }
+  }
+  throw new Error(`Executable not found: ${command}`);
+}
+function describeExecutableSync(value) {
+  const requestedPath = path4.resolve(value);
+  accessSync(requestedPath, process.platform === "win32" ? void 0 : 1);
+  const realpath = realpathSync(requestedPath);
+  if (!statSync(realpath).isFile()) throw new Error(`Executable is not a file: ${requestedPath}`);
+  return { path: requestedPath, realpath, sha256: sha256Sync(realpath) };
+}
+function verifyExecutableSync(descriptor) {
+  validateDescriptor(descriptor);
+  const currentRealpath = realpathSync(descriptor.path);
+  if (currentRealpath !== descriptor.realpath) throw new Error(`Executable realpath changed: ${descriptor.path}`);
+  accessSync(currentRealpath, process.platform === "win32" ? void 0 : 1);
+  if (sha256Sync(currentRealpath) !== descriptor.sha256) throw new Error(`Executable SHA-256 changed: ${descriptor.realpath}`);
+}
+function prepareMacosSandboxSync(request, executablePaths) {
+  if (process.platform !== "darwin") throw new Error("macOS sandboxing requires darwin");
+  const workspace = realpathSync(path4.resolve(request.workspace));
+  if (!statSync(workspace).isDirectory()) throw new Error(`Sandbox workspace is not a directory: ${workspace}`);
+  const executable = describeExecutableSync(request.sandboxExecutable ?? "/usr/bin/sandbox-exec");
+  const proxyHost = request.proxyAddress.host;
+  const proxyAddress = {
+    host: (proxyHost.startsWith("[") && proxyHost.endsWith("]") ? proxyHost.slice(1, -1) : proxyHost).toLowerCase(),
+    port: request.proxyAddress.port
+  };
+  return {
+    executable,
+    profile: generateMacosSandboxProfile({ ...request, proxyAddress }, workspace, executablePaths),
+    workspace,
+    proxyAddress
+  };
+}
+function validateDescriptor(value) {
+  if (!path4.isAbsolute(value.path) || !path4.isAbsolute(value.realpath) || !/^[a-f0-9]{64}$/.test(value.sha256)) {
+    throw new Error("Executable descriptor is invalid");
+  }
+}
+function sandboxEnvironment(env, sandbox) {
+  const host = sandbox.proxyAddress.host.includes(":") ? `[${sandbox.proxyAddress.host}]` : sandbox.proxyAddress.host;
+  const proxy = `http://${host}:${sandbox.proxyAddress.port}`;
+  return { ...env ?? {}, HTTP_PROXY: proxy, HTTPS_PROXY: proxy, http_proxy: proxy, https_proxy: proxy, NO_PROXY: "", no_proxy: "" };
+}
+function isWithin(candidate, root) {
+  const relative = path4.relative(root, path4.resolve(candidate));
+  return relative === "" || !relative.startsWith(`..${path4.sep}`) && relative !== ".." && !path4.isAbsolute(relative);
+}
+function optionalOwner(value, label) {
+  if (value === void 0 || value === null) return void 0;
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must be a non-empty string`);
+  return value.trim();
+}
+function optionalSandbox(value) {
+  if (value === void 0 || value === null) return void 0;
+  if (!value || typeof value !== "object") throw new Error("sandbox must be a macOS sandbox request");
+  const candidate = value;
+  if (typeof candidate.workspace !== "string" || !candidate.proxyAddress || typeof candidate.proxyAddress !== "object") {
+    throw new Error("sandbox must include workspace and proxyAddress");
+  }
+  return candidate;
+}
+function uniqueDescriptors(values) {
+  const result2 = /* @__PURE__ */ new Map();
+  for (const value of values) {
+    validateDescriptor(value);
+    const prior = result2.get(value.realpath);
+    if (prior && prior.sha256 !== value.sha256) throw new Error(`Conflicting executable descriptor: ${value.realpath}`);
+    result2.set(value.realpath, value);
+  }
+  return [...result2.values()];
+}
+function explicitReadSubpaths(values, executables) {
+  const executablePaths = new Set(executables.flatMap((value) => [path4.resolve(value.path), path4.resolve(value.realpath)]));
+  return [...new Set(values.map((value) => path4.resolve(value)).filter((value) => !executablePaths.has(value)))];
+}
+function macosRuntimeReadFiles(executables) {
+  return macosRuntimeReads(executables).files;
+}
+function macosRuntimeReadSubpaths(executables) {
+  return macosRuntimeReads(executables).subpaths;
+}
+function macosRuntimeReads(executables) {
+  if (process.platform !== "darwin") return { files: [], subpaths: [] };
+  const files = /* @__PURE__ */ new Set();
+  const subpaths = /* @__PURE__ */ new Set();
+  for (const executable of executables) {
+    const executableRoot = path4.dirname(executable.realpath);
+    const queue = [executable.realpath];
+    const inspected = /* @__PURE__ */ new Set();
+    while (queue.length > 0 && inspected.size < 512) {
+      const image = queue.shift();
+      const canonicalImage = realpathSync(image);
+      if (inspected.has(canonicalImage)) continue;
+      inspected.add(canonicalImage);
+      const loadCommands = spawnSync("/usr/bin/otool", ["-l", canonicalImage], { encoding: "utf8", timeout: 2e3 });
+      const libraries = spawnSync("/usr/bin/otool", ["-L", canonicalImage], { encoding: "utf8", timeout: 2e3 });
+      if (loadCommands.status !== 0 || libraries.status !== 0 || typeof loadCommands.stdout !== "string" || typeof libraries.stdout !== "string") continue;
+      const loader = path4.dirname(canonicalImage);
+      const rpaths = [...loadCommands.stdout.matchAll(/\n\s*path\s+(\S+)\s+\(offset/g)].map((match) => resolveDyldPath(match[1], loader, executableRoot, [])).filter((value) => value !== null);
+      for (const line of libraries.stdout.split("\n").slice(1)) {
+        const dependency = /^\s*(\S+)\s+\(/.exec(line)?.[1];
+        if (!dependency) continue;
+        const resolved = resolveDyldPath(dependency, loader, executableRoot, rpaths);
+        if (resolved && statFile(resolved)) {
+          for (const value of literalSymlinkChain(resolved)) files.add(value);
+          for (const value of macosRuntimeConfigurationFiles(resolved)) {
+            for (const component of literalSymlinkChain(value)) files.add(component);
+          }
+          queue.push(resolved);
+        }
+      }
+    }
+  }
+  return { files: [...files].sort(), subpaths: [...subpaths].sort() };
+}
+function macosRuntimeConfigurationFiles(library) {
+  const match = /^(.*)\/opt\/(openssl@[^/]+)\/lib\//.exec(library);
+  if (!match) return [];
+  const values = [
+    path4.join(match[1], "etc", match[2], "openssl.cnf"),
+    path4.join(match[1], "etc", match[2], "cert.pem")
+  ];
+  return values.filter(statFile);
+}
+function literalSymlinkChain(value) {
+  const result2 = /* @__PURE__ */ new Set();
+  let current = path4.resolve(value);
+  for (let index = 0; index < 32; index++) {
+    addLiteralPathComponents(result2, current);
+    addResolvedAncestorVariants(result2, current);
+    const real = realpathSync(current);
+    addLiteralPathComponents(result2, real);
+    if (real === current) break;
+    current = real;
+  }
+  return [...result2];
+}
+function addResolvedAncestorVariants(result2, value) {
+  let ancestor = path4.resolve(value);
+  while (ancestor !== path4.dirname(ancestor)) {
+    try {
+      const resolved = path4.join(realpathSync(ancestor), path4.relative(ancestor, value));
+      addLiteralPathComponents(result2, resolved);
+    } catch {
+    }
+    ancestor = path4.dirname(ancestor);
+  }
+}
+function addLiteralPathComponents(result2, value) {
+  let current = path4.resolve(value);
+  while (current !== path4.dirname(current)) {
+    result2.add(current);
+    current = path4.dirname(current);
+  }
+}
+function resolveDyldPath(value, loader, executable, rpaths) {
+  if (path4.isAbsolute(value)) return path4.normalize(value);
+  if (value.startsWith("@loader_path/")) return path4.resolve(loader, value.slice("@loader_path/".length));
+  if (value.startsWith("@executable_path/")) return path4.resolve(executable, value.slice("@executable_path/".length));
+  if (value.startsWith("@rpath/")) {
+    const suffix = value.slice("@rpath/".length);
+    for (const root of rpaths) {
+      const candidate = path4.resolve(root, suffix);
+      if (statFile(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+function statFile(value) {
+  try {
+    return statSync(value).isFile();
+  } catch {
+    return false;
+  }
+}
+function validateRequest(request) {
+  const executablePath = typeof request.executable === "string" ? request.executable : request.executable.path;
+  if (!path4.isAbsolute(executablePath)) throw new Error(`CommandRunner requires an absolute executable: ${executablePath}`);
+  const owner = optionalOwner(request.owner, "owner");
+  const ownerTag = optionalOwner(request.ownerTag, "ownerTag");
+  if (owner !== void 0 && ownerTag !== void 0 && owner !== ownerTag) throw new Error("owner and ownerTag must match");
+  if (request.stdio === "inherit" && request.stdin !== void 0) throw new Error("stdin cannot be supplied when stdio is inherited");
+  for (const [label, value] of [["timeoutMs", request.timeoutMs], ["maxStdoutBytes", request.maxStdoutBytes], ["maxStderrBytes", request.maxStderrBytes]]) {
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${label} must be a positive integer`);
+  }
+}
+function validateStreamingRequest(request) {
+  const executablePath = typeof request.executable === "string" ? request.executable : request.executable.path;
+  if (!executablePath) throw new Error("CommandRunner requires an executable");
+  const owner = optionalOwner(request.owner, "owner");
+  const ownerTag = optionalOwner(request.ownerTag, "ownerTag");
+  if (owner !== void 0 && ownerTag !== void 0 && owner !== ownerTag) throw new Error("owner and ownerTag must match");
+  if (request.timeoutMs !== void 0 && (!Number.isSafeInteger(request.timeoutMs) || request.timeoutMs < 1)) {
+    throw new Error("timeoutMs must be a positive integer");
+  }
+}
+function result(input) {
+  const stdoutBuffer = Buffer.concat(input.stdout);
+  return { executable: input.descriptor.realpath, executableDescriptor: input.descriptor, args: input.args, cwd: input.request.cwd ?? input.sandbox?.workspace ?? null, pid: input.pid, ok: input.termination === "exited" && input.exitCode === 0, termination: input.termination, exitCode: input.exitCode, signal: input.signal, stdoutBuffer, stdout: stdoutBuffer.toString("utf8"), stderr: Buffer.concat(input.stderr).toString("utf8"), stdoutBytes: input.stdoutBytes, stderrBytes: input.stderrBytes, stdoutTruncated: input.stdoutTruncated, stderrTruncated: input.stderrTruncated, durationMs: Date.now() - input.started, spawnError: input.spawnError, integrityError: input.integrityError, sandbox: input.sandbox ? { executableDescriptor: input.sandbox.executable, profile: input.sandbox.profile, proxyAddress: input.sandbox.proxyAddress } : null };
+}
+var ProcessManager = class {
+  constructor(registryPath = defaultProcessRegistryPath()) {
+    this.registryPath = registryPath;
+    this.registryPath = path4.resolve(registryPath);
+  }
+  registryPath;
+  ownedPids = /* @__PURE__ */ new Set();
+  quiescenceContext = new AsyncLocalStorage();
+  isAlive(pid) {
+    if (!isSafePid(pid)) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      if (err.code === "EPERM") return true;
+      return false;
+    }
+  }
+  kill(pid, signal = "SIGTERM") {
+    const registry = this.registry();
+    if (!this.ownedPids.has(pid) && !registry.groups.some((group) => group.pid === pid)) return;
+    try {
+      process.kill(-pid, signal);
+    } catch {
+      try {
+        process.kill(pid, signal);
+      } catch {
+      }
+    }
+  }
+  async killWithGrace(pid, graceMs = 1e4) {
+    if (!this.ownedPids.has(pid) && !this.registry().groups.some((group) => group.pid === pid)) return;
+    if (!this.isGroupAlive(pid)) {
+      this.release(pid);
+      return;
+    }
+    this.kill(pid, "SIGTERM");
+    const deadline = Date.now() + graceMs;
+    while (Date.now() < deadline) {
+      if (!this.isGroupAlive(pid)) {
+        this.release(pid);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    this.kill(pid, "SIGKILL");
+    const forceDeadline = Date.now() + 1e3;
+    while (Date.now() < forceDeadline && this.isGroupAlive(pid)) {
+      await new Promise((resolve2) => setTimeout(resolve2, 25));
+    }
+    if (!this.isGroupAlive(pid)) this.release(pid);
+  }
+  spawn(command, args, options) {
+    const { owner, ownerTag, ...spawnOptions } = options ?? {};
+    const context = this.quiescenceContext.getStore();
+    const tag = normalizeOwner(owner ?? ownerTag) ?? context?.owner ?? null;
+    const reservation = {
+      id: randomUUID(),
+      owner: tag,
+      parent_pid: process.pid,
+      parent_identity: processIdentity(process.pid) ?? `node-${process.pid}`,
+      created_at: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    this.updateRegistry((registry) => {
+      const freeze = tag === null ? registry.freezes[0] : registry.freezes.find((value) => value.owner === tag);
+      if (freeze && freeze.token !== context?.token) throw new Error(`Process owner is frozen for a quiescent operation: ${tag ?? freeze.owner}`);
+      registry.reservations.push(reservation);
+    });
+    let proc;
+    try {
+      proc = spawn(command, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        ...spawnOptions,
+        detached: true
+        // Callers cannot disable the process group used for cleanup.
+      });
+    } catch (error) {
+      this.removeReservation(reservation.id);
+      throw error;
+    }
+    if (!proc.pid) {
+      if (typeof proc.once === "function") proc.once("error", () => {
+      });
+      this.removeReservation(reservation.id);
+      throw new Error(`Failed to spawn process: ${command}`);
+    }
+    proc.unref();
+    const identity = processGroupIdentity(proc.pid);
+    if (!identity) {
+      this.signalGroup(proc.pid, "SIGKILL");
+      if (!this.isGroupAlive(proc.pid)) this.removeReservation(reservation.id);
+      throw new Error(`Failed to establish process-group identity: ${proc.pid}`);
+    }
+    try {
+      this.updateRegistry((registry) => {
+        if (!registry.reservations.some((value) => value.id === reservation.id)) throw new Error("Process spawn reservation was lost");
+        registry.reservations = registry.reservations.filter((value) => value.id !== reservation.id);
+        registry.groups = registry.groups.filter((group) => group.pid !== proc.pid);
+        registry.groups.push({ pid: proc.pid, owner: tag, identity, registered_at: (/* @__PURE__ */ new Date()).toISOString() });
+      });
+      this.ownedPids.add(proc.pid);
+    } catch (error) {
+      this.signalGroup(proc.pid, "SIGKILL");
+      if (!this.isGroupAlive(proc.pid)) this.removeReservation(reservation.id);
+      throw error;
+    }
+    const leaderClosed = () => {
+      const pid = proc.pid;
+      this.signalGroup(pid, "SIGKILL");
+      if (!this.isGroupAlive(pid)) {
+        try {
+          this.release(pid);
+        } catch {
+        }
+      }
+    };
+    proc.once("close", leaderClosed);
+    return tag ? { process: proc, pid: proc.pid, owner: tag, ownerTag: tag } : { process: proc, pid: proc.pid };
+  }
+  active(owner) {
+    const tag = requireOwner(owner);
+    return this.registry().groups.filter((group) => group.owner === null || group.owner === tag).map((group) => group.pid).sort((left, right) => left - right);
+  }
+  async awaitQuiescent(owner, timeoutMs) {
+    const tag = requireOwner(owner);
+    validateTimeout(timeoutMs);
+    const deadline = timeoutMs === void 0 ? Infinity : Date.now() + timeoutMs;
+    while (this.hasBlockers(tag)) {
+      if (Date.now() >= deadline) throw new Error(`Timed out waiting for process owner to become quiescent: ${tag}`);
+      await new Promise((resolve2) => setTimeout(resolve2, Math.min(25, deadline - Date.now())));
+    }
+  }
+  async runQuiescent(owner, action, timeoutMs = 1e4) {
+    const tag = requireOwner(owner);
+    validateTimeout(timeoutMs);
+    const existing = this.quiescenceContext.getStore();
+    if (existing?.owner === tag) return action();
+    const token = randomUUID();
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      let acquired = false;
+      this.updateRegistry((registry) => {
+        if (registry.freezes.some((freeze) => freeze.owner === tag)) return;
+        if (registry.groups.some((group) => group.owner === null || group.owner === tag)) return;
+        if (registry.reservations.some((reservation) => reservation.owner === null || reservation.owner === tag)) return;
+        registry.freezes.push({ owner: tag, token, holder_pid: process.pid, holder_identity: processIdentity(process.pid) ?? `node-${process.pid}`, created_at: (/* @__PURE__ */ new Date()).toISOString() });
+        acquired = true;
+      });
+      if (acquired) break;
+      if (Date.now() >= deadline) throw new Error(`Timed out waiting for process owner to become quiescent: ${tag}`);
+      await new Promise((resolve2) => setTimeout(resolve2, Math.min(25, deadline - Date.now())));
+    }
+    try {
+      return await this.quiescenceContext.run({ owner: tag, token }, action);
+    } finally {
+      this.updateRegistry((registry) => {
+        registry.freezes = registry.freezes.filter((freeze) => freeze.token !== token);
+      });
+    }
+  }
+  isGroupAlive(pid) {
+    if (!isSafePid(pid)) return false;
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch (error) {
+      return error.code === "EPERM";
+    }
+  }
+  signalGroup(pid, signal) {
+    try {
+      process.kill(-pid, signal);
+    } catch {
+    }
+  }
+  release(pid) {
+    this.updateRegistry((registry) => {
+      registry.groups = registry.groups.filter((group) => group.pid !== pid);
+    });
+    this.ownedPids.delete(pid);
+  }
+  removeReservation(id2) {
+    this.updateRegistry((registry) => {
+      registry.reservations = registry.reservations.filter((reservation) => reservation.id !== id2);
+    });
+  }
+  hasBlockers(owner) {
+    const registry = this.registry();
+    return registry.groups.some((group) => group.owner === null || group.owner === owner) || registry.reservations.some((reservation) => reservation.owner === null || reservation.owner === owner);
+  }
+  registry() {
+    return this.updateRegistry(() => {
+    });
+  }
+  updateRegistry(update) {
+    return withRegistryLock(this.registryPath, () => {
+      const registry = readRegistry(this.registryPath);
+      registry.groups = registry.groups.filter((group) => {
+        const identity = processGroupIdentity(group.pid);
+        return this.isGroupAlive(group.pid) && (identity === null || identity === group.identity);
+      });
+      registry.freezes = registry.freezes.filter((freeze) => processIdentity(freeze.holder_pid) === freeze.holder_identity);
+      update(registry);
+      registry.groups.sort((left, right) => left.pid - right.pid);
+      registry.reservations.sort((left, right) => left.id.localeCompare(right.id));
+      registry.freezes.sort((left, right) => left.owner.localeCompare(right.owner));
+      writeRegistry(this.registryPath, registry);
+      return registry;
+    });
   }
 };
-var execFile = promisify(execFile$1);
+function defaultProcessRegistryPath(home = os.homedir()) {
+  const configured = process.env.ORCHESTRY_PROCESS_REGISTRY;
+  if (configured?.trim()) return path4.resolve(configured);
+  const base = process.platform === "darwin" ? path4.join(home, "Library", "Application Support", "orchestry") : path4.join(home, ".local", "state", "orchestry");
+  return path4.join(base, "process-groups.json");
+}
+function readRegistry(file) {
+  if (!existsSync(file)) return { schema_version: 3, groups: [], reservations: [], freezes: [] };
+  const stat = lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 63) !== 0) throw new Error(`Unsafe process-group registry: ${file}`);
+  let value;
+  try {
+    value = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    throw new Error(`Invalid process-group registry: ${file}`);
+  }
+  if (!value || typeof value !== "object") throw new Error(`Invalid process-group registry: ${file}`);
+  const candidate = value;
+  if (candidate.schema_version !== 1 && candidate.schema_version !== 2 && candidate.schema_version !== 3) throw new Error(`Unsupported process-group registry schema: ${String(candidate.schema_version)}`);
+  if (!Array.isArray(candidate.groups)) throw new Error(`Invalid process-group registry: ${file}`);
+  const schema = candidate.schema_version;
+  const groups = candidate.groups.map((entry) => migrateGroup(entry, schema));
+  if (schema !== 3) return { schema_version: 3, groups, reservations: [], freezes: [] };
+  const extended = value;
+  if (!Array.isArray(extended.reservations) || !Array.isArray(extended.freezes)) throw new Error(`Invalid process-group registry: ${file}`);
+  return { schema_version: 3, groups, reservations: extended.reservations.map(validateReservation), freezes: extended.freezes.map(validateFreeze) };
+}
+function migrateGroup(value, schema) {
+  if (!value || typeof value !== "object") throw new Error("Invalid process-group registry entry");
+  const entry = value;
+  if (!isSafePid(entry.pid ?? 0) || entry.owner !== null && typeof entry.owner !== "string") throw new Error("Invalid process-group registry entry");
+  const owner = entry.owner === null ? null : requireOwner(entry.owner);
+  if (schema >= 2) {
+    if (typeof entry.identity !== "string" || !entry.identity || typeof entry.registered_at !== "string" || !Number.isFinite(Date.parse(entry.registered_at))) {
+      throw new Error("Invalid process-group registry entry");
+    }
+    return { pid: entry.pid, owner, identity: entry.identity, registered_at: entry.registered_at };
+  }
+  return {
+    pid: entry.pid,
+    owner,
+    identity: processGroupIdentity(entry.pid) ?? "stale",
+    registered_at: typeof entry.registered_at === "string" && Number.isFinite(Date.parse(entry.registered_at)) ? entry.registered_at : (/* @__PURE__ */ new Date(0)).toISOString()
+  };
+}
+function validateReservation(value) {
+  if (!value || typeof value !== "object") throw new Error("Invalid process spawn reservation");
+  const entry = value;
+  if (typeof entry.id !== "string" || !entry.id || entry.owner !== null && typeof entry.owner !== "string" || !isSafePid(entry.parent_pid ?? 0) || typeof entry.parent_identity !== "string" || !entry.parent_identity || typeof entry.created_at !== "string" || !Number.isFinite(Date.parse(entry.created_at))) throw new Error("Invalid process spawn reservation");
+  return { id: entry.id, owner: entry.owner === null ? null : requireOwner(entry.owner), parent_pid: entry.parent_pid, parent_identity: entry.parent_identity, created_at: entry.created_at };
+}
+function validateFreeze(value) {
+  if (!value || typeof value !== "object") throw new Error("Invalid process scope freeze");
+  const entry = value;
+  if (typeof entry.owner !== "string" || typeof entry.token !== "string" || !entry.token || !isSafePid(entry.holder_pid ?? 0) || typeof entry.holder_identity !== "string" || !entry.holder_identity || typeof entry.created_at !== "string" || !Number.isFinite(Date.parse(entry.created_at))) throw new Error("Invalid process scope freeze");
+  return { owner: requireOwner(entry.owner), token: entry.token, holder_pid: entry.holder_pid, holder_identity: entry.holder_identity, created_at: entry.created_at };
+}
+function writeRegistry(file, registry) {
+  const directory = path4.dirname(file);
+  mkdirSync(directory, { recursive: true, mode: 448 });
+  const temporary = `${file}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(registry)}
+`, { mode: 384, flag: "wx" });
+  chmodSync(temporary, 384);
+  renameSync(temporary, file);
+  chmodSync(file, 384);
+}
+function withRegistryLock(file, action) {
+  const directory = path4.dirname(file);
+  mkdirSync(directory, { recursive: true, mode: 448 });
+  const lock = `${file}.lock`;
+  const deadline = Date.now() + 2e3;
+  let fd = null;
+  const token = randomUUID();
+  while (fd === null) {
+    try {
+      fd = openSync(lock, "wx", 384);
+      writeFileSync(fd, `${process.pid} ${Date.now()} ${token}
+`);
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      removeStaleLock(lock);
+      if (Date.now() >= deadline) throw new Error(`Timed out locking process-group registry: ${file}`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+  }
+  try {
+    return action();
+  } finally {
+    closeSync(fd);
+    try {
+      if (readFileSync(lock, "utf8").trim().split(/\s+/)[2] === token) rmSync(lock, { force: true });
+    } catch {
+    }
+  }
+}
+function removeStaleLock(file) {
+  try {
+    const [pidValue, createdValue] = readFileSync(file, "utf8").trim().split(/\s+/);
+    const pid = Number(pidValue);
+    const created = Number(createdValue);
+    if (!isSafePid(pid) || !isProcessAlive(pid) || !Number.isFinite(created)) rmSync(file, { force: true });
+  } catch {
+  }
+}
+function processGroupIdentity(pid) {
+  if (!isSafePid(pid)) return null;
+  const result2 = spawnSync("/bin/ps", ["-o", "pgid=", "-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 1e3 });
+  if (result2.status !== 0 || typeof result2.stdout !== "string") return null;
+  const match = /^\s*(\d+)\s+(.+?)\s*$/.exec(result2.stdout);
+  if (!match || Number(match[1]) !== pid) return null;
+  return match[2];
+}
+function processIdentity(pid) {
+  if (!isSafePid(pid)) return null;
+  const result2 = spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 1e3 });
+  if (result2.status !== 0 || typeof result2.stdout !== "string" || !result2.stdout.trim()) return null;
+  return result2.stdout.trim();
+}
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+function isSafePid(pid) {
+  return Number.isSafeInteger(pid) && pid > 1;
+}
+function normalizeOwner(owner) {
+  if (owner === void 0) return null;
+  return requireOwner(owner);
+}
+function requireOwner(owner) {
+  const value = owner.trim();
+  if (!value) throw new Error("Process owner must not be empty");
+  return value;
+}
+function validateTimeout(timeoutMs) {
+  if (timeoutMs !== void 0 && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0)) throw new Error("timeoutMs must be a non-negative integer");
+}
+
+// src/infrastructure/clipboard-service.ts
 var EXEC_TIMEOUT_MS = 3e3;
+var TEXT_MAX_STDOUT_BYTES = 64 * 1024;
+var IMAGE_MAX_STDOUT_BYTES = 50 * 1024 * 1024;
+var MAX_STDERR_BYTES = 64 * 1024;
+var commandRunner = new CommandRunner(new ProcessManager());
+var executableDescriptors = /* @__PURE__ */ new Map();
 function isClipboardToolAvailable() {
   const platform = process.platform;
   if (platform === "darwin") {
     return true;
   }
   if (platform === "linux") {
-    try {
-      execFileSync("which", ["xclip"], { timeout: EXEC_TIMEOUT_MS, stdio: "ignore" });
-      return true;
-    } catch {
-      return false;
-    }
+    return executableOnPath("xclip");
   }
   if (platform === "win32") {
     return true;
@@ -1326,9 +2120,7 @@ async function getClipboardImage() {
 }
 async function detectMacOS() {
   try {
-    const { stdout } = await execFile("osascript", ["-e", "clipboard info"], {
-      timeout: EXEC_TIMEOUT_MS
-    });
+    const { stdout } = await run("osascript", ["-e", "clipboard info"]);
     if (stdout.includes("\xABclass PNGf\xBB") || stdout.includes("\xABclass TIFF\xBB")) {
       return "image";
     }
@@ -1359,9 +2151,7 @@ async function getImageMacOS() {
         return "error"
       end try
     `;
-    const { stdout } = await execFile("osascript", ["-e", script], {
-      timeout: EXEC_TIMEOUT_MS
-    });
+    const { stdout } = await run("osascript", ["-e", script]);
     if (stdout.trim() !== "ok") return null;
     const data = await readFile(filePath);
     return { data, ext: "png" };
@@ -1380,10 +2170,9 @@ async function getImageMacOS() {
 }
 async function detectLinux() {
   try {
-    const { stdout } = await execFile(
+    const { stdout } = await run(
       "xclip",
-      ["-selection", "clipboard", "-t", "TARGETS", "-o"],
-      { timeout: EXEC_TIMEOUT_MS }
+      ["-selection", "clipboard", "-t", "TARGETS", "-o"]
     );
     const targets = stdout.toLowerCase();
     if (targets.includes("image/png") || targets.includes("image/tiff") || targets.includes("image/jpeg")) {
@@ -1399,12 +2188,12 @@ async function detectLinux() {
 }
 async function getImageLinux() {
   try {
-    const { stdout } = await execFile(
+    const { stdoutBuffer } = await run(
       "xclip",
       ["-selection", "clipboard", "-t", "image/png", "-o"],
-      { timeout: EXEC_TIMEOUT_MS, encoding: "buffer", maxBuffer: 50 * 1024 * 1024 }
+      IMAGE_MAX_STDOUT_BYTES
     );
-    const data = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout, "binary");
+    const data = stdoutBuffer;
     if (data.length === 0) return null;
     return { data, ext: "png" };
   } catch {
@@ -1413,16 +2202,14 @@ async function getImageLinux() {
 }
 async function detectWindows() {
   try {
-    const { stdout: imgCheck } = await execFile(
-      "powershell",
-      ["-NoProfile", "-Command", 'if (Get-Clipboard -Format Image) { "image" } else { "none" }'],
-      { timeout: EXEC_TIMEOUT_MS }
+    const { stdout: imgCheck } = await run(
+      "powershell.exe",
+      ["-NoProfile", "-Command", 'if (Get-Clipboard -Format Image) { "image" } else { "none" }']
     );
     if (imgCheck.trim() === "image") return "image";
-    const { stdout: textCheck } = await execFile(
-      "powershell",
-      ["-NoProfile", "-Command", 'if (Get-Clipboard) { "text" } else { "empty" }'],
-      { timeout: EXEC_TIMEOUT_MS }
+    const { stdout: textCheck } = await run(
+      "powershell.exe",
+      ["-NoProfile", "-Command", 'if (Get-Clipboard) { "text" } else { "empty" }']
     );
     return textCheck.trim() === "text" ? "text" : "empty";
   } catch {
@@ -1443,9 +2230,7 @@ async function getImageWindows() {
         Write-Output 'error'
       }
     `;
-    const { stdout } = await execFile("powershell", ["-NoProfile", "-Command", script], {
-      timeout: EXEC_TIMEOUT_MS
-    });
+    const { stdout } = await run("powershell.exe", ["-NoProfile", "-Command", script]);
     if (stdout.trim() !== "ok") return null;
     const data = await readFile(filePath);
     return { data, ext: "png" };
@@ -1462,1424 +2247,43 @@ async function getImageWindows() {
     }
   }
 }
-
-// src/domain/global-config.ts
-var DEFAULT_GLOBAL_CONFIG = {
-  tui: {
-    activity_filter: "all",
-    notifications: { toast: true, bell: false }
-  }
-};
-var IndexManager = class {
-  indexPath;
-  dir;
-  ext;
-  itemPath;
-  fileFilter;
-  readItemFn;
-  /** Promise-chain mutex to serialize updateIndex read-modify-write cycles. */
-  mutex = Promise.resolve();
-  /** True while executing inside withMutex — prevents re-entrant deadlock. */
-  insideMutex = false;
-  constructor(config) {
-    this.dir = config.dir;
-    this.ext = config.ext;
-    this.itemPath = config.itemPath;
-    this.indexPath = path.join(config.dir, "_index.json");
-    this.fileFilter = config.fileFilter ?? (() => true);
-    if (config.readItem) {
-      this.readItemFn = config.readItem;
-    } else if (config.ext === ".yml") {
-      this.readItemFn = (fp) => readYaml(fp);
-    } else {
-      this.readItemFn = (fp) => readJson(fp);
-    }
-  }
-  /**
-   * Read the index file. Falls back to rebuilding from individual files
-   * if the index is missing or corrupt.
-   */
-  async readIndex() {
-    try {
-      const entries = await readJson(this.indexPath);
-      if (Array.isArray(entries)) return entries;
-    } catch {
-    }
-    return this.rebuildIndex();
-  }
-  /**
-   * Rebuild the index by reading all individual item files.
-   * Used as fallback when _index.json is missing or corrupted.
-   *
-   * When called from outside the mutex (standalone), the write is serialized
-   * through {@link withMutex} to prevent races with concurrent updateIndex.
-   * When called from within the mutex (e.g. updateIndex → readIndex fallback),
-   * it writes directly to avoid re-entrant deadlock.
-   */
-  async rebuildIndex() {
-    await ensureDir(this.dir);
-    const files = await listFiles(this.dir, this.ext);
-    const results = await Promise.all(
-      files.filter(this.fileFilter).map(async (file) => {
-        const id = file.replace(this.ext, "");
-        try {
-          return await this.readItemFn(this.itemPath(id));
-        } catch {
-          return null;
-        }
-      })
-    );
-    const items = [];
-    for (const item of results) {
-      if (item != null) items.push(item);
-    }
-    if (this.insideMutex) {
-      await this.writeIndexUnsafe(items);
-    } else {
-      await this.withMutex(() => this.writeIndexUnsafe(items));
-    }
-    return items;
-  }
-  /**
-   * Write the index file atomically.
-   * Serialized through the mutex to prevent races with concurrent updateIndex.
-   */
-  async writeIndex(items) {
-    return this.withMutex(() => this.writeIndexUnsafe(items));
-  }
-  /**
-   * Apply a mutation to the index and write it back.
-   *
-   * Serialized through a promise-chain mutex to prevent TOCTOU races
-   * where parallel callers could overwrite each other's changes
-   * (e.g. two `orch task add` invocations losing data).
-   */
-  async updateIndex(fn) {
-    return this.withMutex(async () => {
-      const current = await this.readIndex();
-      const updated = fn(current);
-      await this.writeIndexUnsafe(updated);
-    });
-  }
-  /** Internal write without mutex — called only from within withMutex. */
-  async writeIndexUnsafe(items) {
-    await ensureDir(this.dir);
-    await writeJson(this.indexPath, items);
-  }
-  /** Promise-chain mutex: serializes all index-mutating operations. */
-  withMutex(fn) {
-    let release;
-    const next = new Promise((resolve) => {
-      release = resolve;
-    });
-    const prev = this.mutex;
-    this.mutex = next;
-    return prev.then(async () => {
-      this.insideMutex = true;
-      try {
-        return await fn();
-      } finally {
-        this.insideMutex = false;
-        release();
-      }
-    });
-  }
-};
-var TaskStore = class {
-  constructor(paths) {
-    this.paths = paths;
-    this.index = new IndexManager({
-      dir: paths.tasksDir,
-      ext: ".yml",
-      itemPath: (id) => paths.taskPath(id)
-    });
-  }
-  paths;
-  index;
-  async list(filter) {
-    const all = await this.index.readIndex();
-    const tasks = all.filter(
-      (task) => task !== null && (!filter?.status || task.status === filter.status) && (!filter?.goalId || task.goalId === filter.goalId)
-    );
-    return tasks.sort((a, b) => {
-      const statusOrder = statusPriority(a.status) - statusPriority(b.status);
-      if (statusOrder !== 0) return statusOrder;
-      const bTime = b.updated_at ?? "";
-      const aTime = a.updated_at ?? "";
-      return bTime < aTime ? -1 : bTime > aTime ? 1 : 0;
-    });
-  }
-  async get(id) {
-    return readYaml(this.paths.taskPath(id));
-  }
-  async save(task) {
-    await ensureDir(this.paths.tasksDir);
-    await writeYaml(this.paths.taskPath(task.id), task);
-    await this.index.updateIndex((idx) => {
-      const filtered = idx.filter((t) => t.id !== task.id);
-      filtered.push(task);
-      return filtered;
-    });
-  }
-  async delete(id) {
-    try {
-      await fs.unlink(this.paths.taskPath(id));
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-    }
-    await this.index.updateIndex((idx) => idx.filter((t) => t.id !== id));
-  }
-};
-function statusPriority(status) {
-  const order = {
-    in_progress: 0,
-    retrying: 1,
-    review: 2,
-    todo: 3,
-    done: 4,
-    failed: 5,
-    cancelled: 6
-  };
-  return order[status];
-}
-var AgentStore = class {
-  constructor(paths) {
-    this.paths = paths;
-    this.index = new IndexManager({
-      dir: paths.agentsDir,
-      ext: ".yml",
-      itemPath: (id) => paths.agentPath(id)
-    });
-  }
-  paths;
-  index;
-  async list() {
-    return this.index.readIndex();
-  }
-  async get(id) {
-    return readYaml(this.paths.agentPath(id));
-  }
-  async getByName(name) {
-    const agents = await this.list();
-    return agents.find((a) => a.name === name) ?? null;
-  }
-  async save(agent) {
-    await ensureDir(this.paths.agentsDir);
-    await writeYaml(this.paths.agentPath(agent.id), agent);
-    await this.index.updateIndex((idx) => {
-      const filtered = idx.filter((a) => a.id !== agent.id);
-      filtered.push(agent);
-      return filtered;
-    });
-  }
-  async delete(id) {
-    try {
-      await fs.unlink(this.paths.agentPath(id));
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-    }
-    await this.index.updateIndex((idx) => idx.filter((a) => a.id !== id));
-  }
-};
-var RunStore = class {
-  constructor(paths) {
-    this.paths = paths;
-  }
-  paths;
-  async save(run) {
-    await ensureDir(this.paths.runsDir);
-    await writeJson(this.paths.runPath(run.id), run);
-  }
-  async get(id) {
-    return readJson(this.paths.runPath(id));
-  }
-  async listAll() {
-    return this.listFiltered(() => true);
-  }
-  async listForTask(taskId) {
-    return this.listFiltered((run) => run.task_id === taskId);
-  }
-  async listForAgent(agentId) {
-    return this.listFiltered((run) => run.agent_id === agentId);
-  }
-  async appendEvent(runId, event) {
-    await ensureDir(this.paths.runsDir);
-    await appendJsonl(this.paths.runEventsPath(runId), event);
-  }
-  async readEvents(runId) {
-    return readJsonl(this.paths.runEventsPath(runId));
-  }
-  /**
-   * Read the last N events for a run without loading the entire JSONL file.
-   */
-  async readEventsTail(runId, count) {
-    return readJsonlTail(this.paths.runEventsPath(runId), count);
-  }
-  closeRunEvents(runId) {
-    closeAppendHandle(this.paths.runEventsPath(runId));
-  }
-  async *streamEvents(runId, signal) {
-    const filePath = this.paths.runEventsPath(runId);
-    const deadline = Date.now() + 3e4;
-    while (!signal?.aborted && Date.now() < deadline) {
-      if (await pathExists(filePath)) break;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    if (signal?.aborted || Date.now() >= deadline) return;
-    const stream = createReadStream(filePath);
-    const { readLines } = await import('./process-manager-BRCBBME3.js');
-    try {
-      for await (const line of readLines(stream)) {
-        if (signal?.aborted) break;
-        if (line.trim()) {
-          try {
-            yield JSON.parse(line);
-          } catch {
-            process.stderr.write(`[RunStore] skipping corrupt JSONL line: ${sanitizeText(line).slice(0, 200)}
-`);
-          }
-        }
-      }
-    } finally {
-      stream.destroy();
-    }
-  }
-  async listFiltered(predicate) {
-    await ensureDir(this.paths.runsDir);
-    const files = await listFiles(this.paths.runsDir, ".json");
-    const BATCH = 64;
-    const all = [];
-    for (let i = 0; i < files.length; i += BATCH) {
-      const batch = files.slice(i, i + BATCH);
-      const results = await Promise.all(
-        batch.map((file) => {
-          const id = file.endsWith(".json") ? file.slice(0, -5) : file;
-          return readJson(this.paths.runPath(id));
-        })
-      );
-      for (const run of results) {
-        if (run !== null && predicate(run)) all.push(run);
-      }
-    }
-    return all.sort(
-      (a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime()
-    );
-  }
-};
-
-// src/domain/state.ts
-var DEFAULT_STATE = {
-  version: 1,
-  onboardingCompleted: false,
-  running: {},
-  claimed: /* @__PURE__ */ new Set(),
-  retry_queue: [],
-  stats: {
-    total_runs: 0,
-    total_tasks_completed: 0,
-    total_tasks_failed: 0,
-    total_tokens: { input: 0, output: 0, reasoning: 0, total: 0, cache_read: 0, cache_write: 0 },
-    total_runtime_ms: 0
-  }
-};
-
-// src/infrastructure/storage/state-store.ts
-var StateStore = class {
-  constructor(paths) {
-    this.paths = paths;
-  }
-  paths;
-  async read() {
-    const raw = await readJson(this.paths.statePath);
-    if (!raw) return structuredClone(DEFAULT_STATE);
-    const defaults = structuredClone(DEFAULT_STATE);
-    return {
-      version: raw.version ?? defaults.version,
-      pid: raw.pid,
-      started_at: raw.started_at,
-      onboardingCompleted: typeof raw.onboardingCompleted === "boolean" ? raw.onboardingCompleted : false,
-      running: raw.running && typeof raw.running === "object" ? raw.running : defaults.running,
-      claimed: Array.isArray(raw.claimed) ? new Set(raw.claimed) : new Set(defaults.claimed),
-      retry_queue: Array.isArray(raw.retry_queue) ? raw.retry_queue : defaults.retry_queue,
-      stats: {
-        total_runs: raw.stats?.total_runs ?? defaults.stats.total_runs,
-        total_tasks_completed: raw.stats?.total_tasks_completed ?? defaults.stats.total_tasks_completed,
-        total_tasks_failed: raw.stats?.total_tasks_failed ?? defaults.stats.total_tasks_failed,
-        total_tokens: {
-          ...defaults.stats.total_tokens,
-          ...raw.stats?.total_tokens ?? {}
-        },
-        total_runtime_ms: raw.stats?.total_runtime_ms ?? defaults.stats.total_runtime_ms
-      }
-    };
-  }
-  async write(state) {
-    const serializable = { ...state, claimed: Array.from(state.claimed) };
-    await writeJson(this.paths.statePath, serializable);
-  }
-};
-
-// src/domain/config.ts
-var DEFAULT_CONFIG = {
-  project: {
-    name: "my-project"
-  },
-  defaults: {
-    agent: {
-      adapter: "claude",
-      approval_policy: "auto",
-      max_turns: 50,
-      timeout_ms: 36e5,
-      stall_timeout_ms: 6e5,
-      workspace_mode: "worktree"
-    },
-    task: {
-      max_attempts: 3,
-      priority: 3
-    }
-  },
-  scheduling: {
-    poll_interval_ms: 1e4,
-    max_concurrent_agents: 6,
-    retry_base_delay_ms: 1e4,
-    retry_max_delay_ms: 3e5
-  },
-  execution: {
-    security: {
-      allow_permission_bypass: false,
-      allow_shell_adapter: false,
-      persist_prompts: false
-    }
-  }
-};
-
-// src/infrastructure/storage/config-store.ts
-var FORBIDDEN_CONFIG_KEYS = /* @__PURE__ */ new Set(["__proto__", "prototype", "constructor"]);
-var ConfigStore = class {
-  constructor(paths) {
-    this.paths = paths;
-  }
-  paths;
-  async read() {
-    const config = await readYaml(this.paths.configPath);
-    return normalizeConfig(deepMerge(
-      DEFAULT_CONFIG,
-      config ?? {}
-    ));
-  }
-  async write(config) {
-    await writeYaml(this.paths.configPath, config);
-  }
-  async get(keyPath) {
-    const config = await this.read();
-    return getByPath(config, keyPath);
-  }
-  async set(keyPath, value) {
-    const config = await this.read();
-    setByPath(config, keyPath, value);
-    await this.write(config);
-  }
-};
-function getByPath(obj, keyPath) {
-  const keys = parseSafeKeyPath(keyPath, false);
-  let current = obj;
-  for (const key of keys) {
-    if (current === null || current === void 0 || typeof current !== "object") {
-      return void 0;
-    }
-    current = current[key];
-  }
-  return current;
-}
-function setByPath(obj, keyPath, value) {
-  const keys = parseSafeKeyPath(keyPath, true);
-  let current = obj;
-  for (let i = 0; i < keys.length - 1; i++) {
-    const key = keys[i];
-    if (typeof current[key] !== "object" || current[key] === null) {
-      current[key] = {};
-    }
-    current = current[key];
-  }
-  const lastKey = keys[keys.length - 1];
-  current[lastKey] = value;
-}
-function parseSafeKeyPath(keyPath, shouldThrow) {
-  const keys = keyPath.split(".");
-  if (keys.some((key) => FORBIDDEN_CONFIG_KEYS.has(key))) {
-    if (shouldThrow) throw new Error(`Unsafe config key path: ${keyPath}`);
-    return [];
-  }
-  return keys;
-}
-function deepMerge(target, source) {
-  const result = { ...target };
-  for (const key of Object.keys(source)) {
-    if (FORBIDDEN_CONFIG_KEYS.has(key)) continue;
-    const sourceVal = source[key];
-    const targetVal = result[key];
-    if (sourceVal !== null && sourceVal !== void 0 && typeof sourceVal === "object" && !Array.isArray(sourceVal) && typeof targetVal === "object" && targetVal !== null && !Array.isArray(targetVal)) {
-      result[key] = deepMerge(
-        targetVal,
-        sourceVal
-      );
-    } else {
-      result[key] = sourceVal;
-    }
-  }
-  return result;
-}
-function normalizeConfig(config) {
-  const security = config.execution?.security ?? {};
-  return {
-    ...config,
-    execution: {
-      ...config.execution ?? DEFAULT_CONFIG.execution,
-      security: {
-        ...DEFAULT_CONFIG.execution.security,
-        ...security,
-        allow_permission_bypass: security.allow_permission_bypass === true,
-        allow_shell_adapter: security.allow_shell_adapter === true,
-        persist_prompts: security.persist_prompts === true
-      }
-    }
-  };
-}
-var GLOBAL_DIR = path.join(homedir(), ".orchestry");
-var GLOBAL_CONFIG_PATH = path.join(GLOBAL_DIR, "global.yml");
-var GlobalConfigStore = class {
-  async read() {
-    const data = await readYaml(GLOBAL_CONFIG_PATH);
-    if (!data) return { ...DEFAULT_GLOBAL_CONFIG, tui: { ...DEFAULT_GLOBAL_CONFIG.tui, notifications: { ...DEFAULT_GLOBAL_CONFIG.tui.notifications } } };
-    const tui = data.tui;
-    const notif = tui?.notifications;
-    return {
-      tui: {
-        activity_filter: tui?.activity_filter ?? DEFAULT_GLOBAL_CONFIG.tui.activity_filter,
-        notifications: {
-          toast: typeof notif?.toast === "boolean" ? notif.toast : DEFAULT_GLOBAL_CONFIG.tui.notifications.toast,
-          bell: typeof notif?.bell === "boolean" ? notif.bell : DEFAULT_GLOBAL_CONFIG.tui.notifications.bell
-        }
-      }
-    };
-  }
-  async write(config) {
-    await mkdir(GLOBAL_DIR, { recursive: true });
-    await writeYaml(GLOBAL_CONFIG_PATH, config);
-  }
-  async set(key, value) {
-    const config = await this.read();
-    config.tui[key] = value;
-    await this.write(config);
-  }
-};
-var ContextStore = class _ContextStore {
-  constructor(paths) {
-    this.paths = paths;
-    this.index = new IndexManager({
-      dir: paths.contextDir,
-      ext: ".json",
-      itemPath: (key) => paths.contextPath(key),
-      fileFilter: (f) => f !== "_index.json"
-    });
-  }
-  paths;
-  index;
-  async get(key) {
-    const entry = await readJson(this.paths.contextPath(key));
-    if (!entry) return null;
-    if (isExpired(entry)) {
-      await this.delete(key);
-      return null;
-    }
-    return entry;
-  }
-  /** Max TTL: 30 days in milliseconds */
-  static MAX_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
-  async set(key, value, ttlMs) {
-    if (ttlMs !== void 0) {
-      if (!Number.isFinite(ttlMs) || ttlMs <= 0 || ttlMs > _ContextStore.MAX_TTL_MS) {
-        throw new Error(`TTL must be a positive number up to ${_ContextStore.MAX_TTL_MS}ms (30 days)`);
-      }
-    }
-    await ensureDir(this.paths.contextDir);
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const existing = await readJson(this.paths.contextPath(key));
-    const entry = {
-      key,
-      value,
-      created_at: existing?.created_at ?? now,
-      updated_at: now,
-      ttl_ms: ttlMs,
-      expires_at: ttlMs ? new Date(Date.now() + ttlMs).toISOString() : void 0
-    };
-    await writeJson(this.paths.contextPath(key), entry);
-    await this.index.updateIndex((idx) => {
-      const filtered = idx.filter((e) => e.key !== key);
-      filtered.push(entry);
-      return filtered;
-    });
-  }
-  async delete(key) {
-    try {
-      await fs.unlink(this.paths.contextPath(key));
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-    }
-    await this.index.updateIndex((idx) => idx.filter((e) => e.key !== key));
-  }
-  async list() {
-    const entries = await this.index.readIndex();
-    const expired = [];
-    const valid = [];
-    for (const entry of entries) {
-      if (isExpired(entry)) {
-        expired.push(entry);
-      } else {
-        valid.push(entry);
-      }
-    }
-    if (expired.length > 0) {
-      await Promise.all(expired.map((e) => this.deleteFile(e.key)));
-      await this.index.writeIndex(valid);
-    }
-    return valid.sort((a, b) => a.key.localeCompare(b.key));
-  }
-  async getAll() {
-    const entries = await this.list();
-    const result = {};
-    for (const entry of entries) {
-      result[entry.key] = entry.value;
-    }
-    return result;
-  }
-  /** Delete just the file (no index update). Used by lazy expiry cleanup. */
-  async deleteFile(key) {
-    try {
-      await fs.unlink(this.paths.contextPath(key));
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-    }
-  }
-};
-function isExpired(entry) {
-  if (!entry.expires_at) return false;
-  return new Date(entry.expires_at).getTime() < Date.now();
-}
-var MessageStore = class {
-  constructor(paths) {
-    this.paths = paths;
-    this.index = new IndexManager({
-      dir: paths.messagesDir,
-      ext: ".json",
-      itemPath: (id) => paths.messagePath(id),
-      fileFilter: (fileName) => fileName !== "_index.json"
-    });
-  }
-  paths;
-  index;
-  async save(message) {
-    await ensureDir(this.paths.messagesDir);
-    await writeJson(this.paths.messagePath(message.id), message);
-    await this.index.updateIndex((idx) => {
-      const filtered = idx.filter((m) => m.id !== message.id);
-      filtered.push(message);
-      return filtered;
-    });
-  }
-  async get(id) {
-    return readJson(this.paths.messagePath(id));
-  }
-  async list() {
-    const all = await this.index.readIndex();
-    return all.filter((m) => m !== null).sort((a, b) => a.created_at.localeCompare(b.created_at));
-  }
-  async listPending(agentId) {
-    const all = await this.list();
-    const now = Date.now();
-    return all.filter((m) => {
-      if (m.status !== "pending") return false;
-      if (m.expires_at && new Date(m.expires_at).getTime() < now) return false;
-      return m.to_agent_id === agentId;
-    });
-  }
-  async markDelivered(id) {
-    const msg = await this.get(id);
-    if (!msg) return;
-    msg.status = "delivered";
-    msg.delivered_at = (/* @__PURE__ */ new Date()).toISOString();
-    await writeJson(this.paths.messagePath(id), msg);
-    await this.index.updateIndex((idx) => {
-      const filtered = idx.filter((m) => m.id !== id);
-      filtered.push(msg);
-      return filtered;
-    });
-  }
-  async delete(id) {
-    try {
-      await fs.unlink(this.paths.messagePath(id));
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-    }
-    await this.index.updateIndex((idx) => idx.filter((m) => m.id !== id));
-  }
-  async purgeExpired() {
-    const all = await this.list();
-    const now = Date.now();
-    const toDelete = all.filter((m) => {
-      const isExpired2 = m.expires_at && new Date(m.expires_at).getTime() < now;
-      const isOldDelivered = m.delivered_at && now - new Date(m.delivered_at).getTime() > 36e5;
-      return isExpired2 || isOldDelivered;
-    });
-    const idsToDelete = new Set(toDelete.map((m) => m.id));
-    await Promise.all(
-      toDelete.map(async (m) => {
-        try {
-          await fs.unlink(this.paths.messagePath(m.id));
-        } catch (err) {
-          if (err.code !== "ENOENT") throw err;
-        }
-      })
-    );
-    await this.index.updateIndex((idx) => idx.filter((m) => !idsToDelete.has(m.id)));
-    return toDelete.length;
-  }
-};
-
-// src/domain/goal.ts
-var TERMINAL_GOAL_STATUSES = /* @__PURE__ */ new Set(["achieved", "abandoned"]);
-function isGoalTerminal(status) {
-  return TERMINAL_GOAL_STATUSES.has(status);
-}
-var GOAL_STATUS_ORDER = {
-  active: 0,
-  paused: 1,
-  achieved: 2,
-  abandoned: 3
-};
-var GoalStore = class {
-  constructor(paths) {
-    this.paths = paths;
-    this.index = new IndexManager({
-      dir: paths.goalsDir,
-      ext: ".yml",
-      itemPath: (id) => paths.goalPath(id)
-    });
-  }
-  paths;
-  index;
-  async list(filter) {
-    const all = await this.index.readIndex();
-    const goals = all.filter(
-      (goal) => goal !== null && (!filter?.status || goal.status === filter.status)
-    );
-    return goals.sort((a, b) => {
-      const statusOrder = GOAL_STATUS_ORDER[a.status] - GOAL_STATUS_ORDER[b.status];
-      if (statusOrder !== 0) return statusOrder;
-      const bTime = b.updated_at ?? "";
-      const aTime = a.updated_at ?? "";
-      return bTime < aTime ? -1 : bTime > aTime ? 1 : 0;
-    });
-  }
-  async get(id) {
-    return readYaml(this.paths.goalPath(id));
-  }
-  async save(goal) {
-    await ensureDir(this.paths.goalsDir);
-    await writeYaml(this.paths.goalPath(goal.id), goal);
-    await this.index.updateIndex((idx) => {
-      const filtered = idx.filter((g) => g.id !== goal.id);
-      filtered.push(goal);
-      return filtered;
-    });
-  }
-  async delete(id) {
-    try {
-      await fs.unlink(this.paths.goalPath(id));
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-    }
-    await this.index.updateIndex((idx) => idx.filter((g) => g.id !== id));
-  }
-};
-var TeamStore = class {
-  constructor(paths) {
-    this.paths = paths;
-  }
-  paths;
-  async save(team) {
-    await ensureDir(this.paths.teamsDir);
-    await writeYaml(this.paths.teamPath(team.id), team);
-  }
-  async get(id) {
-    return readYaml(this.paths.teamPath(id));
-  }
-  async getByName(name) {
-    const teams = await this.list();
-    return teams.find((t) => t.name === name) ?? null;
-  }
-  async list() {
-    await ensureDir(this.paths.teamsDir);
-    const files = await listFiles(this.paths.teamsDir, ".yml");
-    const results = await Promise.all(
-      files.map((f) => readYaml(this.paths.teamPath(f.replace(".yml", ""))))
-    );
-    return results.filter((t) => t !== null);
-  }
-  async delete(id) {
-    try {
-      await fs.unlink(this.paths.teamPath(id));
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-    }
-  }
-};
-
-// src/domain/message.ts
-var MAX_MESSAGE_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
-var DEFAULT_MESSAGE_TTL_MS = 24 * 60 * 60 * 1e3;
-
-// src/application/message-service.ts
-var MessageService = class {
-  constructor(messageStore, agentStore, teamStore, eventBus) {
-    this.messageStore = messageStore;
-    this.agentStore = agentStore;
-    this.teamStore = teamStore;
-    this.eventBus = eventBus;
-  }
-  messageStore;
-  agentStore;
-  teamStore;
-  eventBus;
-  /**
-   * Send a message. For broadcast, creates one message per recipient agent.
-   * For 'lead' channel, resolves team lead and sends direct.
-   */
-  async send(input) {
-    if (!input.body.trim()) throw new InvalidArgumentsError("Message body is required");
-    const ttlMs = input.ttl_ms ?? DEFAULT_MESSAGE_TTL_MS;
-    if (ttlMs <= 0 || ttlMs > MAX_MESSAGE_TTL_MS) {
-      throw new InvalidArgumentsError(`TTL must be between 1ms and ${MAX_MESSAGE_TTL_MS}ms`);
-    }
-    const sender = await this.agentStore.get(input.from_agent_id);
-    if (!sender && input.from_agent_id !== "cli") {
-      throw new InvalidArgumentsError(`Sender agent not found: ${input.from_agent_id}`);
-    }
-    const now = /* @__PURE__ */ new Date();
-    const baseMessage = {
-      channel: input.channel,
-      from_agent_id: input.from_agent_id,
-      subject: (input.subject || "(no subject)").slice(0, 200),
-      body: input.body.slice(0, 4e3),
-      created_at: now.toISOString(),
-      expires_at: new Date(now.getTime() + ttlMs).toISOString(),
-      status: "pending",
-      team_id: input.team_id,
-      reply_to: input.reply_to
-    };
-    const messages = [];
-    if (input.channel === "broadcast") {
-      let agents = await this.agentStore.list();
-      if (input.team_id) {
-        const team = await this.teamStore.get(input.team_id);
-        if (team) {
-          const memberIds = new Set(team.members.map((m) => m.agent_id));
-          agents = agents.filter((a) => memberIds.has(a.id));
-        }
-      }
-      const recipients = agents.filter((a) => a.id !== input.from_agent_id && a.status !== "disabled");
-      const broadcastMsgs = recipients.map((agent) => ({
-        ...baseMessage,
-        id: `msg_${nanoid(7)}`,
-        to_agent_id: agent.id
-      }));
-      await Promise.all(broadcastMsgs.map((msg) => this.messageStore.save(msg)));
-      for (const msg of broadcastMsgs) {
-        messages.push(msg);
-        this.emitSent(msg);
-      }
-    } else if (input.channel === "lead") {
-      if (!input.team_id) throw new InvalidArgumentsError("team_id is required for lead channel");
-      const team = await this.teamStore.get(input.team_id);
-      if (!team) throw new InvalidArgumentsError(`Team not found: ${input.team_id}`);
-      const msg = {
-        ...baseMessage,
-        id: `msg_${nanoid(7)}`,
-        to_agent_id: team.lead_agent_id
-      };
-      await this.messageStore.save(msg);
-      messages.push(msg);
-      this.emitSent(msg);
-    } else {
-      if (!input.to_agent_id) throw new InvalidArgumentsError("to_agent_id is required for direct messages");
-      const recipient = await this.agentStore.get(input.to_agent_id);
-      if (!recipient) throw new InvalidArgumentsError(`Recipient agent not found: ${input.to_agent_id}`);
-      const msg = {
-        ...baseMessage,
-        id: `msg_${nanoid(7)}`,
-        to_agent_id: input.to_agent_id
-      };
-      await this.messageStore.save(msg);
-      messages.push(msg);
-      this.emitSent(msg);
-    }
-    return messages;
-  }
-  /**
-   * Drain mailbox: fetch pending messages for an agent and mark them delivered.
-   * Called by the orchestrator during dispatchTask.
-   */
-  async drainMailbox(agentId, taskId) {
-    const pending = await this.messageStore.listPending(agentId);
-    await Promise.all(pending.map((msg) => this.messageStore.markDelivered(msg.id)));
-    for (const msg of pending) {
-      this.eventBus.emit({
-        type: "message:delivered",
-        messageId: msg.id,
-        toAgentId: agentId,
-        taskId
-      });
-    }
-    return pending;
-  }
-  async listAll() {
-    return this.messageStore.list();
-  }
-  async listPendingForAgent(agentId) {
-    return this.messageStore.listPending(agentId);
-  }
-  async listForAgent(agentId) {
-    const all = await this.messageStore.list();
-    return all.filter((m) => m.to_agent_id === agentId || m.from_agent_id === agentId);
-  }
-  async purgeExpired() {
-    return this.messageStore.purgeExpired();
-  }
-  emitSent(msg) {
-    this.eventBus.emit({
-      type: "message:sent",
-      messageId: msg.id,
-      fromAgentId: msg.from_agent_id,
-      toAgentId: msg.to_agent_id,
-      channel: msg.channel
-    });
-  }
-};
-var VALID_TRANSITIONS = {
-  active: ["paused", "achieved", "abandoned"],
-  paused: ["active", "achieved", "abandoned"],
-  achieved: [],
-  abandoned: []
-};
-var GoalService = class {
-  constructor(goalStore, eventBus, agentService, taskService, contextStore) {
-    this.goalStore = goalStore;
-    this.eventBus = eventBus;
-    this.agentService = agentService;
-    this.taskService = taskService;
-    this.contextStore = contextStore;
-  }
-  goalStore;
-  eventBus;
-  agentService;
-  taskService;
-  contextStore;
-  async create(input) {
-    if (!input.title.trim()) {
-      throw new InvalidArgumentsError("Goal title is required");
-    }
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const goal = {
-      id: `goal_${nanoid(7)}`,
-      title: input.title.trim(),
-      description: input.description?.trim() ?? "",
-      status: "active",
-      assignee: input.assignee,
-      orchestration: {
-        enabled: true,
-        phase: "needs_analysis",
-        cycle: 1,
-        lead_agent_id: input.assignee,
-        last_transition_at: now
-      },
-      created_at: now,
-      updated_at: now
-    };
-    await this.goalStore.save(goal);
-    this.eventBus.emit({ type: "goal:created", goalId: goal.id, title: goal.title });
-    if (goal.assignee) {
-      await this.enableAutonomous(goal.assignee);
-    }
-    return goal;
-  }
-  async list(filter) {
-    return this.goalStore.list(filter);
-  }
-  async get(id) {
-    const goal = await this.goalStore.get(id);
-    if (!goal) throw new GoalNotFoundError(id);
-    return goal;
-  }
-  async updateStatus(id, newStatus, opts) {
-    const goal = await this.get(id);
-    const oldStatus = goal.status;
-    if (!VALID_TRANSITIONS[oldStatus].includes(newStatus)) {
-      const err = new InvalidArgumentsError(`Cannot transition goal from '${oldStatus}' to '${newStatus}'`);
-      await this.recordGoalFailure(goal, err.message, "status transition");
-      throw err;
-    }
-    if (newStatus === "achieved" && this.taskService) {
-      const childTasks = await this.taskService.list({ goalId: id });
-      const pending = childTasks.filter(
-        (t) => !isTerminal(t.status) && !t.labels?.includes(AUTONOMOUS_LABEL)
-      );
-      if (pending.length > 0) {
-        if (opts?.force) {
-          const cancellable = pending.filter((t) => t.status !== "in_progress");
-          const running = pending.filter((t) => t.status === "in_progress");
-          await Promise.all(
-            cancellable.map((t) => this.taskService.cancel(t.id).catch(() => {
-            }))
-          );
-          if (running.length > 0) {
-            const summary = running.map((t) => `${t.id} (in_progress)`).join(", ");
-            const err = new GoalHasPendingTasksError(id, running.length, summary);
-            await this.recordGoalFailure(goal, err.message, "force achieved blocked by running tasks");
-            throw err;
-          }
-        } else {
-          const summary = pending.map((t) => `${t.id} (${t.status})`).join(", ");
-          const err = new GoalHasPendingTasksError(id, pending.length, summary);
-          await this.recordGoalFailure(goal, err.message, "achieved blocked by pending tasks");
-          throw err;
-        }
-      }
-    }
-    goal.status = newStatus;
-    const oldPhase = goal.orchestration?.phase;
-    if (goal.orchestration) {
-      if (newStatus === "paused") {
-        goal.orchestration.phase = "paused";
-      } else if (newStatus === "active" && oldStatus === "paused") {
-        goal.orchestration.phase = "needs_analysis";
-      } else if (isGoalTerminal(newStatus)) {
-        goal.orchestration.phase = "closed";
-      }
-      goal.orchestration.last_transition_at = (/* @__PURE__ */ new Date()).toISOString();
-    }
-    goal.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-    await this.goalStore.save(goal);
-    this.eventBus.emit({ type: "goal:status_changed", goalId: id, from: oldStatus, to: newStatus });
-    if (oldPhase && goal.orchestration && oldPhase !== goal.orchestration.phase) {
-      this.eventBus.emit({
-        type: "goal:phase_changed",
-        goalId: id,
-        from: oldPhase,
-        to: goal.orchestration.phase,
-        cycle: goal.orchestration.cycle
-      });
-    }
-    if (goal.assignee) {
-      if (newStatus === "paused") {
-        await this.maybeDisableAutonomous(goal.assignee);
-        await this.cancelPendingAutonomousTasks(goal.assignee);
-      } else if (newStatus === "active" && oldStatus === "paused") {
-        await this.enableAutonomous(goal.assignee);
-      } else if (isGoalTerminal(newStatus)) {
-        await this.maybeDisableAutonomous(goal.assignee);
-      }
-    }
-    return goal;
-  }
-  async update(id, fields) {
-    const goal = await this.get(id);
-    const oldAssignee = goal.assignee;
-    if (fields.title !== void 0) {
-      if (!fields.title.trim()) throw new InvalidArgumentsError("Goal title cannot be empty");
-      goal.title = fields.title.trim();
-    }
-    if (fields.description !== void 0) goal.description = fields.description.trim();
-    if (fields.assignee !== void 0) goal.assignee = fields.assignee || void 0;
-    if (fields.assignee !== void 0 && goal.orchestration?.enabled) {
-      goal.orchestration.lead_agent_id = goal.assignee;
-      goal.orchestration.last_transition_at = (/* @__PURE__ */ new Date()).toISOString();
-    }
-    goal.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-    await this.goalStore.save(goal);
-    this.eventBus.emit({ type: "goal:updated", goalId: id });
-    const newAssignee = goal.assignee;
-    if (newAssignee !== oldAssignee) {
-      const ops = [];
-      if (newAssignee) ops.push(this.enableAutonomous(newAssignee));
-      if (oldAssignee) ops.push(this.maybeDisableAutonomous(oldAssignee));
-      await Promise.all(ops);
-    }
-    return goal;
-  }
-  async delete(id) {
-    const goal = await this.get(id);
-    const { assignee } = goal;
-    await this.goalStore.delete(id);
-    this.eventBus.emit({ type: "goal:deleted", goalId: id });
-    if (assignee) {
-      await this.maybeDisableAutonomous(assignee);
-    }
-  }
-  async listTasksForGoal(goalId) {
-    return this.taskService?.list({ goalId }) ?? [];
-  }
-  async getProgressReport(goalId) {
-    if (!this.contextStore) return void 0;
-    const entry = await this.contextStore.get(`${goalId}-progress`);
-    return entry?.value;
-  }
-  /** Enable autonomous mode on an agent. */
-  async enableAutonomous(agentId) {
-    if (!this.agentService) return;
-    try {
-      await this.agentService.setAutonomous(agentId, true);
-    } catch {
-    }
-  }
-  async recordGoalFailure(goal, message, context) {
-    const failure = {
-      message: sanitizeText(message).slice(0, 1e3),
-      phase: "goal",
-      at: (/* @__PURE__ */ new Date()).toISOString(),
-      context,
-      goalId: goal.id,
-      retryable: true
-    };
-    goal.last_error = failure;
-    goal.updated_at = failure.at;
-    await this.goalStore.save(goal).catch(() => {
-    });
-    this.eventBus.emit({
-      type: "goal:error",
-      goalId: goal.id,
-      error: failure.message,
-      phase: failure.phase,
-      retryable: failure.retryable
-    });
-  }
-  /** Check if an agent has at least one active goal. */
-  async hasActiveGoalsForAgent(agentId) {
-    const activeGoals = await this.goalStore.list({ status: "active" });
-    return activeGoals.some((g) => g.assignee === agentId);
-  }
-  /** Cancel dispatchable (todo/retrying) autonomous tasks assigned to the agent. */
-  async cancelPendingAutonomousTasks(agentId) {
-    if (!this.taskService) return;
-    try {
-      const [todos, retrying] = await Promise.all([
-        this.taskService.list({ status: "todo" }),
-        this.taskService.list({ status: "retrying" })
-      ]);
-      const pending = [...todos, ...retrying].filter(
-        (t) => t.assignee === agentId && t.labels?.includes(AUTONOMOUS_LABEL)
-      );
-      await Promise.all(pending.map((t) => this.taskService.cancel(t.id).catch(() => {
-      })));
-    } catch {
-    }
-  }
-  /** Disable autonomous if agent has no other active goals. */
-  async maybeDisableAutonomous(agentId) {
-    if (!this.agentService) return;
-    try {
-      if (!await this.hasActiveGoalsForAgent(agentId)) {
-        await this.agentService.setAutonomous(agentId, false);
-      }
-    } catch {
-    }
-  }
-};
-
-// src/domain/team.ts
-var DEFAULT_TEAM_CONFIG = {
-  auto_claim: true,
-  message_ttl_ms: 24 * 60 * 60 * 1e3
-};
-
-// src/application/team-service.ts
-var TeamService = class {
-  constructor(teamStore, agentStore, taskStore, eventBus) {
-    this.teamStore = teamStore;
-    this.agentStore = agentStore;
-    this.taskStore = taskStore;
-    this.eventBus = eventBus;
-  }
-  teamStore;
-  agentStore;
-  taskStore;
-  eventBus;
-  async create(input) {
-    if (!input.name.trim()) throw new InvalidArgumentsError("Team name is required");
-    const lead = await this.agentStore.get(input.lead_agent_id);
-    if (!lead) throw new InvalidArgumentsError(`Lead agent not found: ${input.lead_agent_id}`);
-    const existing = await this.teamStore.getByName(input.name.trim());
-    if (existing) throw new InvalidArgumentsError(`Team "${input.name}" already exists`);
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const leadMember = { agent_id: input.lead_agent_id, role: "lead", joined_at: now };
-    const additionalMembers = [];
-    for (const agentId of input.member_agent_ids ?? []) {
-      if (agentId === input.lead_agent_id) continue;
-      const agent = await this.agentStore.get(agentId);
-      if (!agent) throw new InvalidArgumentsError(`Member agent not found: ${agentId}`);
-      additionalMembers.push({ agent_id: agentId, role: "member", joined_at: now });
-    }
-    const team = {
-      id: `team_${nanoid(7)}`,
-      name: input.name.trim(),
-      description: input.description,
-      status: "active",
-      members: [leadMember, ...additionalMembers],
-      task_pool: [],
-      lead_agent_id: input.lead_agent_id,
-      created_at: now,
-      updated_at: now,
-      config: { ...DEFAULT_TEAM_CONFIG, ...input.config ?? {} }
-    };
-    await this.teamStore.save(team);
-    this.eventBus.emit({ type: "team:created", teamId: team.id, name: team.name, leadAgentId: team.lead_agent_id });
-    for (const member of additionalMembers) {
-      this.eventBus.emit({ type: "team:member_joined", teamId: team.id, agentId: member.agent_id });
-    }
-    return team;
-  }
-  async get(id) {
-    const team = await this.teamStore.get(id);
-    if (!team) throw new TeamNotFoundError(id);
-    return team;
-  }
-  async list() {
-    return this.teamStore.list();
-  }
-  async join(teamId, agentId) {
-    const team = await this.get(teamId);
-    if (team.members.some((m) => m.agent_id === agentId)) {
-      throw new InvalidArgumentsError(`Agent ${agentId} is already a member of team ${teamId}`);
-    }
-    const agent = await this.agentStore.get(agentId);
-    if (!agent) throw new InvalidArgumentsError(`Agent not found: ${agentId}`);
-    team.members.push({ agent_id: agentId, role: "member", joined_at: (/* @__PURE__ */ new Date()).toISOString() });
-    team.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-    await this.teamStore.save(team);
-    this.eventBus.emit({ type: "team:member_joined", teamId, agentId });
-    return team;
-  }
-  async leave(teamId, agentId) {
-    const team = await this.get(teamId);
-    if (agentId === team.lead_agent_id) {
-      throw new InvalidArgumentsError("Lead cannot leave team. Disband the team or transfer lead first.");
-    }
-    team.members = team.members.filter((m) => m.agent_id !== agentId);
-    team.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-    await this.teamStore.save(team);
-    this.eventBus.emit({ type: "team:member_left", teamId, agentId });
-    return team;
-  }
-  async addTask(teamId, taskId) {
-    const team = await this.get(teamId);
-    const task = await this.taskStore.get(taskId);
-    if (!task) throw new InvalidArgumentsError(`Task not found: ${taskId}`);
-    if (!team.task_pool.includes(taskId)) {
-      team.task_pool.push(taskId);
-      team.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-      await this.teamStore.save(team);
-      this.eventBus.emit({ type: "team:task_added", teamId, taskId });
-    }
-    return team;
-  }
-  async removeTask(teamId, taskId) {
-    const team = await this.get(teamId);
-    team.task_pool = team.task_pool.filter((id) => id !== taskId);
-    team.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-    await this.teamStore.save(team);
-    return team;
-  }
-  async setLead(teamId, agentId) {
-    const team = await this.get(teamId);
-    const member = team.members.find((m) => m.agent_id === agentId);
-    if (!member) throw new InvalidArgumentsError(`Agent ${agentId} is not a member of team ${teamId}`);
-    const currentLead = team.members.find((m) => m.agent_id === team.lead_agent_id);
-    if (currentLead) currentLead.role = "member";
-    member.role = "lead";
-    team.lead_agent_id = agentId;
-    team.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-    await this.teamStore.save(team);
-    return team;
-  }
-  async disband(teamId) {
-    const team = await this.get(teamId);
-    team.status = "disbanded";
-    team.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-    await this.teamStore.save(team);
-    this.eventBus.emit({ type: "team:disbanded", teamId });
-  }
-  /**
-   * Find the team an agent belongs to (if any).
-   */
-  async findTeamForAgent(agentId) {
-    const teams = await this.teamStore.list();
-    return teams.find((t) => t.status === "active" && t.members.some((m) => m.agent_id === agentId)) ?? null;
-  }
-};
-
-// src/container.ts
-async function buildLightContainer(context) {
-  const paths = new Paths(context.projectRoot);
-  const configStore = new ConfigStore(paths);
-  const globalConfigStore = new GlobalConfigStore();
-  const [, config] = await Promise.all([
-    paths.requireInit(),
-    configStore.read()
-  ]);
-  const taskStore = new TaskStore(paths);
-  const agentStore = new AgentStore(paths);
-  const runStore = new RunStore(paths);
-  const stateStore = new StateStore(paths);
-  const contextStore = new ContextStore(paths);
-  const messageStore = new MessageStore(paths);
-  const goalStore = new GoalStore(paths);
-  const teamStore = new TeamStore(paths);
-  const eventBus = new EventBus();
-  const taskService = new TaskService(taskStore, eventBus, config, paths, agentStore);
-  const agentService = new AgentService(agentStore, stateStore, eventBus, config);
-  const runService = new RunService(runStore, eventBus);
-  const messageService = new MessageService(messageStore, agentStore, teamStore, eventBus);
-  const goalService = new GoalService(goalStore, eventBus, agentService, taskService, contextStore);
-  const teamService = new TeamService(teamStore, agentStore, taskStore, eventBus);
-  return {
-    context,
-    paths,
-    config,
-    taskStore,
-    agentStore,
-    runStore,
-    stateStore,
-    configStore,
-    globalConfigStore,
-    globalConfig: DEFAULT_GLOBAL_CONFIG,
-    contextStore,
-    messageStore,
-    goalStore,
-    teamStore,
-    eventBus,
-    taskService,
-    agentService,
-    runService,
-    messageService,
-    goalService,
-    teamService
-  };
-}
-async function buildFullContainer(context) {
-  const light = await buildLightContainer(context);
-  const globalConfig = await light.globalConfigStore.read();
-  light.globalConfig = globalConfig;
-  const [
-    { ProcessManager },
-    { AdapterRegistry: AdapterRegistry2 },
-    { ClaudeAdapter },
-    { CodexAdapter },
-    { CursorAdapter },
-    { ShellAdapter },
-    { OpenCodeAdapter },
-    { PiAdapter },
-    { GrokAdapter },
-    { AntigravityAdapter },
-    { WorkspaceManager },
-    { LiquidTemplateEngine },
-    { SkillLoader: SkillLoader2 },
-    { Orchestrator: Orchestrator2 },
-    { DoctorService },
-    { WorkflowArtifactStore: WorkflowArtifactStore2 },
-    { WorkflowEngine: WorkflowEngine2 },
-    { NativeCodexWorkflowAdapter, NativeFableWorkflowAdapter, NativeOpusWorkflowAdapter, NativeWorkflowGitGateway }
-  ] = await Promise.all([
-    import('./process-manager-BRCBBME3.js'),
-    import('./registry-JXXRLJ5J.js'),
-    import('./claude-WXXFWVHV.js'),
-    import('./codex-76Q2VLU7.js'),
-    import('./cursor-NT7PQ4FZ.js'),
-    import('./shell-NETW4YGX.js'),
-    import('./opencode-OIBR56TL.js'),
-    import('./pi-Y7GCJNN6.js'),
-    import('./grok-UFNQFTNN.js'),
-    import('./antigravity-XDE24CYL.js'),
-    import('./workspace-manager-NGJ6YVTB.js'),
-    import('./template-engine-ZZWWQC5M.js'),
-    import('./skill-loader-4GSQSW7Q.js'),
-    import('./orchestrator-OTG2FJWD.js'),
-    import('./doctor-service-WPXAUB6S.js'),
-    import('./artifact-store-BP7AEBYI.js'),
-    import('./engine-7TAXWGTH.js'),
-    import('./native-adapters-MDNK25SY.js')
-  ]);
-  const processManager = new ProcessManager();
-  const templateEngine = new LiquidTemplateEngine();
-  const skillLoader = new SkillLoader2();
-  const workspaceManager = new WorkspaceManager(
-    context.projectRoot,
-    light.paths.root,
-    processManager
-  );
-  const adapterRegistry = new AdapterRegistry2();
-  adapterRegistry.register(new ClaudeAdapter(processManager));
-  adapterRegistry.register(new CodexAdapter(processManager));
-  adapterRegistry.register(new CursorAdapter(processManager));
-  adapterRegistry.register(new ShellAdapter(processManager));
-  adapterRegistry.register(new OpenCodeAdapter(processManager));
-  adapterRegistry.register(new PiAdapter(processManager));
-  adapterRegistry.register(new GrokAdapter(processManager));
-  adapterRegistry.register(new AntigravityAdapter(processManager));
-  const doctorService = new DoctorService(adapterRegistry, processManager, context.projectRoot);
-  const workflowStore = new WorkflowArtifactStore2(context.projectRoot);
-  const workflowEngine = new WorkflowEngine2(workflowStore, {
-    codex: new NativeCodexWorkflowAdapter(processManager),
-    fable: new NativeFableWorkflowAdapter(processManager),
-    opus: new NativeOpusWorkflowAdapter(processManager),
-    git: new NativeWorkflowGitGateway(context.projectRoot)
+async function run(command, args, maxStdoutBytes = TEXT_MAX_STDOUT_BYTES) {
+  const result2 = await commandRunner.run({
+    executable: await pinnedExecutable(command),
+    args,
+    env: process.env,
+    timeoutMs: EXEC_TIMEOUT_MS,
+    maxStdoutBytes,
+    maxStderrBytes: MAX_STDERR_BYTES
   });
-  const orchestrator = new Orchestrator2({
-    taskStore: light.taskStore,
-    agentStore: light.agentStore,
-    runStore: light.runStore,
-    stateStore: light.stateStore,
-    adapterRegistry,
-    workspaceManager,
-    templateEngine,
-    processManager,
-    eventBus: light.eventBus,
-    taskService: light.taskService,
-    agentService: light.agentService,
-    runService: light.runService,
-    contextStore: light.contextStore,
-    messageService: light.messageService,
-    goalStore: light.goalStore,
-    skillLoader,
-    config: light.config,
-    projectRoot: context.projectRoot,
-    lockPath: light.paths.lockPath
-  });
-  return {
-    ...light,
-    processManager,
-    adapterRegistry,
-    workspaceManager,
-    templateEngine,
-    skillLoader,
-    doctorService,
-    orchestrator,
-    workflowStore,
-    workflowEngine
-  };
+  if (!result2.ok) throw new Error(commandFailureMessage(result2));
+  return result2;
 }
-async function buildContainer(context) {
-  return buildFullContainer(context);
+function pinnedExecutable(command) {
+  let descriptor = executableDescriptors.get(command);
+  if (!descriptor) {
+    descriptor = resolveExecutable(command);
+    executableDescriptors.set(command, descriptor);
+    void descriptor.catch(() => {
+      if (executableDescriptors.get(command) === descriptor) executableDescriptors.delete(command);
+    });
+  }
+  return descriptor;
+}
+function executableOnPath(command) {
+  if (isAbsolute(command)) return canExecute(command);
+  for (const entry of (process.env.PATH ?? "").split(delimiter).filter(Boolean)) {
+    if (canExecute(resolve(entry, command))) return true;
+  }
+  return false;
+}
+function canExecute(filePath) {
+  try {
+    accessSync(filePath, constants.X_OK);
+    return statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
 }
 
-export { AGENT_SHOP_TEMPLATES, AgentService, EventBus, MODEL_TIER_MAP, RunService, SUPPORTED_ADAPTERS, TaskService, buildContainer, buildFullContainer, buildLightContainer, defaultModelForAdapter, detectClipboardType, getClipboardImage, getShopTemplateByKey, isAdapterKind, isClipboardToolAvailable, isMcpSkill, isModelTier, resolveModel, templateToAgentInput };
-//# sourceMappingURL=index.js.map
-//# sourceMappingURL=index.js.map
+export { AGENT_SHOP_TEMPLATES, AdapterErrorKind, AgentNotFoundError, ERROR_HINTS, GoalHasPendingTasksError, MODEL_TIER_MAP, NotInitializedError, OrchestryError, ROLE_PERMISSIONS, SEMANTIC_ROLES, SUPPORTED_ADAPTERS, SkillLoader, TaskNotFoundError, WORKFLOW_PHASE_TRANSITIONS, WORKFLOW_SCHEMA_VERSION, WorkspaceError, canTransition, canTransitionWorkflow, classifyAdapterError, createRosterSnapshot, createTokenUsage, defaultModelForAdapter, detectClipboardType, discoverDeterministicChecks, getClipboardImage, getShopTemplateByKey, hashRosterAgent, hashRosterSnapshot, isAdapterKind, isBlocked, isClipboardToolAvailable, isDispatchable, isMcpSkill, isModelTier, isTerminal, isTerminalWorkflowPhase, legacyRosterSnapshot, resolveFailureStatus, resolveModel, templateToAgentInput, transitionWorkflow, validateCheckResults, validateCodexDecision, validateDeterministicCheckCommands, validateExplicitChecks, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateHumanApproval, validateOpusResult, validateRosterAgent, validateRosterSnapshot };

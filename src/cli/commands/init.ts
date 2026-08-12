@@ -8,10 +8,10 @@ import type { Command } from 'commander';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import readline from 'node:readline';
-import { execFile as execFileCb } from 'node:child_process';
-import { promisify } from 'node:util';
-import { Paths } from '../../infrastructure/storage/paths.js';
+import { Paths, externalOrchestryRoots } from '../../infrastructure/storage/paths.js';
 import { ensureDir, pathExists } from '../../infrastructure/storage/fs-utils.js';
+import { CommandRunner, resolveExecutable } from '../../infrastructure/process/command-runner.js';
+import { ProcessManager } from '../../infrastructure/process/process-manager.js';
 import { writeYaml, atomicWrite } from '../../infrastructure/storage/fs-utils.js';
 import { DEFAULT_CONFIG } from '../../domain/config.js';
 import { DEFAULT_PROMPT_TEMPLATE } from '../../infrastructure/template/template-engine.js';
@@ -19,15 +19,16 @@ import { getDefaultAgents } from '../../domain/default-agents.js';
 import { SUPPORTED_ADAPTERS, isAdapterKind } from '../../domain/model-tiers.js';
 import { printSuccess, printWarning, printError, dim } from '../output.js';
 
-const execFileAsync = promisify(execFileCb);
+const commandRunner = new CommandRunner(new ProcessManager());
 
 /** Run init logic directly (used by auto-init on bare `orch`). */
 export async function runInit(opts: { name?: string; adapter?: string; target?: string } = {}): Promise<void> {
   const projectRoot = path.resolve(opts.target ?? process.cwd());
   if (opts.target) await fs.mkdir(projectRoot, { recursive: true });
-  const paths = new Paths(projectRoot);
+  const roots = externalOrchestryRoots(projectRoot);
+  const paths = new Paths(projectRoot, roots.stateRoot, roots.workspaceRoot);
 
-  if (await pathExists(paths.root)) {
+  if (await pathExists(paths.projectConfigRoot)) {
     printWarning('Already initialized');
     return;
   }
@@ -43,6 +44,8 @@ export async function runInit(opts: { name?: string; adapter?: string; target?: 
     ensureDir(paths.runsDir),
     ensureDir(paths.templatesDir),
     ensureDir(paths.logsDir),
+    ensureDir(paths.projectConfigRoot),
+    ensureDir(paths.workspacesRoot),
   ]);
 
   // Ensure git repo exists (init if needed) before writing config
@@ -143,8 +146,8 @@ async function detectAndSelectAdapter(): Promise<string> {
         [name];
       for (const cmd of cmdsToTry) {
         try {
-          const { stdout } = await execFileAsync(cmd, ['--version'], { timeout: 5_000 });
-          return { name, ok: true, version: stdout.trim().split('\n')[0] };
+          const result = await runCommand(cmd, ['--version'], undefined, 5_000);
+          if (result.ok) return { name, ok: true, version: result.stdout.trim().split('\n')[0] };
         } catch { /* try next */ }
       }
       return { name, ok: false };
@@ -197,17 +200,15 @@ async function detectAndSelectAdapter(): Promise<string> {
  */
 async function ensureGitRepo(projectRoot: string): Promise<boolean> {
   try {
-    await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: projectRoot });
-    return true;
+    const result = await runCommand('git', ['rev-parse', '--is-inside-work-tree'], projectRoot);
+    if (result.ok) return true;
   } catch {
-    // Not a git repo — try to initialize
-    try {
-      await execFileAsync('git', ['init'], { cwd: projectRoot });
-      return true;
-    } catch {
-      // git binary not available
-      return false;
-    }
+    // Try initialization below; this also covers a missing git executable.
+  }
+  try {
+    return (await runCommand('git', ['init'], projectRoot)).ok;
+  } catch {
+    return false;
   }
 }
 
@@ -217,16 +218,24 @@ async function ensureGitRepo(projectRoot: string): Promise<boolean> {
  */
 async function ensureGitCommit(projectRoot: string): Promise<void> {
   try {
-    await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: projectRoot });
-    // Has commits — nothing to do
+    if ((await runCommand('git', ['rev-parse', 'HEAD'], projectRoot)).ok) return;
   } catch {
-    // No commits — create initial commit
-    try {
-      await execFileAsync('git', ['commit', '--allow-empty', '-m', 'Initial commit'], { cwd: projectRoot });
-    } catch {
-      // Commit may fail (no user.name/email configured) — non-fatal
-    }
+    // Attempt the initial commit below.
   }
+  await runCommand('git', ['commit', '--allow-empty', '-m', 'Initial commit'], projectRoot).catch(() => {});
+}
+
+async function runCommand(command: string, args: string[], cwd?: string, timeoutMs = 30_000) {
+  const executable = await resolveExecutable(command);
+  return commandRunner.run({
+    executable,
+    args,
+    cwd,
+    env: process.env,
+    timeoutMs,
+    maxStdoutBytes: 1024 * 1024,
+    maxStderrBytes: 1024 * 1024,
+  });
 }
 
 /**

@@ -16,7 +16,7 @@ describe('secured fork static invariants', () => {
     expect(String((pkg.bugs as { url: string }).url)).toContain('Thibault1818/ORCH/issues');
     for (const lifecycle of ['preinstall', 'install', 'postinstall', 'prepare', 'prepack', 'prepublish', 'prepublishOnly', 'publish', 'postpublish']) expect(pkg.scripts as Record<string, string>).not.toHaveProperty(lifecycle);
     expect(pkg.scripts as Record<string, string>).not.toHaveProperty('build');
-    expect((pkg.scripts as Record<string, string>)['build:dist']).toBe('tsup');
+    expect((pkg.scripts as Record<string, string>)['build:dist']).toBe('rm -rf dist && tsup');
     for (const path of ['readme.md', 'SECURITY.md']) {
       expect(source(path)).not.toMatch(/npm (?:install|i)(?: -g)? @oxgeneral\/orch/);
       expect(source(path)).toContain('github.com/Thibault1818/ORCH.git#$AUDITED_COMMIT_SHA');
@@ -43,9 +43,15 @@ describe('secured fork static invariants', () => {
       'src/infrastructure/adapters/opencode.ts',
     ]) {
       const adapter = source(path);
-      expect(adapter).toMatch(/stdin\?*\.write|stdin\.write/);
+      expect(adapter).toMatch(/stdin:\s*(?:buildFullPrompt|params\.prompt)/);
       expect(adapter).not.toMatch(/args\.push\((?:fullPrompt|params\.prompt|effectiveSystemPrompt)\)/);
       expect(adapter).toContain('buildChildEnv(params.env)');
+    }
+    for (const path of ['src/infrastructure/adapters/grok.ts', 'src/infrastructure/adapters/antigravity.ts']) {
+      const adapter = source(path);
+      expect(adapter).not.toMatch(/args\.push\((?:fullPrompt|params\.prompt|effectiveSystemPrompt)/);
+      expect(adapter).not.toMatch(/['"]-p['"]\s*,\s*(?:params\.prompt|buildFullPrompt)/);
+      expect(adapter).toContain('argv prompt transport is prohibited');
     }
     const shell = source('src/infrastructure/adapters/shell.ts');
     expect(shell).not.toMatch(/ORCH_(?:SYSTEM_)?PROMPT/);
@@ -81,8 +87,10 @@ describe('secured fork static invariants', () => {
     expect(paths).toContain('stat.isSymbolicLink()');
     expect(paths).toContain('fs.realpath(expected)');
     expect(paths).toContain('ID_PATTERN.test(id)');
-    expect(paths).toContain('path.relative(realProjectRoot, realRoot)');
-    expect(workspace).toContain('validateWorkspacePath(workspacePath, projectRoot)');
+    expect(paths).toContain('externalOrchestryRoots');
+    expect(paths).toContain('ORCH state and workspace roots must be separate');
+    expect(workspace).toContain("['clone', '--local', '--no-hardlinks'");
+    expect(workspace).not.toContain("['worktree', 'add'");
     expect(processes).toContain('this.ownedPids.has(pid)');
     expect(processes).toMatch(/Number\.isSafeInteger\(pid\)\s*&&\s*pid\s*>\s*1/);
   });
@@ -110,15 +118,23 @@ describe('secured fork static invariants', () => {
     expect(orchestrator).not.toMatch(/task\.status\s*=\s*(?:newStatus|'done'|'review')/);
     expect(engine).not.toContain("['git diff --check']");
     expect(engine).toMatch(/checks\.checks\.length\s*===\s*0/);
-    expect(native).toContain("'--sandbox', 'read-only'");
+    expect(native).toMatch(/["']--sandbox["'],\s*["']read-only["']/);
     expect(native).toContain('evidence.evidence?.worktree ?? process.cwd()');
-    expect(engine).toContain("mode === 'direct' ? 0");
+    expect(engine).toMatch(/mode\s*===\s*["']direct["']\s*\?\s*0/);
     expect(native).toContain('Do not return actions, verdicts, execution instructions, passport updates, or merge advice.');
-    expect(native).toContain("branch.startsWith('orchestry/workflow/')");
-    expect(native).toContain("['status', '--porcelain']");
+    expect(native).toMatch(/branch\.startsWith\(["']orchestry\/workflow\/["']\)/);
+    expect(native).toMatch(/\[["']status["'],\s*["']--porcelain["']\]/);
     expect(native).toContain('allowed_file_scope: passport.allowed_file_scope');
     for (const flag of ['--bare', '--tools', '--disable-slash-commands', '--strict-mcp-config', '--no-session-persistence']) {
-      expect(native).toContain(`'${flag}'`);
+      expect(native).toMatch(new RegExp(`["']${flag}["']`));
     }
+  });
+
+  it('does not export mutable execution or persistence boundaries', async () => {
+    const api = await import('../../src/index.js');
+    for (const name of ['EventBus', 'TaskService', 'AgentService', 'RunService', 'buildLightContainer', 'Orchestrator', 'WorkflowEngine', 'GovernanceStoreV3', 'GovernedMergeV3']) {
+      expect(api).not.toHaveProperty(name);
+    }
+    expect(api.validateExplicitChecks).toBeTypeOf('function');
   });
 });

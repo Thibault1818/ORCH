@@ -7,6 +7,8 @@
 /** Activity feed filter preset name */
 export type ActivityFilterPreset = 'all' | 'text' | 'tools' | 'errors' | 'events';
 
+import type { WorkflowPresetConfig } from './workflow/presets.js';
+
 export interface NotificationPreferences {
   toast: boolean;
   bell: boolean;
@@ -19,6 +21,7 @@ export interface TuiPreferences {
 
 export interface GlobalConfig {
   tui: TuiPreferences;
+  workflow_launch?: WorkflowPresetConfig;
 }
 
 export const DEFAULT_GLOBAL_CONFIG: GlobalConfig = {

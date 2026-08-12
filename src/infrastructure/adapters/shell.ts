@@ -8,24 +8,25 @@
 
 import type { IAgentAdapter, AdapterTestResult, ExecuteParams, AgentEvent, ExecuteHandle } from './interface.js';
 import type { IProcessManager } from '../process/process-manager.js';
-import { buildChildEnv } from './utils.js';
+import type { ICommandRunner } from '../process/command-runner.js';
+import { streamingCommandFailureMessage } from '../process/command-runner.js';
+import { adapterCommandRunner, buildChildEnv, probeVersion } from './utils.js';
 import { readLines } from '../process/process-manager.js';
 import { EventBuffer } from './event-buffer.js';
 import { classifyAdapterError, AdapterErrorKind } from '../../domain/errors.js';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
 
 export class ShellAdapter implements IAgentAdapter {
   readonly kind = 'shell';
 
-  constructor(private readonly processManager: IProcessManager) {}
+  private readonly runner: ICommandRunner;
+
+  constructor(private readonly processManager: IProcessManager, runner?: ICommandRunner) {
+    this.runner = adapterCommandRunner(processManager, runner);
+  }
 
   async test(): Promise<AdapterTestResult> {
     try {
-      const { stdout } = await execFileAsync('bash', ['--version']);
-      const version = stdout.split('\n')[0]?.trim() ?? 'unknown';
+      const version = (await probeVersion(this.runner, 'bash')).split('\n')[0]?.trim() ?? 'unknown';
       return { ok: true, version };
     } catch {
       return { ok: false, error: 'bash not found', errorKind: classifyAdapterError('bash not found') };
@@ -56,25 +57,22 @@ export class ShellAdapter implements IAgentAdapter {
       return { pid: 0, events: errorGen() };
     }
 
-    const { process: proc, pid } = this.processManager.spawn('bash', ['-lc', command], {
+    const started = this.runner.start({
+      executable: 'bash',
+      args: ['-lc', command],
       cwd: params.workspace,
       env: buildChildEnv(params.env),
       signal: params.signal,
+      timeoutMs: params.config.timeout_ms,
+      owner: params.execution.owner,
+      sandbox: params.execution.sandbox,
+      allowedExecutables: params.execution.allowedExecutables,
     });
+    const proc = started.process;
+    const pid = started.pid;
 
     const signal = params.signal;
     const processManager = this.processManager;
-
-    const exitPromise = new Promise<void>((resolve, reject) => {
-      proc.on('close', (code) => {
-        if (code === 0 || signal?.aborted) {
-          resolve();
-        } else {
-          reject(new Error(`Shell command exited with code ${code}`));
-        }
-      });
-      proc.on('error', reject);
-    });
 
     async function* generateEvents(): AsyncGenerator<AgentEvent> {
       // Ring buffer with backpressure replaces Array.shift() polling
@@ -131,7 +129,12 @@ export class ShellAdapter implements IAgentAdapter {
         signal.removeEventListener('abort', onAbort);
       }
 
-      await exitPromise;
+      const completion = await started.completion;
+      if (!completion.ok && !signal?.aborted) {
+        throw new Error(completion.termination === 'exited'
+          ? `Shell command exited with code ${completion.exitCode}`
+          : streamingCommandFailureMessage(completion, 'Shell command'));
+      }
     }
 
     return { pid, events: generateEvents() };

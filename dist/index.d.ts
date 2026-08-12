@@ -1,5 +1,3 @@
-import { SpawnOptions, ChildProcess } from 'node:child_process';
-
 /**
  * Typed error hierarchy for the orchestrator.
  *
@@ -82,6 +80,10 @@ interface ReviewResult {
 }
 interface TaskProof {
     branch?: string;
+    base_commit?: string;
+    reviewed_commit?: string;
+    reviewed_diff_hash?: string;
+    target_branch?: string;
     pr_url?: string;
     files_changed: string[];
     test_results?: string;
@@ -240,7 +242,7 @@ interface RunEvent {
 type RunEventType = 'agent_output' | 'file_changed' | 'command_run' | 'tool_call' | 'error' | 'done';
 
 declare const WORKFLOW_SCHEMA_VERSION: 2;
-type ProducingRole = 'fable' | 'codex' | 'opus' | 'orchestrator';
+type ProducingRole = 'fable' | 'codex' | 'opus' | 'orchestrator' | 'human';
 type CodexAction = 'DISPATCH_OPUS' | 'ACCEPT' | 'CORRECT_OPUS' | 'CONSULT_FABLE' | 'PAUSE' | 'STOP';
 type FablePurpose = 'COMPARE_BOUNDED_OPTIONS' | 'GENERATE_NONCRITICAL_ALTERNATIVES' | 'CHALLENGE_REVERSIBLE_PLAN';
 interface FableFallbackV1 {
@@ -302,6 +304,17 @@ interface CheckResults {
         output: string;
     }>;
 }
+interface HumanApprovalV1 {
+    schema_version: 1;
+    job_id: string;
+    target_branch: string;
+    base_commit: string;
+    reviewed_commit: string;
+    reviewed_diff_hash: string;
+    check_results_hash: string;
+    reason: string;
+    approved_at: string;
+}
 type CodexDecisionStage = 'pre_opus' | 'post_opus' | 'after_fable_pre' | 'after_fable_post';
 declare function validateCodexDecision(value: unknown, stage: CodexDecisionStage): CodexDecisionV2;
 declare function validateFableQuery(value: unknown): FableQueryV1;
@@ -309,8 +322,51 @@ declare function validateFableAdvice(value: unknown): FableAdviceV1;
 declare function validateFableFallbackRecord(value: unknown): FableFallbackRecordV1;
 declare function validateOpusResult(value: unknown): OpusResult;
 declare function validateCheckResults(value: unknown): CheckResults;
+declare function validateHumanApproval(value: unknown): HumanApprovalV1;
 
-type WorkflowPhase = 'codex_pre_opus' | 'fable_consultation' | 'codex_after_fable' | 'opus_execution' | 'codex_post_opus' | 'verification' | 'merge_ready' | 'done' | 'blocked' | 'paused' | 'cancelled' | 'failed';
+declare const SEMANTIC_ROLES: readonly ["supervisor", "implementer", "adviser", "reviewer"];
+type SemanticRole = typeof SEMANTIC_ROLES[number];
+interface RolePermissions {
+    readonly workspace: 'read_only' | 'worktree';
+    readonly tools: 'enabled' | 'none';
+    readonly advisory_only: boolean;
+}
+declare const ROLE_PERMISSIONS: Readonly<Record<SemanticRole, RolePermissions>>;
+interface RosterAgent {
+    adapter: string;
+    profile: RosterProfileSnapshot;
+}
+interface RosterProfileSnapshot {
+    name: string;
+    model: string;
+    effort: 'low' | 'medium' | 'high';
+    max_turns: number;
+    timeout_ms: number;
+}
+interface SameAsSupervisor {
+    same_as: 'supervisor';
+}
+interface WorkflowRosterSnapshot {
+    schema_version: 1;
+    supervisor: RosterAgent;
+    implementer: RosterAgent;
+    adviser: RosterAgent | null;
+    reviewer: RosterAgent | SameAsSupervisor;
+}
+interface RosterInput {
+    supervisor: RosterAgent;
+    implementer: RosterAgent;
+    adviser?: RosterAgent | null;
+    reviewer?: RosterAgent | SameAsSupervisor;
+}
+declare function createRosterSnapshot(input: RosterInput, mode?: WorkflowMode): WorkflowRosterSnapshot;
+declare function legacyRosterSnapshot(mode: WorkflowMode): WorkflowRosterSnapshot;
+declare function validateRosterSnapshot(value: unknown, mode?: WorkflowMode): WorkflowRosterSnapshot;
+declare function hashRosterSnapshot(value: WorkflowRosterSnapshot): string;
+declare function validateRosterAgent(value: unknown, label?: string): RosterAgent;
+declare function hashRosterAgent(value: RosterAgent): string;
+
+type WorkflowPhase = 'codex_pre_opus' | 'fable_consultation' | 'codex_after_fable' | 'opus_execution' | 'codex_post_opus' | 'verification' | 'awaiting_approval' | 'merge_ready' | 'done' | 'blocked' | 'paused' | 'cancelled' | 'failed';
 declare const WORKFLOW_PHASE_TRANSITIONS: Readonly<Record<WorkflowPhase, readonly WorkflowPhase[]>>;
 declare function canTransitionWorkflow(from: WorkflowPhase, to: WorkflowPhase): boolean;
 declare function transitionWorkflow(from: WorkflowPhase, to: WorkflowPhase): WorkflowPhase;
@@ -424,7 +480,14 @@ interface WorkflowPassportV2 {
     };
     rotation_history: SessionRotation[];
     config: WorkflowConfig;
+    roster?: WorkflowRosterSnapshot;
+    roster_hash?: string;
+    active_roster?: WorkflowRosterSnapshot;
+    active_roster_hash?: string;
+    roster_revision?: number;
+    binding_rotation_history?: BindingRotation[];
 }
+type ValidatedWorkflowPassportV2 = WorkflowPassportV2 & Required<Pick<WorkflowPassportV2, 'roster' | 'roster_hash' | 'active_roster' | 'active_roster_hash' | 'roster_revision' | 'binding_rotation_history'>>;
 type SessionMode = 'new' | 'native_resume' | 'passport_handoff' | 'none';
 interface SessionRotation {
     role: 'codex' | 'opus';
@@ -432,6 +495,16 @@ interface SessionRotation {
     next_id: string | null;
     reason: string;
     timestamp: string;
+}
+interface BindingRotation {
+    role: SemanticRole;
+    previous_binding_hash: string | null;
+    new_binding_hash: string | null;
+    previous_binding: RosterAgent | null;
+    new_binding: RosterAgent | null;
+    reason: string;
+    timestamp: string;
+    revision: number;
 }
 interface AgentUsage {
     calls: number;
@@ -481,12 +554,45 @@ interface WorkflowInvocationReceiptV2 {
     invocation_id: string;
     phase: WorkflowPhase;
     role: 'codex' | 'fable' | 'opus';
+    semantic_role?: SemanticRole;
+    roster_hash?: string;
+    roster_revision?: number;
+    binding_hash?: string;
+    role_adapter?: string;
     request_hash: string;
     request: unknown;
     result_hash: string;
     workflow_revision: number;
     timestamp: string;
     result: unknown;
+}
+interface WorkflowLlmAttemptV1 {
+    schema_version: 1;
+    job_id: string;
+    attempt_id: string;
+    invocation_id: string;
+    phase: WorkflowPhase;
+    semantic_role: SemanticRole;
+    provider_role: 'codex' | 'fable' | 'opus';
+    adapter: string;
+    binding_hash: string;
+    roster_revision: number;
+    status: 'started' | 'succeeded' | 'failed';
+    usage_status: 'known' | 'estimated' | 'unknown';
+    usage: {
+        input_chars?: number;
+        output_chars?: number;
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_read?: number;
+        cache_write?: number;
+        duration_ms: number;
+        compactions?: number;
+    } | null;
+    error_category: string | null;
+    error_message: string | null;
+    started_at: string;
+    completed_at: string | null;
 }
 interface WorkflowEffectReceiptV2 {
     schema_version: 2;
@@ -515,6 +621,26 @@ type WorkflowSessionsV1 = WorkflowSessionsV2;
 type WorkflowArtifactMetadataV1 = WorkflowArtifactMetadataV2;
 type WorkflowInvocationReceiptV1 = WorkflowInvocationReceiptV2;
 type WorkflowEventV1 = WorkflowEventV2;
+
+type WorkflowPresetEffort = 'low' | 'medium' | 'high';
+interface WorkflowPresetAgent {
+    adapter: string;
+    model: string;
+    effort: WorkflowPresetEffort;
+}
+interface WorkflowLaunchPresetDefinition {
+    supervisor: WorkflowPresetAgent;
+    implementer: WorkflowPresetAgent;
+    adviser: WorkflowPresetAgent | null;
+    reviewer: 'supervisor' | WorkflowPresetAgent;
+    mode: WorkflowMode;
+    max_adviser_calls: 0 | 1;
+}
+/** A named collection can be stored in project or global configuration. */
+interface WorkflowPresetConfig {
+    default_preset?: string;
+    presets?: Record<string, WorkflowLaunchPresetDefinition>;
+}
 
 /**
  * Configuration domain model.
@@ -560,6 +686,7 @@ interface OrchestratorConfig {
         security: ExecutionSecurityConfig;
     };
     workflow?: WorkflowConfigOverrides;
+    workflow_launch?: WorkflowPresetConfig;
     prompt?: {
         template?: string;
         system_template?: string;
@@ -652,31 +779,6 @@ interface CreateGoalInput {
  * Messages are stored as JSON files and injected into agent prompts at dispatch time.
  */
 type MessageChannel = 'direct' | 'broadcast' | 'lead';
-type MessageStatus = 'pending' | 'delivered' | 'expired';
-interface Message {
-    id: string;
-    channel: MessageChannel;
-    from_agent_id: string;
-    to_agent_id: string | null;
-    subject: string;
-    body: string;
-    created_at: string;
-    expires_at?: string;
-    status: MessageStatus;
-    delivered_at?: string;
-    team_id?: string;
-    reply_to?: string;
-}
-interface CreateMessageInput {
-    channel: MessageChannel;
-    from_agent_id: string;
-    to_agent_id?: string;
-    subject: string;
-    body: string;
-    ttl_ms?: number;
-    team_id?: string;
-    reply_to?: string;
-}
 
 type OrchestratorEvent = {
     type: 'task:created';
@@ -969,58 +1071,6 @@ declare const AGENT_SHOP_TEMPLATES: AgentShopTemplate[];
 declare function getShopTemplateByKey(key: string): AgentShopTemplate | undefined;
 
 /**
- * Typed event bus.
- *
- * The single communication channel between all layers.
- * Synchronous emit — handlers run inline.
- * TUI, logger, run store, state all subscribe independently.
- */
-
-type Handler<T> = (event: T) => void;
-declare class EventBus {
-    private handlers;
-    private wildcardHandlers;
-    private maxListeners;
-    private warnedTypes;
-    /**
-     * Set the maximum number of listeners per event type before a warning is emitted.
-     * Helps detect memory leaks from repeated subscriptions in watch mode.
-     */
-    setMaxListeners(n: number): void;
-    getMaxListeners(): number;
-    /**
-     * Get the number of listeners for a specific event type.
-     */
-    listenerCount(type: OrchestratorEventType): number;
-    /**
-     * Subscribe to events of a specific type.
-     * Returns an unsubscribe function.
-     */
-    on<T extends OrchestratorEventType>(type: T, handler: Handler<EventPayload<T>>): () => void;
-    /**
-     * Subscribe to an event type, auto-unsubscribe after first call.
-     */
-    once<T extends OrchestratorEventType>(type: T, handler: Handler<EventPayload<T>>): () => void;
-    /**
-     * Unsubscribe a handler from an event type.
-     */
-    off<T extends OrchestratorEventType>(type: T, handler: Handler<EventPayload<T>>): void;
-    /**
-     * Emit an event synchronously to all subscribed handlers.
-     */
-    emit(event: OrchestratorEvent): void;
-    private dispatchToSet;
-    /**
-     * Subscribe to ALL events regardless of type.
-     */
-    onAny(handler: Handler<OrchestratorEvent>): () => void;
-    /**
-     * Remove all handlers.
-     */
-    clear(): void;
-}
-
-/**
  * Agent factory — converts shop templates into CreateAgentInput.
  *
  * Resolves adapter-specific model from the template's semantic tier
@@ -1037,520 +1087,17 @@ declare function isMcpSkill(skill: string): boolean;
  */
 declare function templateToAgentInput(template: AgentShopTemplate, adapter: string): CreateAgentInput;
 
-/**
- * Team domain model.
- *
- * A Team groups agents with a lead for coordinated work.
- * Teams share a task pool and enable broadcast messaging.
- */
-type TeamStatus = 'active' | 'paused' | 'disbanded';
-interface TeamMember {
-    agent_id: string;
-    role: 'lead' | 'member';
-    joined_at: string;
+type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun';
+interface CheckDiscoveryResult {
+    package_manager: PackageManager | null;
+    checks: string[];
 }
-interface Team {
-    id: string;
-    name: string;
-    description?: string;
-    status: TeamStatus;
-    members: TeamMember[];
-    task_pool: string[];
-    lead_agent_id: string;
-    created_at: string;
-    updated_at: string;
-    config: TeamConfig;
-}
-interface TeamConfig {
-    max_concurrent_tasks?: number;
-    auto_claim: boolean;
-    message_ttl_ms?: number;
-}
-interface CreateTeamInput {
-    name: string;
-    description?: string;
-    lead_agent_id: string;
-    member_agent_ids?: string[];
-    config?: Partial<TeamConfig>;
-}
-
-/**
- * Storage layer interfaces.
- *
- * All persistence goes through these contracts.
- * Implementations use atomic file writes (temp → rename).
- * Services depend on interfaces, not concrete stores.
- */
-
-interface ITaskStore {
-    list(filter?: {
-        status?: TaskStatus;
-        goalId?: string;
-    }): Promise<Task[]>;
-    get(id: string): Promise<Task | null>;
-    save(task: Task): Promise<void>;
-    delete(id: string): Promise<void>;
-}
-interface IAgentStore {
-    list(): Promise<Agent[]>;
-    get(id: string): Promise<Agent | null>;
-    getByName(name: string): Promise<Agent | null>;
-    save(agent: Agent): Promise<void>;
-    delete(id: string): Promise<void>;
-}
-interface IRunStore {
-    save(run: Run): Promise<void>;
-    get(id: string): Promise<Run | null>;
-    listAll(): Promise<Run[]>;
-    listForTask(taskId: string): Promise<Run[]>;
-    listForAgent(agentId: string): Promise<Run[]>;
-    appendEvent(runId: string, event: RunEvent): Promise<void>;
-    readEvents(runId: string): Promise<RunEvent[]>;
-    readEventsTail(runId: string, count: number): Promise<RunEvent[]>;
-    streamEvents(runId: string, signal?: AbortSignal): AsyncGenerator<RunEvent>;
-    closeRunEvents(runId: string): void;
-}
-interface IStateStore {
-    read(): Promise<OrchestratorState>;
-    write(state: OrchestratorState): Promise<void>;
-}
-interface IConfigStore {
-    read(): Promise<OrchestratorConfig>;
-    write(config: OrchestratorConfig): Promise<void>;
-    get(keyPath: string): Promise<unknown>;
-    set(keyPath: string, value: unknown): Promise<void>;
-}
-interface ContextEntry {
-    key: string;
-    value: string;
-    created_at: string;
-    updated_at: string;
-    ttl_ms?: number;
-    expires_at?: string;
-}
-interface IContextStore {
-    get(key: string): Promise<ContextEntry | null>;
-    set(key: string, value: string, ttlMs?: number): Promise<void>;
-    delete(key: string): Promise<void>;
-    list(): Promise<ContextEntry[]>;
-    getAll(): Promise<Record<string, string>>;
-}
-interface IMessageStore {
-    save(message: Message): Promise<void>;
-    get(id: string): Promise<Message | null>;
-    list(): Promise<Message[]>;
-    listPending(agentId: string): Promise<Message[]>;
-    markDelivered(id: string): Promise<void>;
-    delete(id: string): Promise<void>;
-    purgeExpired(): Promise<number>;
-}
-interface IGoalStore {
-    list(filter?: {
-        status?: GoalStatus;
-    }): Promise<Goal[]>;
-    get(id: string): Promise<Goal | null>;
-    save(goal: Goal): Promise<void>;
-    delete(id: string): Promise<void>;
-}
-interface ITeamStore {
-    save(team: Team): Promise<void>;
-    get(id: string): Promise<Team | null>;
-    getByName(name: string): Promise<Team | null>;
-    list(): Promise<Team[]>;
-    delete(id: string): Promise<void>;
-}
-
-declare class Paths {
-    private readonly projectRoot;
-    constructor(projectRoot: string);
-    /** Root .orchestry/ directory */
-    get root(): string;
-    get configPath(): string;
-    get statePath(): string;
-    get lockPath(): string;
-    get tasksDir(): string;
-    get agentsDir(): string;
-    get runsDir(): string;
-    get templatesDir(): string;
-    get logsDir(): string;
-    get contextDir(): string;
-    contextPath(key: string): string;
-    get messagesDir(): string;
-    messagePath(id: string): string;
-    get goalsDir(): string;
-    goalPath(id: string): string;
-    get teamsDir(): string;
-    get attachmentsDir(): string;
-    taskAttachmentsDir(taskId: string): string;
-    teamPath(id: string): string;
-    get gitignorePath(): string;
-    get workspaceExcludePath(): string;
-    taskPath(id: string): string;
-    agentPath(id: string): string;
-    runPath(id: string): string;
-    runEventsPath(id: string): string;
-    defaultTemplatePath(): string;
-    isInitialized(): Promise<boolean>;
-    requireInit(): Promise<void>;
-    validateStateRoot(): Promise<void>;
-}
-
-/**
- * Task service — business logic for task lifecycle.
- *
- * Validates state transitions, emits events, manages CRUD.
- * CLI commands call this service, not storage directly.
- */
-
-declare class TaskService {
-    private readonly taskStore;
-    private readonly eventBus;
-    private readonly config;
-    private readonly paths?;
-    private readonly agentStore?;
-    constructor(taskStore: ITaskStore, eventBus: EventBus, config: OrchestratorConfig, paths?: Paths | undefined, agentStore?: IAgentStore | undefined);
-    create(input: CreateTaskInput): Promise<Task>;
-    list(filter?: {
-        status?: TaskStatus;
-        goalId?: string;
-    }): Promise<Task[]>;
-    get(id: string): Promise<Task>;
-    updateStatus(id: string, newStatus: TaskStatus): Promise<Task>;
-    assign(taskId: string, agentId: string): Promise<Task>;
-    cancel(id: string): Promise<Task>;
-    retry(id: string): Promise<Task>;
-    reject(id: string, feedback?: string): Promise<Task>;
-    update(id: string, fields: {
-        title?: string;
-        description?: string;
-        priority?: number;
-        labels?: string[];
-        attachments?: string[];
-    }): Promise<Task>;
-    delete(id: string): Promise<void>;
-    getAttachmentPath(taskId: string, filename: string): string;
-    private copyAttachments;
-    incrementAttempts(id: string): Promise<Task>;
-    /**
-     * Resolve an assignee value to an agent ID.
-     * Accepts: agent ID (agt_xxx), agent name, or undefined.
-     * Returns the agent ID if found, or undefined if input is undefined.
-     * Throws InvalidArgumentsError if non-empty value matches no agent.
-     */
-    private resolveAssignee;
-}
-
-/**
- * Agent service — business logic for agent lifecycle.
- *
- * Manages agent CRUD, availability, and task assignment matching.
- */
-
-declare class AgentService {
-    private readonly agentStore;
-    private readonly stateStore;
-    private readonly eventBus;
-    private readonly config;
-    constructor(agentStore: IAgentStore, stateStore: IStateStore, eventBus: EventBus, config: OrchestratorConfig);
-    create(input: CreateAgentInput): Promise<Agent>;
-    list(): Promise<Agent[]>;
-    get(id: string): Promise<Agent>;
-    remove(id: string): Promise<void>;
-    update(id: string, fields: {
-        name?: string;
-        adapter?: string;
-        role?: string;
-        model?: string;
-        effort?: Agent['config']['effort'] | '';
-        approval_policy?: Agent['config']['approval_policy'];
-    }): Promise<Agent>;
-    disable(id: string): Promise<Agent>;
-    enable(id: string): Promise<Agent>;
-    setAutonomous(id: string, enabled: boolean): Promise<Agent>;
-    setStatus(id: string, status: AgentStatus): Promise<Agent>;
-    updateStats(id: string, update: Partial<Agent['stats']>): Promise<Agent>;
-    /**
-     * Find the best available agent for a task using scoring.
-     *
-     * Scoring:
-     * - Explicit assignee match = 100
-     * - Skill match with task labels = 50 per match
-     * - Role match with task labels = 30
-     * - Idle status bonus = 20
-     * - Success rate bonus = 0–10 (scaled by completed / total)
-     */
-    findBestAgent(task: Task): Promise<Agent | null>;
-}
-
-/**
- * Run service — manages run lifecycle and event streaming.
- */
-
-declare class RunService {
-    private readonly runStore;
-    private readonly eventBus;
-    constructor(runStore: IRunStore, eventBus: EventBus);
-    create(params: {
-        taskId: string;
-        agentId: string;
-        attempt: number;
-        prompt: string;
-        workspacePath: string;
-        persistPrompt?: boolean;
-    }): Promise<Run>;
-    get(id: string): Promise<Run | null>;
-    start(id: string, pid: number): Promise<Run>;
-    finish(id: string, status: RunStatus, tokens?: TokenUsage, error?: string, failure?: PersistedFailure): Promise<Run>;
-    appendEvent(runId: string, event: RunEvent): Promise<void>;
-    listAll(): Promise<Run[]>;
-    listForTask(taskId: string): Promise<Run[]>;
-    listForAgent(agentId: string): Promise<Run[]>;
-    readEvents(runId: string): Promise<RunEvent[]>;
-    readEventsTail(runId: string, count: number): Promise<RunEvent[]>;
-    /**
-     * Get error and last N lines of output from the most recent failed run for a task.
-     * Used to provide retry context so agents can learn from previous failures.
-     */
-    getLastFailedRunContext(taskId: string): Promise<{
-        error: string;
-        output: string;
-    } | null>;
-}
-
-/**
- * MessageService — business logic for inter-agent messaging.
- *
- * Handles message creation, routing (direct/broadcast/lead),
- * delivery into agent prompts, and cleanup of expired messages.
- */
-
-declare class MessageService {
-    private readonly messageStore;
-    private readonly agentStore;
-    private readonly teamStore;
-    private readonly eventBus;
-    constructor(messageStore: IMessageStore, agentStore: IAgentStore, teamStore: ITeamStore, eventBus: EventBus);
-    /**
-     * Send a message. For broadcast, creates one message per recipient agent.
-     * For 'lead' channel, resolves team lead and sends direct.
-     */
-    send(input: CreateMessageInput): Promise<Message[]>;
-    /**
-     * Drain mailbox: fetch pending messages for an agent and mark them delivered.
-     * Called by the orchestrator during dispatchTask.
-     */
-    drainMailbox(agentId: string, taskId: string): Promise<Message[]>;
-    listAll(): Promise<Message[]>;
-    listPendingForAgent(agentId: string): Promise<Message[]>;
-    listForAgent(agentId: string): Promise<Message[]>;
-    purgeExpired(): Promise<number>;
-    private emitSent;
-}
-
-/**
- * Agent adapter interface.
- *
- * Every AI tool (Claude, Codex, Shell, etc.) implements this contract.
- * execute() returns an AsyncGenerator for pull-based streaming of events.
- */
-
-interface AdapterTestResult {
-    ok: boolean;
-    version?: string;
-    error?: string;
-    errorKind?: AdapterErrorKind;
-    details?: Record<string, unknown>;
-}
-interface ExecuteParams {
-    prompt: string;
-    systemPrompt?: string;
-    workspace: string;
-    env?: Record<string, string>;
-    config: AgentConfig;
-    security?: {
-        allowPermissionBypass?: boolean;
-        allowShellAdapter?: boolean;
-    };
-    persistPrompts?: boolean;
-    signal?: AbortSignal;
-}
-/**
- * Canonical `data` shape per AgentEvent type. Each adapter should emit `data`
- * that matches its event's row below so that downstream consumers (TUI logs,
- * `orch logs` CLI, serve daemon) can render events without knowing adapter
- * internals.
- *
- *   | type        | data shape                                        |
- *   |-------------|---------------------------------------------------|
- *   | output      | { text: string, raw?: unknown }                   |
- *   | tool_call   | { name: string, input?: unknown, raw?: unknown }  |
- *   | command     | { command: string, result?: unknown, raw?: unknown } |
- *   | file_change | { paths: string[], raw?: unknown }                |
- *   | error       | { message: string, raw?: unknown }                |
- *   | done        | { result?: string, raw?: unknown }                |
- *
- * - `raw` is an optional escape hatch for the full provider payload; logs
- *   renderers must not include it in the default summary.
- * - Adapters should emit ONE `output` per logical assistant message (per
- *   text-block or per turn), not per-character delta. Use adapter-local state
- *   to aggregate streaming deltas before emitting.
- * - Intermediate progress events (tool-in-flight, "thinking" pings) should be
- *   dropped at the adapter boundary — they belong in adapter-specific UIs,
- *   not in the orchestrator event stream.
- *
- * Existing adapters predate this contract and emit a variety of shapes
- * (claude/cursor: full `parsed.message`; codex: `item`). The TUI renderer
- * (`formatAgentOutput` in src/tui/App.tsx) is defensive and accepts both
- * canonical and legacy shapes during the migration window.
- */
-interface AgentEvent {
-    type: 'output' | 'file_change' | 'command' | 'tool_call' | 'error' | 'done';
-    timestamp: string;
-    data: unknown;
-    tokens?: {
-        input: number;
-        output: number;
-        reasoning?: number;
-        total: number;
-        cache_read?: number;
-        cache_write?: number;
-    };
-    errorKind?: AdapterErrorKind;
-}
-interface ExecuteHandle {
-    pid: number;
-    events: AsyncGenerator<AgentEvent>;
-}
-interface IAgentAdapter {
-    readonly kind: string;
-    test(): Promise<AdapterTestResult>;
-    execute(params: ExecuteParams): ExecuteHandle;
-    stop(pid: number): Promise<void>;
-}
-
-/**
- * Adapter registry.
- *
- * Maps adapter kind strings to adapter instances.
- * Pre-populated at startup in the container.
- */
-
-declare class AdapterRegistry {
-    private readonly adapters;
-    register(adapter: IAgentAdapter): void;
-    get(kind: string): IAgentAdapter | undefined;
-    require(kind: string): IAgentAdapter;
-    list(): IAgentAdapter[];
-    listKinds(): string[];
-    has(kind: string): boolean;
-}
-
-/**
- * Process management utilities.
- *
- * Handles spawning subprocesses, PID checks, graceful kill.
- */
-
-interface SpawnResult {
-    process: ChildProcess;
-    pid: number;
-}
-interface IProcessManager {
-    isAlive(pid: number): boolean;
-    kill(pid: number, signal?: NodeJS.Signals): void;
-    killWithGrace(pid: number, graceMs?: number): Promise<void>;
-    spawn(command: string, args: string[], options?: SpawnOptions): SpawnResult;
-}
-
-/**
- * Git merge strategy for worktree branches.
- *
- * Encapsulates `git merge --no-ff` execution and conflict handling.
- */
-
-type MergeResult = {
-    success: true;
-} | {
-    success: false;
-    conflictInfo: string;
-};
-
-/**
- * Workspace manager interface.
- */
-
-interface PrepareResult {
-    path: string;
-    branch?: string;
-}
-interface IWorkspaceManager {
-    prepare(task: Task, agent: Agent, config: OrchestratorConfig): Promise<PrepareResult>;
-    mergeBack(branch: string): Promise<MergeResult>;
-    cleanup(taskId: string, branch?: string): Promise<void>;
-    validate(workspacePath: string, projectRoot: string): void;
-    /** Get files changed on a worktree branch relative to its merge-base. */
-    getChangedFiles(branch: string): Promise<string[]>;
-}
-
-interface ITemplateEngine {
-    render(template: string, context: PromptContext): Promise<string>;
-}
-interface AgentInfo {
-    id: string;
-    name: string;
-    role?: string;
-    adapter: string;
-}
-interface RetryContext {
-    previous_error: string;
-    previous_output: string;
-}
-interface GoalContext {
-    id: string;
-    title: string;
-    description: string;
-    status: GoalStatus;
-    task_names: string[];
-    progress?: string;
-}
-interface PromptContext {
-    project: {
-        name: string;
-        description?: string;
-    };
-    task: {
-        id: string;
-        title: string;
-        description: string;
-        priority: number;
-        labels: string[];
-        scope?: string[];
-        is_autonomous: boolean;
-        goal_id?: string;
-        goal_task_role?: GoalTaskRole;
-        goal_cycle?: number;
-    };
-    agent: {
-        id: string;
-        name: string;
-        role?: string;
-    };
-    agents: AgentInfo[];
-    attempt: number | null;
-    workspace_path: string;
-    retry?: RetryContext;
-    feedback?: string;
-    shared_context?: Record<string, string>;
-    messages?: Array<{
-        id: string;
-        from: string;
-        subject: string;
-        body: string;
-        sent_at: string;
-        reply_to?: string;
-    }>;
-    goal?: GoalContext;
-}
+/** Inspect local manifests only. Discovery never starts a process. */
+declare function discoverDeterministicChecks(projectRoot: string): Promise<CheckDiscoveryResult>;
+/** Validate user-supplied checks without executing or probing any binary. */
+declare function validateExplicitChecks(projectRoot: string, checks: readonly string[]): Promise<string[]>;
+/** Reject shell syntax and commands outside the bounded deterministic grammar. */
+declare function validateDeterministicCheckCommands(checks: readonly string[]): string[];
 
 /**
  * Skill Library loader.
@@ -1579,466 +1126,6 @@ declare class SkillLoader implements ISkillLoader {
     loadSkills(skillNames: string[]): Promise<string>;
     listAvailable(): Promise<string[]>;
     private loadOne;
-}
-
-interface OrchestratorDeps {
-    taskStore: ITaskStore;
-    agentStore: IAgentStore;
-    runStore: IRunStore;
-    stateStore: IStateStore;
-    adapterRegistry: AdapterRegistry;
-    workspaceManager: IWorkspaceManager;
-    templateEngine: ITemplateEngine;
-    processManager: IProcessManager;
-    eventBus: EventBus;
-    taskService: TaskService;
-    agentService: AgentService;
-    runService: RunService;
-    contextStore?: IContextStore;
-    messageService?: MessageService;
-    goalStore?: IGoalStore;
-    skillLoader?: ISkillLoader;
-    config: OrchestratorConfig;
-    projectRoot: string;
-    lockPath: string;
-}
-declare class Orchestrator {
-    private readonly deps;
-    private intervalId;
-    private shuttingDown;
-    private state;
-    private abortControllers;
-    private readonly cachedTaskStore;
-    private readonly cachedAgentStore;
-    private readonly cachedGoalStore;
-    private saveStateTimer;
-    private saveStateDirty;
-    private lockAcquired;
-    private consecutiveTickFailures;
-    private readonly maxConsecutiveTickFailures;
-    private readonly maxRetryQueueSize;
-    private signalHandlers;
-    private immediateDispatchTimer;
-    private taskCreatedUnsub;
-    private tickInProgress;
-    private stoppedResolvers;
-    /**
-     * Track taskIds with an active collectEvents() background promise.
-     * Reconcile skips PID-liveness and stall checks for these tasks because
-     * the process may have exited cleanly but handleRunSuccess hasn't acquired
-     * the mutex yet — false-positive "crash" / "stall" detection.
-     */
-    private readonly activeCollectors;
-    /** When true, `tick()` skips `seedAutonomousTasks()`. Set via `startWatch()` options. */
-    private skipAutonomousSeeding;
-    /** Task IDs started via runTask; these must not trigger reactive dispatch of other tasks. */
-    private readonly singleTaskRunIds;
-    /** Cooldown: track last auto-seed time per agent to prevent re-seed spam. */
-    private readonly lastAutoSeedAt;
-    /** Minimum interval between auto-seed tasks for the same agent (30 seconds). */
-    private static readonly AUTO_SEED_COOLDOWN_MS;
-    /** Promise-chain mutex to serialize critical state mutations. */
-    private stateMutex;
-    constructor(deps: OrchestratorDeps);
-    /**
-     * Check if this instance owns the lock (can mutate state).
-     */
-    get isOwner(): boolean;
-    /**
-     * Serialize access to state mutations via a Promise-chain mutex.
-     * Prevents concurrent tick/stop/reconcile from reading stale state.
-     */
-    private withStateLock;
-    /**
-     * Run a single task by ID.
-     * If watch mode is active (lock already held), dispatches inline via stateMutex.
-     * Otherwise acquires a temporary lock for the duration of the run.
-     */
-    runTask(taskId: string): Promise<void>;
-    /**
-     * Run all dispatchable tasks.
-     * If watch mode is active (lock already held), dispatches inline via stateMutex.
-     * Otherwise acquires a temporary lock for the duration of the run.
-     */
-    runAll(): Promise<void>;
-    /**
-     * Invalidate caches → loadState → run dispatch fn → saveState.
-     * Shared by runTask, runAll, and immediateDispatch.
-     */
-    private freshDispatch;
-    /**
-     * Acquire lock, run fn, then release lock.
-     * Used by single-shot commands (runTask, runAll) that don't go through startWatch.
-     */
-    private withTemporaryLock;
-    /**
-     * Start watch mode — continuous tick loop.
-     * Acquires a PID lock to prevent multiple orchestrators.
-     */
-    startWatch(opts?: {
-        skipAutonomousSeeding?: boolean;
-    }): Promise<void>;
-    /**
-     * Returns a promise that resolves when stop() completes.
-     * Use in long-running modes (serve, run --watch) to keep the process alive.
-     */
-    waitForStop(): Promise<void>;
-    /**
-     * Register SIGINT/SIGTERM handlers for graceful shutdown.
-     */
-    private registerSignalHandlers;
-    /**
-     * Remove signal handlers to avoid listener leaks.
-     */
-    private removeSignalHandlers;
-    /**
-     * Stop the watch loop and clean up.
-     */
-    stop(): Promise<void>;
-    /**
-     * Cancel a running task: kill agent process, clean state, mark cancelled.
-     * Acquires lock if not already owned (standalone CLI invocation).
-     */
-    cancelTask(taskId: string): Promise<void>;
-    /**
-     * Force-stop a specific agent: kill process, clean state, release agent.
-     * Acquires lock if not already owned (standalone CLI invocation).
-     */
-    forceStopAgent(agentId: string): Promise<void>;
-    /**
-     * Single tick: Reconcile → Dispatch → Collect
-     * Serialized via mutex to prevent concurrent ticks from racing on state.
-     */
-    private tick;
-    /**
-     * Schedule an immediate dispatch with 500ms debounce.
-     * Called on task:created to avoid waiting for the next 30s tick.
-     * Retries up to 10 times (5s) if a tick is in progress.
-     */
-    private scheduleImmediateDispatch;
-    /**
-     * Mini-tick: invalidate caches → loadState → dispatchAll → saveState.
-     * Skips reconcile/collect — only dispatches new tasks immediately.
-     */
-    private immediateDispatch;
-    /**
-     * Reconcile: check PID liveness, detect stalls, process retry queue.
-     */
-    private reconcile;
-    /** Create lead/review tasks for orchestrated goals, then legacy role-based autonomous work. */
-    private seedAutonomousTasks;
-    private seedGoalOrchestrationTasks;
-    /**
-     * Dispatch all dispatchable tasks up to max_concurrent_agents.
-     */
-    private dispatchAll;
-    /**
-     * Dispatch exactly one requested task.
-     *
-     * A single-shot CLI command (`orch run <task-id>`) should not opportunistically
-     * consume other ready tasks while the requested run is being collected.
-     * Temporarily claiming other dispatchable tasks keeps the shared dispatch path
-     * focused without changing watch/run-all semantics.
-     */
-    private dispatchOnlyTask;
-    /** Dedup + bounded push onto the retry queue. */
-    private enqueueRetry;
-    private ensureGoalOrchestration;
-    private getGoalLeadAgentId;
-    private hasOpenGoalTask;
-    private isGoalWorkerTask;
-    private hasNonTerminalWorkerTasks;
-    private hasDispatchableWorkerTasks;
-    private saveGoalPhase;
-    private createGoalLeadTask;
-    private buildLeadAnalysisDescription;
-    private buildLeadReviewDescription;
-    private isAllowedByGoalPhase;
-    private isTaskAllowedByCurrentGoalPhase;
-    private makeFailure;
-    private recordTaskFailure;
-    private recordGoalFailure;
-    private handlePreRunFailure;
-    /**
-     * When a task permanently fails, cascade-fail all tasks that depend on it
-     * (directly or transitively). Prevents dependent tasks from hanging as TODO forever.
-     */
-    private cascadeFailDependents;
-    /**
-     * Dispatch a single task: claim → assign → execute.
-     */
-    private dispatchTask;
-    /**
-     * Collect events from an adapter's async generator.
-     */
-    private collectEvents;
-    private handleRunSuccess;
-    private _handleRunSuccess;
-    private handleRunFailure;
-    private _handleRunFailure;
-    /**
-     * Run automatic review criteria on a task in 'review' status.
-     * If all criteria pass, transition review → done.
-     * If any fail, stay in review with results attached.
-     */
-    private runAutoReview;
-    /**
-     * Force a task to 'review' status with a summary prefix.
-     * Used when merge-back fails (conflict or infrastructure error).
-     */
-    private forceTaskToReview;
-    private unclaim;
-    /**
-     * Throw if this instance doesn't own the lock (read-only session).
-     */
-    private requireOwnership;
-    private loadState;
-    /**
-     * On startup, clean up stale running entries left by a crashed/restarted process.
-     *
-     * Instead of marking orphaned tasks as 'failed' (which triggers retry → agents
-     * redo already-committed work), we cancel them. Users can manually reactivate
-     * specific tasks if needed.
-     */
-    private cleanupStaleRunningEntries;
-    /**
-     * Find runs stuck in 'preparing' status (orphaned by a crash before adapter.execute)
-     * and mark them as cancelled. Called once at startup.
-     */
-    private cleanupOrphanedPreparingRuns;
-    /** Cancel a task through the validated state machine. */
-    private forceTaskCancelled;
-    private saveState;
-    /**
-     * Debounced saveState — batches rapid writes within 500ms window.
-     * Used for non-critical updates like last_event_at in collectEvents.
-     */
-    private saveStateLazy;
-    /**
-     * Flush any pending debounced saveState immediately.
-     * Call before critical transitions to ensure state is persisted.
-     */
-    private flushStateLazy;
-}
-
-declare const ARTIFACT_FILES: {
-    readonly codex_decision: "codex-decision-r%REV%-i%ITER%-a%SEQ%.json";
-    readonly opus_instruction: "opus-instruction-r%REV%-i%ITER%-a%SEQ%.md";
-    readonly fable_request: "fable-request-r%REV%-i%ITER%-a%SEQ%.json";
-    readonly fable_advice: "fable-advice-r%REV%-i%ITER%-a%SEQ%.json";
-    readonly routing_decision: "routing-decision-r%REV%-i%ITER%-a%SEQ%.json";
-    readonly opus_report: "opus-report-r%REV%-i%ITER%-a%SEQ%.json";
-    readonly opus_diff: "opus-r%REV%-i%ITER%-a%SEQ%.diff";
-    readonly test_results: "test-results-r%REV%-i%ITER%-a%SEQ%.json";
-};
-type ArtifactName = keyof typeof ARTIFACT_FILES;
-interface StoredArtifact<T = unknown> {
-    metadata: WorkflowArtifactMetadataV1;
-    payload: T;
-}
-interface ArtifactWrite<T> {
-    job_id: string;
-    name: ArtifactName;
-    phase: WorkflowPhase;
-    revision: number;
-    invocation_id: string;
-    producing_role: ProducingRole;
-    parent_artifact_hash: string | null;
-    payload: unknown;
-    validate: (value: unknown) => T;
-    timestamp?: string;
-}
-declare class WorkflowArtifactStore {
-    private readonly root;
-    constructor(projectRoot: string);
-    createJob(job: WorkflowJobV1, passport: WorkflowPassportV1, sessions: WorkflowSessionsV1): Promise<void>;
-    writeArtifact<T>(input: ArtifactWrite<T>): Promise<StoredArtifact<T>>;
-    writeTextArtifact(input: Omit<ArtifactWrite<string>, 'validate'>): Promise<StoredArtifact<string>>;
-    readArtifact<T>(jobId: string, name: ArtifactName, workflowRevision?: number): Promise<StoredArtifact<T> | null>;
-    readTextArtifact(jobId: string, name: ArtifactName, workflowRevision?: number): Promise<StoredArtifact<string> | null>;
-    transition(jobId: string, next: WorkflowPhase, patch?: Partial<WorkflowJobV1>): Promise<WorkflowJobV1>;
-    commitTransition(jobId: string, next: WorkflowPhase, patch: Partial<WorkflowJobV1>, passportPatch: Partial<WorkflowPassportV1>): Promise<WorkflowJobV1>;
-    patchJob(jobId: string, patch: Partial<WorkflowJobV1>): Promise<WorkflowJobV1>;
-    reserveOperation(jobId: string, phase: WorkflowPhase, operation: NonNullable<WorkflowJobV1['current_operation']>): Promise<boolean>;
-    readJob(jobId: string): Promise<WorkflowJobV1 | null>;
-    readPassport(jobId: string): Promise<WorkflowPassportV1 | null>;
-    writePassport(value: WorkflowPassportV1): Promise<void>;
-    readSessions(jobId: string): Promise<WorkflowSessionsV1 | null>;
-    writeSessions(value: WorkflowSessionsV1): Promise<void>;
-    commitSessionsAndPassport(sessionsValue: WorkflowSessionsV1, passportValue: WorkflowPassportV1): Promise<void>;
-    appendEvent(event: WorkflowEventV1): Promise<void>;
-    readEvents(jobId: string): Promise<WorkflowEventV1[]>;
-    writeInvocationReceipt(value: WorkflowInvocationReceiptV1): Promise<void>;
-    readInvocationReceipt(jobId: string, invocationId: string): Promise<WorkflowInvocationReceiptV1 | null>;
-    readEffectReceipt(jobId: string, invocationId: string, kind: WorkflowEffectReceiptV2['kind']): Promise<WorkflowEffectReceiptV2 | null>;
-    writeEffectReceipt(value: WorkflowEffectReceiptV2): Promise<void>;
-    listJobs(): Promise<WorkflowJobV1[]>;
-    artifactPath(jobId: string, name: ArtifactName, revision: number): string;
-    private requiredJob;
-    private file;
-    private latestArtifact;
-    private artifactForInvocation;
-    private write;
-    private recoverTransition;
-    private applyTransition;
-    private recoverPassport;
-    private applyPassport;
-    private recoverSessions;
-    private applySessions;
-    private secureDir;
-    private lock;
-}
-declare function hashCanonical(value: unknown): string;
-
-interface RoleUsage {
-    input_chars?: number;
-    output_chars?: number;
-    input_tokens?: number;
-    output_tokens?: number;
-    cache_read?: number;
-    cache_write?: number;
-    duration_ms?: number;
-    compactions?: number;
-}
-interface RoleResult<T> {
-    value: T;
-    session_id?: string;
-    session_mode?: 'new' | 'native_resume' | 'passport_handoff' | 'none';
-    resumed?: boolean;
-    resume_failed?: boolean;
-    usage?: RoleUsage;
-}
-interface FableCallOptions {
-    workspace: string;
-    model: string;
-    max_turns: 1;
-    effort: 'low';
-    timeout_ms: number;
-    max_input_bytes: number;
-    max_output_bytes: number;
-}
-interface CodexDecisionEvidence {
-    evidence: GitEvidence | null;
-    checks: CheckResults | null;
-    opus: OpusResult | null;
-    fable_advice: FableAdviceV1 | null;
-}
-interface CodexRolePort {
-    decide(passport: WorkflowPassportV2, stage: CodexDecisionStage, evidence: CodexDecisionEvidence, threadId: string | null): Promise<RoleResult<CodexDecisionV2>>;
-    available(): Promise<{
-        available: boolean;
-        detail: string;
-    }>;
-}
-interface FableRolePort {
-    consult(jobId: string, consultationId: string, query: FableQueryV1, options: FableCallOptions): Promise<RoleResult<FableAdviceV1>>;
-    available(): Promise<{
-        available: boolean;
-        detail: string;
-    }>;
-}
-interface OpusRolePort {
-    execute(passport: WorkflowPassportV2, prompt: string, workspace: string, sessionId: string | null, mode: 'new' | 'native_resume' | 'passport_handoff'): Promise<RoleResult<OpusResult>>;
-    available(): Promise<{
-        available: boolean;
-        detail: string;
-    }>;
-}
-interface GitEvidence {
-    branch: string;
-    worktree: string;
-    commit: string;
-    diff: string;
-    diff_hash: string;
-    files_changed: string[];
-    insertions: number;
-    deletions: number;
-    risk_signals: string[];
-}
-interface WorkflowGitPort {
-    prepare(jobId: string): Promise<{
-        branch: string;
-        worktree: string;
-        target_branch: string;
-        base_commit: string;
-    }>;
-    inspect(branch: string, worktree: string): Promise<GitEvidence>;
-    runChecks(worktree: string, commit: string, commands: string[]): Promise<CheckResults>;
-    currentCommit(branch: string): Promise<string>;
-    isMerged(branch: string, commit: string, targetBranch: string, baseCommit: string): Promise<boolean>;
-    merge(branch: string, expectedCommit: string, targetBranch: string, baseCommit: string): Promise<{
-        success: boolean;
-        detail: string;
-    }>;
-}
-interface WorkflowRolePorts {
-    codex: CodexRolePort;
-    fable: FableRolePort;
-    opus: OpusRolePort;
-    git: WorkflowGitPort;
-}
-
-declare const DEFAULT_WORKFLOW_CONFIG: WorkflowConfig;
-interface StartWorkflowInput {
-    objective: string;
-    mode?: WorkflowMode;
-    allowed_file_scope?: string[];
-    required_checks?: string[];
-    config?: WorkflowConfigOverrides;
-    job_id?: string;
-}
-declare class WorkflowEngine {
-    private readonly store;
-    private readonly ports;
-    constructor(store: WorkflowArtifactStore, ports: WorkflowRolePorts);
-    start(input: StartWorkflowInput): Promise<string>;
-    run(jobId: string): Promise<WorkflowJobV2>;
-    advance(jobId: string): Promise<WorkflowJobV2>;
-    pause(jobId: string): Promise<WorkflowJobV2>;
-    resume(jobId: string, options?: {
-        retry_invocation?: boolean;
-        reason?: string;
-    }): Promise<WorkflowJobV2>;
-    cancel(jobId: string): Promise<WorkflowJobV2>;
-    private step;
-    private codexDecision;
-    private routeConsultation;
-    private fallbackMalformedConsultation;
-    private fableConsultation;
-    private executeConsultationFallback;
-    private dispatchOpus;
-    private opusExecution;
-    private verification;
-    private merge;
-    private reviewEvidence;
-    private consultationDenial;
-    private artifact;
-    private payload;
-    private optionalPayload;
-    private textPayload;
-    private transition;
-    private block;
-    private addArtifact;
-    private recordDecision;
-    private updatePassport;
-    rotateSession(jobId: string, role: 'codex' | 'opus', reason: string): Promise<void>;
-    private recordRole;
-    private syncPassportSessions;
-    private fableOptions;
-    private fableCall;
-    private invoke;
-    private runChecksOnce;
-    private mergeOnce;
-    private effect;
-    private recordFailedRoleCall;
-    private invocation;
-    private assertAllowedScope;
-    private assertJob;
-    private context;
-    private requiredJob;
-    private requiredPassport;
-    private requiredSessions;
-    private event;
 }
 
 /**
@@ -2077,209 +1164,4 @@ declare function detectClipboardType(): Promise<ClipboardContentType>;
  */
 declare function getClipboardImage(): Promise<ClipboardImage | null>;
 
-/**
- * CLI context — resolved project root and global flags.
- *
- * Validated at entry point before any command runs.
- */
-interface CliContext {
-    projectRoot: string;
-    json: boolean;
-    quiet: boolean;
-    noColor: boolean;
-    ascii: boolean;
-}
-
-/**
- * Global configuration — persists across projects.
- *
- * Stored at ~/.orchestry/global.yml
- */
-/** Activity feed filter preset name */
-type ActivityFilterPreset = 'all' | 'text' | 'tools' | 'errors' | 'events';
-interface NotificationPreferences {
-    toast: boolean;
-    bell: boolean;
-}
-interface TuiPreferences {
-    activity_filter: ActivityFilterPreset;
-    notifications: NotificationPreferences;
-}
-interface GlobalConfig {
-    tui: TuiPreferences;
-}
-
-/**
- * Global config store — reads/writes ~/.orchestry/global.yml
- *
- * Persists across projects. Creates directory if needed.
- */
-
-declare class GlobalConfigStore {
-    read(): Promise<GlobalConfig>;
-    write(config: GlobalConfig): Promise<void>;
-    set<K extends keyof GlobalConfig['tui']>(key: K, value: GlobalConfig['tui'][K]): Promise<void>;
-}
-
-/**
- * Goal service — business logic for goal lifecycle.
- *
- * Goals are persistent objectives that drive autonomous agent work.
- * State machine: active → achieved | abandoned | paused
- *                paused → active | achieved | abandoned
- *
- * Side effect: assigning an agent to a goal auto-enables autonomous mode;
- * removing the last active goal from an agent auto-disables it.
- */
-
-declare class GoalService {
-    private readonly goalStore;
-    private readonly eventBus;
-    private readonly agentService?;
-    private readonly taskService?;
-    private readonly contextStore?;
-    constructor(goalStore: IGoalStore, eventBus: EventBus, agentService?: AgentService | undefined, taskService?: TaskService | undefined, contextStore?: IContextStore | undefined);
-    create(input: CreateGoalInput): Promise<Goal>;
-    list(filter?: {
-        status?: GoalStatus;
-    }): Promise<Goal[]>;
-    get(id: string): Promise<Goal>;
-    updateStatus(id: string, newStatus: GoalStatus, opts?: {
-        force?: boolean;
-    }): Promise<Goal>;
-    update(id: string, fields: {
-        title?: string;
-        description?: string;
-        assignee?: string;
-    }): Promise<Goal>;
-    delete(id: string): Promise<void>;
-    listTasksForGoal(goalId: string): Promise<Task[]>;
-    getProgressReport(goalId: string): Promise<string | undefined>;
-    /** Enable autonomous mode on an agent. */
-    private enableAutonomous;
-    private recordGoalFailure;
-    /** Check if an agent has at least one active goal. */
-    private hasActiveGoalsForAgent;
-    /** Cancel dispatchable (todo/retrying) autonomous tasks assigned to the agent. */
-    private cancelPendingAutonomousTasks;
-    /** Disable autonomous if agent has no other active goals. */
-    private maybeDisableAutonomous;
-}
-
-/**
- * TeamService — business logic for team lifecycle.
- *
- * Manages team creation, membership, task pool, and self-claiming.
- */
-
-declare class TeamService {
-    private readonly teamStore;
-    private readonly agentStore;
-    private readonly taskStore;
-    private readonly eventBus;
-    constructor(teamStore: ITeamStore, agentStore: IAgentStore, taskStore: ITaskStore, eventBus: EventBus);
-    create(input: CreateTeamInput): Promise<Team>;
-    get(id: string): Promise<Team>;
-    list(): Promise<Team[]>;
-    join(teamId: string, agentId: string): Promise<Team>;
-    leave(teamId: string, agentId: string): Promise<Team>;
-    addTask(teamId: string, taskId: string): Promise<Team>;
-    removeTask(teamId: string, taskId: string): Promise<Team>;
-    setLead(teamId: string, agentId: string): Promise<Team>;
-    disband(teamId: string): Promise<void>;
-    /**
-     * Find the team an agent belongs to (if any).
-     */
-    findTeamForAgent(agentId: string): Promise<Team | null>;
-}
-
-/**
- * Doctor service — diagnostics and health checks.
- *
- * Checks adapter availability, system dependencies, project state.
- */
-
-interface DoctorCheck {
-    name: string;
-    status: 'ok' | 'fail' | 'skip';
-    detail?: string;
-}
-interface DoctorReport {
-    checks: DoctorCheck[];
-    adaptersReady: number;
-    adaptersTotal: number;
-}
-declare class DoctorService {
-    private readonly adapterRegistry;
-    private readonly processManager;
-    private readonly cwd;
-    constructor(adapterRegistry: AdapterRegistry, processManager: IProcessManager, projectRoot?: string);
-    runAll(): Promise<DoctorReport>;
-    private checkCommand;
-    private checkGitignore;
-    private checkGitRepo;
-}
-
-/**
- * Dependency injection container.
- *
- * Plain TypeScript object — no framework, no decorators.
- * Two modes:
- *   - LightContainer: stores + services only (fast, for read-only commands)
- *   - Container: full (+ orchestrator, adapters, template engine)
- */
-
-/** Light container — stores + services. No heavy deps (adapters, orchestrator, LiquidJS). */
-interface LightContainer {
-    context: CliContext;
-    paths: Paths;
-    config: OrchestratorConfig;
-    taskStore: ITaskStore;
-    agentStore: IAgentStore;
-    runStore: IRunStore;
-    stateStore: IStateStore;
-    configStore: IConfigStore;
-    globalConfigStore: GlobalConfigStore;
-    globalConfig: GlobalConfig;
-    contextStore: IContextStore;
-    messageStore: IMessageStore;
-    goalStore: IGoalStore;
-    teamStore: ITeamStore;
-    eventBus: EventBus;
-    taskService: TaskService;
-    agentService: AgentService;
-    runService: RunService;
-    messageService: MessageService;
-    goalService: GoalService;
-    teamService: TeamService;
-}
-/** Full container — everything from light + orchestrator, adapters, workspace, template. */
-interface Container extends LightContainer {
-    processManager: IProcessManager;
-    adapterRegistry: AdapterRegistry;
-    workspaceManager: IWorkspaceManager;
-    templateEngine: ITemplateEngine;
-    skillLoader: ISkillLoader;
-    doctorService: DoctorService;
-    orchestrator: Orchestrator;
-    workflowStore: WorkflowArtifactStore;
-    workflowEngine: WorkflowEngine;
-}
-/**
- * Build a light container (stores + services).
- * Fast — no ProcessManager, no adapters, no LiquidJS, no Orchestrator.
- * Used by read-only commands: task, agent, context, msg, goal, team, logs, status, config.
- */
-declare function buildLightContainer(context: CliContext): Promise<LightContainer>;
-/**
- * Build a full container (light + orchestrator + adapters + template).
- * Used by: run, tui, doctor.
- */
-declare function buildFullContainer(context: CliContext): Promise<Container>;
-/**
- * @deprecated Use buildLightContainer or buildFullContainer directly.
- * Kept for backward compatibility with tests.
- */
-declare function buildContainer(context: CliContext): Promise<Container>;
-
-export { AGENT_SHOP_TEMPLATES, ARTIFACT_FILES, type AdapterErrorHint, AdapterErrorKind, type AdapterKind, AdapterRegistry, type AdapterTestResult, type Agent, type AgentConfig, type AgentEvent, type AgentLastError, AgentNotFoundError, AgentService, type AgentShopTemplate, type AgentStats, type AgentStatus, type AgentUsage, type ApprovalPolicy, type ArtifactReference, type CheckResults, type ClipboardContentType, type ClipboardImage, type CodexAction, type CodexDecisionStage, type CodexDecisionV2, type CodexRolePort, type ConsultationOrigin, type ConsultationStatus, type Container, type CreateAgentInput, type CreateGoalInput, type CreateTaskInput, DEFAULT_WORKFLOW_CONFIG, ERROR_HINTS, EventBus, type EventPayload, type ExecuteParams, type FableAdviceV1, type FableFallbackReason, type FableFallbackRecordV1, type FableFallbackV1, type FablePurpose, type FableQueryV1, type FableRolePort, type FailurePhase, type Goal, GoalHasPendingTasksError, type GoalOrchestrationPhase, type GoalOrchestrationState, type GoalStatus, type GoalTaskRole, type IAgentAdapter, type ISkillLoader, type LightContainer, MODEL_TIER_MAP, type ModelTier, NotInitializedError, type OpusResult, type OpusRolePort, Orchestrator, type OrchestratorConfig, type OrchestratorEvent, type OrchestratorEventType, type OrchestratorState, OrchestryError, type PersistedFailure, type ProducingRole, type ProjectConfig, type ReasoningEffort, type RetryEntry, type RoleProfile, type Run, type RunEvent, type RunEventType, RunService, type RunStatus, type RunningEntry, SUPPORTED_ADAPTERS, type SchedulingConfig, type SessionMode, type SessionRotation, SkillLoader, type StartWorkflowInput, type Task, TaskNotFoundError, type TaskProof, TaskService, type TaskStatus, type TokenUsage, WORKFLOW_PHASE_TRANSITIONS, WORKFLOW_SCHEMA_VERSION, type WorkflowArtifactMetadataV1, type WorkflowArtifactMetadataV2, WorkflowArtifactStore, type WorkflowConfig, type WorkflowConfigOverrides, type WorkflowDecision, type WorkflowEffectReceiptV2, WorkflowEngine, type WorkflowEventV1, type WorkflowEventV2, type WorkflowGitPort, type WorkflowInvocationReceiptV1, type WorkflowInvocationReceiptV2, type WorkflowJobV1, type WorkflowJobV2, type WorkflowMode, type WorkflowPassportV1, type WorkflowPassportV2, type WorkflowPhase, type WorkflowRolePorts, type WorkflowSessionsV1, type WorkflowSessionsV2, WorkspaceError, type WorkspaceMode, buildContainer, buildFullContainer, buildLightContainer, canTransition, canTransitionWorkflow, classifyAdapterError, createTokenUsage, defaultModelForAdapter, detectClipboardType, getClipboardImage, getShopTemplateByKey, hashCanonical, isAdapterKind, isBlocked, isClipboardToolAvailable, isDispatchable, isMcpSkill, isModelTier, isTerminal, isTerminalWorkflowPhase, resolveFailureStatus, resolveModel, templateToAgentInput, transitionWorkflow, validateCheckResults, validateCodexDecision, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateOpusResult };
+export { AGENT_SHOP_TEMPLATES, type AdapterErrorHint, AdapterErrorKind, type AdapterKind, type Agent, type AgentConfig, type AgentLastError, AgentNotFoundError, type AgentShopTemplate, type AgentStats, type AgentStatus, type AgentUsage, type ApprovalPolicy, type ArtifactReference, type BindingRotation, type CheckResults, type ClipboardContentType, type ClipboardImage, type CodexAction, type CodexDecisionStage, type CodexDecisionV2, type ConsultationOrigin, type ConsultationStatus, type CreateAgentInput, type CreateGoalInput, type CreateTaskInput, ERROR_HINTS, type EventPayload, type FableAdviceV1, type FableFallbackReason, type FableFallbackRecordV1, type FableFallbackV1, type FablePurpose, type FableQueryV1, type FailurePhase, type Goal, GoalHasPendingTasksError, type GoalOrchestrationPhase, type GoalOrchestrationState, type GoalStatus, type GoalTaskRole, type HumanApprovalV1, type ISkillLoader, MODEL_TIER_MAP, type ModelTier, NotInitializedError, type OpusResult, type OrchestratorConfig, type OrchestratorEvent, type OrchestratorEventType, type OrchestratorState, OrchestryError, type PersistedFailure, type ProducingRole, type ProjectConfig, ROLE_PERMISSIONS, type ReasoningEffort, type RetryEntry, type RolePermissions, type RoleProfile, type RosterAgent, type RosterInput, type RosterProfileSnapshot, type Run, type RunEvent, type RunEventType, type RunStatus, type RunningEntry, SEMANTIC_ROLES, SUPPORTED_ADAPTERS, type SameAsSupervisor, type SchedulingConfig, type SemanticRole, type SessionMode, type SessionRotation, SkillLoader, type Task, TaskNotFoundError, type TaskProof, type TaskStatus, type TokenUsage, type ValidatedWorkflowPassportV2, WORKFLOW_PHASE_TRANSITIONS, WORKFLOW_SCHEMA_VERSION, type WorkflowArtifactMetadataV1, type WorkflowArtifactMetadataV2, type WorkflowConfig, type WorkflowConfigOverrides, type WorkflowDecision, type WorkflowEffectReceiptV2, type WorkflowEventV1, type WorkflowEventV2, type WorkflowInvocationReceiptV1, type WorkflowInvocationReceiptV2, type WorkflowJobV1, type WorkflowJobV2, type WorkflowLlmAttemptV1, type WorkflowMode, type WorkflowPassportV1, type WorkflowPassportV2, type WorkflowPhase, type WorkflowRosterSnapshot, type WorkflowSessionsV1, type WorkflowSessionsV2, WorkspaceError, type WorkspaceMode, canTransition, canTransitionWorkflow, classifyAdapterError, createRosterSnapshot, createTokenUsage, defaultModelForAdapter, detectClipboardType, discoverDeterministicChecks, getClipboardImage, getShopTemplateByKey, hashRosterAgent, hashRosterSnapshot, isAdapterKind, isBlocked, isClipboardToolAvailable, isDispatchable, isMcpSkill, isModelTier, isTerminal, isTerminalWorkflowPhase, legacyRosterSnapshot, resolveFailureStatus, resolveModel, templateToAgentInput, transitionWorkflow, validateCheckResults, validateCodexDecision, validateDeterministicCheckCommands, validateExplicitChecks, validateFableAdvice, validateFableFallbackRecord, validateFableQuery, validateHumanApproval, validateOpusResult, validateRosterAgent, validateRosterSnapshot };
